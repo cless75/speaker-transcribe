@@ -364,6 +364,10 @@
       <pre><code><span class="c">:: PYTHONUTF8 — корректный вывод кириллицы (иначе UnicodeEncodeError на cp1251)</span>
 <span class="k">set</span> PYTHONUTF8=1
 <span class="s">C:\work\venvs\asr</span>\Scripts\python src\media_transcribe_cli.py --input <span class="s">C:\work\test.m4a</span> --output-dir <span class="s">C:\work\output</span> --model <span class="s">medium</span> --speaker-mode <span class="s">off</span></code></pre>
+      <div class="warn"><b>Первый запуск качает модель.</b> faster-whisper при первом прогоне скачает выбранную
+        модель в кэш (<code>medium</code> ≈ 1.5 ГБ, <code>large-v3</code> ≈ 3 ГБ) — это разовая загрузка, может
+        занять несколько минут. Дальнейшие запуски стартуют сразу. Аналогично pyannote качает модели
+        диаризации при первом <code>--speaker-mode on</code>.</div>
       <div class="check"><b>Успех:</b> в <code>C:\work\output</code> появился <code>*-transcript.md</code> с текстом —
         движок работает на GPU.</div>
       <div class="note"><b>Ложный сбой:</b> прогон может рапортовать <code>exit 9</code> (teardown CUDA) при
