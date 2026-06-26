@@ -162,6 +162,19 @@
     <section id="s1">
       <h2><span class="n">1</span>Получить код</h2>
       <p class="step-meta">~2 мин · клонирование репозитория</p>
+      <h3>1.1 · Установить Git (если не установлен)</h3>
+      <pre><code><span class="c">:: проверить наличие</span>
+<span class="k">git</span> --version
+<span class="c">:: если «не является командой» — поставить через winget:</span>
+<span class="k">winget</span> install --id <span class="s">Git.Git</span> -e</code></pre>
+      <div class="warn">После установки Git откройте <b>новое</b> окно терминала — PATH обновляется только
+        для вновь запущенных процессов. То же правило позже для Python, cuDNN, ffmpeg.</div>
+      <div class="note"><b>Git pager включён по умолчанию:</b> <code>git log</code> / <code>git diff</code>
+        открывают постраничный просмотр (выход — клавиша <code>q</code>). Для скриптов и неинтерактивных
+        сессий отключите его: <code>git config --global core.pager cat</code> (или разово
+        <code>git --no-pager &lt;команда&gt;</code>).</div>
+
+      <h3>1.2 · Клонировать репозиторий</h3>
       <pre><code><span class="k">git</span> clone <span class="s">https://github.com/cless75/speaker-transcribe</span> C:\work\speaker-transcribe
 <span class="k">cd</span> C:\work\speaker-transcribe</code></pre>
       <p>Репозиторий самодостаточен по коду — пути под машину задаются в конфиге (шаг 5), Python-файлы
