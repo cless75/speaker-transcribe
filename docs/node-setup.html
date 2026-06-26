@@ -296,49 +296,51 @@
     </section>
 
     <section id="use">
-      <h2><span class="n">7</span>Два режима использования</h2>
-      <p class="step-meta">логика ASR общая — различается оркестрация</p>
-      <p>Узел используется двумя способами: через AI-агента или напрямую из командной строки.
-        Выбирайте по задаче — интерактив с пост-обработкой против автоматизации.</p>
+      <h2><span class="n">7</span>Три режима использования</h2>
+      <p class="step-meta">логика ASR общая — различается оркестрация и источник файлов</p>
+      <p>Движок используется тремя способами — спектр <b>от оркестрации к простоте</b>: через
+        AI-агента, напрямую из командной строки или просто складывая файлы в локальную папку.
+        Выбирайте по задаче.</p>
 
       <h3>A · Из агента (Claude Code / Cursor)</h3>
-      <p>Локальный MCP-сервер <code>media-transcription-mcp</code> даёт агенту инструменты транскрибации
-        с preflight-проверкой среды. Агент следует навыкам и оркеструет полный пайплайн
-        (входящие → ASR → Hub → карточки сессий / инсайты).</p>
-      <pre><code><span class="c"># запуск MCP-сервера (canonical entry: scripts/media-transcription-mcp.mjs)</span>
-<span class="k">cd</span> media-transcription-mcp
-<span class="k">npm</span> start
-<span class="c"># env для воркера (пути под вашу машину):</span>
-<span class="k">set</span> TRANSCRIPTION_PYTHON=<span class="s">C:\work\venvs\asr\Scripts\python.exe</span>
-<span class="k">set</span> TRANSCRIPTION_MODEL_ROOT=<span class="s">C:\work\models</span>
-<span class="k">set</span> FFMPEG_BIN=<span class="s">ffmpeg</span></code></pre>
-      <ul>
-        <li>Подключить сервер в MCP-конфиге агента (Cursor / Claude Code) — после этого инструменты
-          транскрибации доступны в диалоге.</li>
-        <li>Навыки: <code>media-transcription</code> (preflight + ASR), <code>process-audio-inbox</code>
-          (полный пайплайн входящих). Команда агенту, например: «обработай свежие транскрипты».</li>
-      </ul>
-      <div class="note">Подходит для <b>интерактивной</b> работы и пост-обработки: инсайты, карточки сессий,
-        маршрутизация по проектам.</div>
+      <p>MCP-сервер даёт агенту инструменты транскрибации с preflight-проверкой среды; агент
+        оркеструет полный пайплайн (входящие → ASR → хаб → карточки сессий / инсайты) и навыки
+        вроде «обработай свежие записи».</p>
+      <div class="note">Слой агента (MCP) и кластерный watcher — в дорожной карте репозитория
+        (см. README → Status). Ядро движка ниже (режимы B и C) уже доступно.</div>
 
-      <h3>B · Из командной строки (CLI)</h3>
-      <p>Прямой запуск без агента — для автоматизации, планировщика задач и headless-серверов.</p>
-      <pre><code><span class="c"># 1) Фоновая обработка очереди источников (claim → ASR → Hub)</span>
-<span class="k">python</span> scripts\audio_inbox_watch.py --once --config <span class="s">config\node.local.json</span>
-
-<span class="c"># 2) Прямой ASR одного файла</span>
-<span class="k">python</span> scripts\media_transcribe_cli.py --input <span class="s">&lt;media&gt;</span> --output-dir <span class="s">&lt;dir&gt;</span> \
+      <h3>B · Из командной строки — один файл</h3>
+      <p>Прямой ASR одного файла; для скриптов и разовых прогонов.</p>
+      <pre><code><span class="c"># прямой ASR одного файла</span>
+<span class="k">python</span> src\media_transcribe_cli.py --input <span class="s">&lt;media&gt;</span> --output-dir <span class="s">&lt;dir&gt;</span> \
   --model <span class="s">medium</span> --speaker-mode <span class="s">on</span> --timestamps <span class="s">both</span>
 
-<span class="c"># 3) PowerShell-обёртка (явные параметры прогона)</span>
+<span class="c"># PowerShell-обёртка с явными параметрами прогона</span>
 <span class="k">pwsh</span> scripts\run-media-transcribe-direct.ps1 -InputPath <span class="s">&lt;media&gt;</span> `
   -RuntimeDevice <span class="s">cuda</span> -Model <span class="s">medium</span> -SpeakerMode <span class="s">on</span> -ChunkMinutes <span class="s">20</span></code></pre>
-      <ul>
-        <li><b>watcher</b> — для постоянного узла кластера (можно по расписанию / в автозапуске).</li>
-        <li><b>media_transcribe_cli</b> / <b>ps1-обёртка</b> — для разовых прогонов и скриптов.</li>
-      </ul>
-      <div class="warn">Для CLI-вывода с кириллицей задавайте <code>PYTHONUTF8=1</code> (см. шаг 6).
-        ASR в обоих режимах остаётся CUDA-only (fail-fast без GPU).</div>
+
+      <h3>C · Локальная папка — ручной drop + пакетная обработка</h3>
+      <p>Самый простой режим: складываете медиафайлы в локальную папку и запускаете пакетную
+        обработку — транскрипты появляются в выходной папке. <b>Без хаба, без мультиузла, без агента.</b>
+        Этот режим тоже конфигурируется — но локально: задаёте свои <i>входную</i> и <i>выходную</i> папки.</p>
+      <p><b>Конфигурация (локальный срез контракта «источник → приёмник»):</b></p>
+      <pre><code>{
+  <span class="k">"sources"</span>: [ { <span class="k">"root"</span>: <span class="s">"C:/work/inbox"</span>, <span class="k">"route"</span>: <span class="s">"folder"</span>, <span class="k">"claim"</span>: false } ],
+  <span class="k">"outputs"</span>: { <span class="k">"transcript_dir"</span>: <span class="s">"C:/work/output/{name}"</span> },
+  <span class="k">"voiceprint_mode"</span>: <span class="s">"off"</span>
+  <span class="c">// никаких hub_root / enable_multi_machine — всё локально</span>
+}</code></pre>
+      <p><b>Запуск (пакетно по всей папке):</b></p>
+      <pre><code><span class="c"># обработать все медиа во входной папке (PowerShell)</span>
+<span class="k">Get-ChildItem</span> C:\work\inbox -Include <span class="s">*.m4a,*.mp4,*.wav</span> -Recurse -File | <span class="k">ForEach-Object</span> {
+  python src\media_transcribe_cli.py --input <span class="s">$_.FullName</span> --output-dir <span class="s">C:\work\output</span> `
+    --model <span class="s">medium</span> --speaker-mode <span class="s">on</span>
+}</code></pre>
+      <div class="note">Подходит для разовой пакетной обработки своих записей <b>без инфраструктуры</b>:
+        бросил файлы в папку → получил транскрипты. Папки — это и есть «конфигурация» локального режима.</div>
+
+      <div class="warn">Во всех режимах: <code>PYTHONUTF8=1</code> для кириллицы в выводе;
+        ASR — CUDA-only (fail-fast без GPU).</div>
     </section>
 
     <section id="multi">
