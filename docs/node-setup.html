@@ -52,10 +52,15 @@
   li{margin:6px 0}
   code{background:#efe9d8; color:#7a3b16; padding:1.5px 6px; border-radius:5px; font-size:13.5px;
     font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace}
-  pre{background:var(--code-bg); color:var(--code-ink); padding:16px 18px; border-radius:10px; overflow-x:auto;
+  pre{position:relative; background:var(--code-bg); color:var(--code-ink); padding:16px 44px 16px 18px; border-radius:10px; overflow-x:auto;
     font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:13px; line-height:1.55;
     border:1px solid #0e151f; box-shadow:0 1px 0 rgba(0,0,0,.04)}
   pre code{background:none; color:inherit; padding:0; font-size:13px}
+  .copy-btn{position:absolute; top:8px; right:8px; padding:3px 9px; font-size:11px; cursor:pointer;
+    color:#cdd6e6; background:#2a3856; border:1px solid #3c4d72; border-radius:6px; opacity:.55; transition:opacity .15s;
+    font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+  pre:hover .copy-btn{opacity:1}
+  .copy-btn.ok{color:#8fd6c2; border-color:#2a9d8f}
   pre .c{color:#7f8ea8}            /* comment */
   pre .k{color:#e8b85f}            /* keyword/cmd */
   pre .s{color:#8fd6c2}            /* string/value */
@@ -229,13 +234,24 @@
 <span class="c"># либо целиком из лок-файла (кроме torch — он из индекса cu128 выше):</span>
 <span class="c"># pip install -r requirements.lock.txt</span></code></pre>
 
-      <h3>3.4 · cuDNN 9 и ffmpeg (частые затыки)</h3>
-      <ul>
-        <li><b>cuDNN 9</b> для CUDA 12: <code>faster-whisper</code>/CTranslate2 на GPU требует cuDNN-DLL в
-          <code>PATH</code> (иначе «Could not load cudnn…»). Вариант: pip-пакет <code>nvidia-cudnn-cu12</code>
-          в том же venv, либо системный cuDNN 9.x с добавлением <code>bin</code> в <code>PATH</code>.</li>
-        <li><b>ffmpeg</b> обязателен для извлечения аудио из видео — установить и добавить в <code>PATH</code>.</li>
-      </ul>
+      <h3>3.4 · cuDNN 9 (для GPU)</h3>
+      <p><code>faster-whisper</code>/CTranslate2 на GPU требует cuDNN-DLL в <code>PATH</code>
+        (иначе «Could not load cudnn…»). В активированном venv:</p>
+      <pre><code><span class="c">:: pip-пакет (проще всего — кладёт cuDNN в venv)</span>
+<span class="k">pip</span> install <span class="s">nvidia-cudnn-cu12</span>
+<span class="c">:: либо системный cuDNN 9.x и добавить его bin в PATH</span></code></pre>
+
+      <h3>3.5 · ffmpeg (извлечение аудио из видео)</h3>
+      <p>Обязателен для обработки видео и многих аудиоформатов. Установка на Windows:</p>
+      <pre><code><span class="c">:: через winget (явный id — просто "ffmpeg" может не найтись)</span>
+<span class="k">winget</span> install --id <span class="s">Gyan.FFmpeg</span> -e
+<span class="c">:: после установки откройте НОВОЕ окно терминала (PATH), затем проверьте:</span>
+<span class="k">ffmpeg</span> -version</code></pre>
+      <div class="note"><b>Альтернативы:</b> <code>choco install ffmpeg</code> или <code>scoop install ffmpeg</code>;
+        либо вручную — скачать build с <code>ffmpeg.org</code> / <code>gyan.dev</code>, распаковать и добавить
+        папку <code>bin</code> в <code>PATH</code>. Готово, если <code>ffmpeg -version</code> печатает версию.
+        <br>На <b>macOS</b> — <code>brew install ffmpeg</code> (см. секцию macOS).</div>
+
       <div class="check"><b>Гейт окружения:</b></div>
       <pre><code><span class="s">C:\work\venvs\asr</span>\Scripts\python -c <span class="s">"import torch; print(torch.cuda.is_available())"</span>
 <span class="c"># ожидается: True</span></code></pre>
@@ -479,6 +495,31 @@
     }
     window.addEventListener('scroll', onScroll, {passive:true});
     onScroll();
+  })();
+
+  // copy-to-clipboard: кнопка на каждом блоке кода (чистый текст, с fallback для file://)
+  (function(){
+    function copyText(text){
+      if(navigator.clipboard && window.isSecureContext){ return navigator.clipboard.writeText(text); }
+      var ta=document.createElement('textarea'); ta.value=text;
+      ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      try{ document.execCommand('copy'); }catch(e){}
+      document.body.removeChild(ta); return Promise.resolve();
+    }
+    document.querySelectorAll('pre').forEach(function(pre){
+      var btn=document.createElement('button');
+      btn.className='copy-btn'; btn.type='button'; btn.textContent='Копировать';
+      btn.addEventListener('click', function(){
+        var code=pre.querySelector('code');
+        var text=(code?code.innerText:pre.innerText).replace(/\s+$/,'');
+        copyText(text).then(function(){
+          btn.textContent='Скопировано ✓'; btn.classList.add('ok');
+          setTimeout(function(){ btn.textContent='Копировать'; btn.classList.remove('ok'); }, 1500);
+        });
+      });
+      pre.appendChild(btn);
+    });
   })();
 </script>
 </body>
