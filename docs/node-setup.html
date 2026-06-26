@@ -312,33 +312,19 @@
 
     <section id="s4">
       <h2><span class="n">4</span>Токены</h2>
-      <p class="step-meta">для чистого ASR + диаризации достаточно одного — HF_TOKEN</p>
-      <table>
-        <tr><th>Токен</th><th>Зачем</th><th>Обязателен</th></tr>
-        <tr><td>HF_TOKEN (Hugging Face)</td><td>gated-модели pyannote (диаризация)</td><td><b>Да</b></td></tr>
-        <tr><td>Google OAuth</td><td>экспорт/импорт Google Docs</td><td>Нет (для ASR не нужен)</td></tr>
-      </table>
-
-      <h3>4.1 · HF_TOKEN — получение</h3>
-      <ol>
-        <li>Войти на <code>huggingface.co</code>.</li>
-        <li>Принять условия gated-моделей под тем же аккаунтом (в браузере, кнопка «Agree»):
-          <ul>
-            <li><code>huggingface.co/pyannote/segmentation-3.0</code></li>
-            <li><code>huggingface.co/pyannote/speaker-diarization-3.1</code></li>
-          </ul></li>
-        <li>Settings → Access Tokens → New token, тип <b>Read</b>, скопировать <code>hf_...</code></li>
-      </ol>
-
-      <h3>4.2 · HF_TOKEN — хранение (код читает HF_TOKEN / HUGGINGFACE_TOKEN)</h3>
-      <pre><code><span class="c"># Способ A — CLI-логин (рекомендуется): пишет в %USERPROFILE%\.cache\huggingface\token</span>
-<span class="k">huggingface-cli</span> login
-
-<span class="c"># Способ B — переменная окружения</span>
-<span class="k">setx</span> HF_TOKEN <span class="s">"hf_&lt;ВАШ_ТОКЕН&gt;"</span></code></pre>
-      <div class="note">Токен привязан к аккаунту, не к машине — на новом узле просто повторите логин.</div>
-      <div class="danger"><b>Никогда</b> не коммитьте токен в репозиторий и не кладите в Hub. В репозитории —
-        только <code>*.example</code> с пустыми плейсхолдерами.</div>
+      <p class="step-meta">для диаризации нужен HF_TOKEN; для чистого ASR — не нужен</p>
+      <p>Распознавание спикеров (диаризация) использует закрытые модели pyannote и требует токена
+        Hugging Face. <b>Подробная пошаговая инструкция получения — на отдельной странице:</b>
+        <a class="inl" href="hf-token.html">→ Получение токена Hugging Face</a>.</p>
+      <p>Кратко — задайте токен в переменной окружения (код читает <code>HF_TOKEN</code>):</p>
+      <pre><code><span class="c">:: PowerShell — на текущую сессию:</span>
+<span class="k">$env:HF_TOKEN</span> = <span class="s">"hf_ВАШ_ТОКЕН"</span>
+<span class="c">:: постоянно (новые окна):</span>
+<span class="k">setx</span> HF_TOKEN <span class="s">"hf_ВАШ_ТОКЕН"</span></code></pre>
+      <div class="note">Env-переменная <b>надёжнее CLI-логина</b>: не зависит от наличия
+        <code>huggingface-cli</code> и переживает пересоздание venv. Для чистого теста ASR
+        (<code>--speaker-mode off</code>) токен не нужен вовсе.</div>
+      <div class="danger"><b>Никогда</b> не коммитьте токен в репозиторий и не кладите в публичные папки/Hub.</div>
     </section>
 
     <section id="s5">
@@ -372,24 +358,19 @@
 
     <section id="s6">
       <h2><span class="n">6</span>Первый запуск</h2>
-      <p class="step-meta">smoke-тесты → пробный прогон</p>
-
-      <h3>6.1 · Smoke-тесты</h3>
-      <div class="warn"><b>Важно:</b> задайте <code>PYTHONUTF8=1</code> перед запуском — иначе вывод кириллицы/
-        символов падает с <code>UnicodeEncodeError</code> на системной кодировке Windows (cp1251).</div>
-      <pre><code><span class="k">set</span> PYTHONUTF8=1
-<span class="s">C:\work\venvs\asr</span>\Scripts\python scripts\smoke_intake_tiering_a1.py
-<span class="s">C:\work\venvs\asr</span>\Scripts\python scripts\smoke_promote_archive_a1.py</code></pre>
-      <div class="check"><b>Ожидается:</b> оба теста — все PASS (например <code>19 pass / 0 fail</code> и
-        <code>15 pass / 0 fail</code>).</div>
-
-      <h3>6.2 · Пробный прогон узла</h3>
-      <pre><code><span class="s">C:\work\venvs\asr</span>\Scripts\python scripts\audio_inbox_watch.py --once --config <span class="s">config\node.local.json</span></code></pre>
-      <div class="check"><b>Успех:</b> файл заклеймлен, ASR прошёл на GPU, транскрипт и
-        <code>state.json</code> появились в Hub с вашим <code>host_label</code>.</div>
+      <p class="step-meta">реальная транскрибация одного файла на GPU</p>
+      <p>Положите короткий тестовый файл (<code>.m4a</code>/<code>.mp4</code>) и прогоните чистый ASR —
+        <b>без диаризации, токен не нужен:</b></p>
+      <pre><code><span class="c">:: PYTHONUTF8 — корректный вывод кириллицы (иначе UnicodeEncodeError на cp1251)</span>
+<span class="k">set</span> PYTHONUTF8=1
+<span class="s">C:\work\venvs\asr</span>\Scripts\python src\media_transcribe_cli.py --input <span class="s">C:\work\test.m4a</span> --output-dir <span class="s">C:\work\output</span> --model <span class="s">medium</span> --speaker-mode <span class="s">off</span></code></pre>
+      <div class="check"><b>Успех:</b> в <code>C:\work\output</code> появился <code>*-transcript.md</code> с текстом —
+        движок работает на GPU.</div>
       <div class="note"><b>Ложный сбой:</b> прогон может рапортовать <code>exit 9</code> (teardown CUDA) при
-        фактическом успехе. Судите по наличию <code>transcript.md</code> и <code>phase=stdout_json ok</code>,
-        а не по коду возврата.</div>
+        фактическом успехе — судите по наличию <code>transcript.md</code>, а не по коду возврата.</div>
+      <div class="note">С распознаванием спикеров — добавьте <code>--speaker-mode on</code> (нужен
+        <a class="inl" href="hf-token.html">HF-токен</a>). Удобнее — обёртка <code>transcribe.ps1</code>
+        (см. <a class="inl" href="#quick">Быстрый запуск</a>).</div>
     </section>
 
     <section id="flow">

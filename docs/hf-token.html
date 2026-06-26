@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Получение токена Hugging Face · speaker-transcribe</title>
+<style>
+  :root{--navy:#1a2238;--navy-2:#2d3a5f;--gold:#c9a227;--teal:#2a9d8f;--cream:#f7f4ec;--paper:#fffdf8;--ink:#20242c;--muted:#5b6472;--line:#e4ddca;--code-bg:#1c2533;--code-ink:#e8eef7}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--ink);font:16px/1.65 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  .wrap{max-width:760px;margin:0 auto;padding:46px 28px 80px}
+  a.back{display:inline-block;color:#1d6b5f;text-decoration:none;font-size:13.5px;margin-bottom:18px;border-bottom:1px solid #a9d6cb}
+  h1{font-size:28px;color:var(--navy);margin:0 0 8px}
+  h1 b{color:var(--gold)}
+  .lead{color:var(--muted);max-width:60ch}
+  h2{font-size:20px;color:var(--navy);margin:30px 0 10px;border-bottom:2px solid var(--line);padding-bottom:6px}
+  h2 .n{display:inline-grid;place-items:center;width:28px;height:28px;background:var(--navy);color:#fff;border-radius:7px;font-size:13px;margin-right:10px;vertical-align:2px}
+  p{margin:10px 0;max-width:68ch}ul,ol{max-width:68ch;padding-left:22px}li{margin:6px 0}
+  code{background:#efe9d8;color:#7a3b16;padding:1.5px 6px;border-radius:5px;font-size:13.5px;font-family:Consolas,Menlo,monospace}
+  pre{position:relative;background:var(--code-bg);color:var(--code-ink);padding:14px 44px 14px 16px;border-radius:10px;overflow-x:auto;font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.55;border:1px solid #0e151f}
+  pre .c{color:#7f8ea8;user-select:none;-webkit-user-select:none}
+  pre .k{color:#e8b85f}pre .s{color:#8fd6c2}
+  .copy-btn{position:absolute;top:8px;right:8px;padding:3px 9px;font-size:11px;cursor:pointer;color:#cdd6e6;background:#2a3856;border:1px solid #3c4d72;border-radius:6px;opacity:.55;font-family:Segoe UI,sans-serif}
+  pre:hover .copy-btn{opacity:1}.copy-btn.ok{color:#8fd6c2;border-color:#2a9d8f}
+  .box{border-radius:10px;padding:12px 16px 12px 44px;margin:16px 0;position:relative;font-size:14.5px;border:1px solid}
+  .box::before{position:absolute;left:13px;top:11px;font-size:16px}
+  .note{background:#eafaf6;border-color:#bfe9df}.note::before{content:"💡"}
+  .warn{background:#fdf4e3;border-color:#f0dcae}.warn::before{content:"⚠️"}
+  .priv{background:var(--navy);color:#e7edf7;border-color:var(--navy-2)}.priv::before{content:"🔒"}.priv b{color:var(--gold)}
+  a.ext{color:#1d6b5f}
+  footer{margin-top:40px;padding-top:18px;border-top:2px solid var(--line);color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="node-setup.html">← Назад к установке (node-setup)</a>
+  <h1>Получение токена <b>Hugging Face</b></h1>
+  <p class="lead">Токен нужен для <b>диаризации</b> (распознавания спикеров) — модели pyannote закрыты
+    (gated) и требуют авторизации. Для чистого ASR без диаризации (<code>--speaker-mode off</code>)
+    токен не нужен.</p>
+
+  <h2><span class="n">1</span>Аккаунт</h2>
+  <p>Зарегистрируйтесь или войдите на <a class="ext" href="https://huggingface.co" target="_blank">huggingface.co</a>.</p>
+
+  <h2><span class="n">2</span>Принять условия gated-моделей</h2>
+  <p>Под тем же аккаунтом откройте обе страницы и нажмите <b>«Agree and access repository»</b>:</p>
+  <ul>
+    <li><a class="ext" href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank">pyannote/segmentation-3.0</a></li>
+    <li><a class="ext" href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">pyannote/speaker-diarization-3.1</a></li>
+  </ul>
+  <div class="warn">Без принятия условий токен не даст доступа к моделям — диаризация упадёт с ошибкой 403.</div>
+
+  <h2><span class="n">3</span>Создать токен</h2>
+  <ol>
+    <li>Settings → <b>Access Tokens</b> → <b>New token</b>.</li>
+    <li>Тип — <b>Read</b>. Имя — любое (напр. <code>speaker-transcribe</code>).</li>
+    <li>Скопируйте значение <code>hf_...</code> (показывается один раз).</li>
+  </ol>
+
+  <h2><span class="n">4</span>Задать токен на машине</h2>
+  <p>Движок читает токен из переменной окружения <code>HF_TOKEN</code> — это надёжнее, чем CLI-логин
+    (не зависит от наличия <code>huggingface-cli</code>, переживает пересоздание venv).</p>
+  <p><b>Windows · на текущую сессию PowerShell (сразу работает):</b></p>
+  <pre><code><span class="k">$env:HF_TOKEN</span> = <span class="s">"hf_ВАШ_ТОКЕН"</span></code></pre>
+  <p><b>Windows · постоянно (для новых окон):</b></p>
+  <pre><code><span class="k">setx</span> HF_TOKEN <span class="s">"hf_ВАШ_ТОКЕН"</span>
+<span class="c"># затем откройте НОВОЕ окно терминала — переменная появится только в новых процессах</span></code></pre>
+  <p><b>macOS / Linux:</b></p>
+  <pre><code><span class="k">export</span> HF_TOKEN=<span class="s">"hf_ВАШ_ТОКЕН"</span>
+<span class="c"># чтобы сохранить — добавьте строку в ~/.zshrc или ~/.bashrc</span></code></pre>
+  <div class="note">Альтернатива — CLI-логин (пишет токен в <code>~/.cache/huggingface/token</code>):
+    <code>...\venvs\asr\Scripts\python -m huggingface_hub.commands.huggingface_cli login</code>.
+    Код проверяет env-переменную в первую очередь, поэтому способ выше проще.</div>
+
+  <h2><span class="n">5</span>Проверка</h2>
+  <p>После установки токена запустите транскрибацию с диаризацией (<code>--speaker-mode on</code>) —
+    она скачает модели pyannote и не упадёт на 403.</p>
+
+  <div class="priv"><b>Безопасность:</b> токен — это секрет. Никогда не коммитьте его в git и не кладите в
+    публичные папки/облако. Храните в переменной окружения или приватном менеджере секретов.</div>
+
+  <footer>Часть документации <b>speaker-transcribe</b> · <a class="ext" href="node-setup.html">← установка</a></footer>
+</div>
+<script>
+  (function(){
+    function copyText(t){ if(navigator.clipboard&&window.isSecureContext){return navigator.clipboard.writeText(t);}
+      var a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(a);return Promise.resolve();}
+    document.querySelectorAll('pre').forEach(function(pre){
+      var b=document.createElement('button');b.className='copy-btn';b.type='button';b.textContent='Копировать';
+      b.addEventListener('click',function(){
+        var code=pre.querySelector('code');var raw=(code?code.innerText:pre.innerText);
+        var lines=raw.split('\n').map(function(l){return l.replace(/\s+$/,'');}).filter(function(l){var t=l.trim();return t!==''&&t.indexOf('#')!==0&&t.indexOf('::')!==0;});
+        copyText(lines.join('\n')).then(function(){b.textContent='Скопировано ✓';b.classList.add('ok');setTimeout(function(){b.textContent='Копировать';b.classList.remove('ok');},1500);});
+      });
+      pre.appendChild(b);
+    });
+  })();
+</script>
+</body>
+</html>
