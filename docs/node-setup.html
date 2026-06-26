@@ -64,6 +64,12 @@
   pre .c{color:#7f8ea8; user-select:none; -webkit-user-select:none}  /* comment — not selectable, excluded from manual copy */
   pre .k{color:#e8b85f}            /* keyword/cmd */
   pre .s{color:#8fd6c2}            /* string/value */
+  .flow{margin:18px 0; max-width:640px}
+  .fl{position:relative; background:var(--paper); border:1px solid var(--line); border-left:3px solid var(--teal);
+    border-radius:8px; padding:9px 14px; margin:0 0 26px; font-size:14px}
+  .fl:not(:last-child)::after{content:"↓"; position:absolute; left:17px; bottom:-23px; color:var(--gold); font-size:17px}
+  .fl.out{border-left-color:var(--gold)}
+  .fl b{color:var(--navy)}
   .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
   table{border-collapse:collapse; width:100%; margin:14px 0; font-size:14px; background:var(--paper);
     border:1px solid var(--line); border-radius:10px; overflow:hidden}
@@ -106,16 +112,19 @@
       <a href="#about">О документе</a>
       <a href="#req">Требования</a>
       <a href="#agent">Через AI-агента</a>
-      <div class="grp">Установка (вручную)</div>
+      <div class="grp">Установка</div>
       <a href="#s1">1 · Код</a>
       <a href="#s2">2 · GPU и драйвер</a>
       <a href="#s3">3 · Python-окружение</a>
       <a href="#s4">4 · Токены</a>
       <a href="#s5">5 · Конфигурация</a>
-      <a href="#s6">6 · Проверка и запуск</a>
-      <a href="#use">7 · Использование</a>
-      <div class="grp">Дополнительно</div>
+      <a href="#s6">6 · Первый запуск</a>
+      <div class="grp">Использование</div>
+      <a href="#flow">Схема работы</a>
+      <a href="#use">Режимы запуска</a>
+      <a href="#quick">Быстрый запуск (.ps1)</a>
       <a href="#multi">Мультиузел</a>
+      <div class="grp">Справка</div>
       <a href="#trouble">Troubleshooting</a>
       <a href="#privacy">Приватность</a>
       <a href="#macos">macOS (Apple Silicon)</a>
@@ -362,7 +371,7 @@
     </section>
 
     <section id="s6">
-      <h2><span class="n">6</span>Проверка и запуск</h2>
+      <h2><span class="n">6</span>Первый запуск</h2>
       <p class="step-meta">smoke-тесты → пробный прогон</p>
 
       <h3>6.1 · Smoke-тесты</h3>
@@ -383,8 +392,22 @@
         а не по коду возврата.</div>
     </section>
 
+    <section id="flow">
+      <h2><span class="n">⛓</span>Схема работы</h2>
+      <p>Что движок делает с файлом — от входа до транскрипта:</p>
+      <div class="flow">
+        <div class="fl"><b>Вход</b> — медиафайл, локальная папка или Hub-источник</div>
+        <div class="fl"><b>ffmpeg</b> — извлечение аудиодорожки из аудио/видео</div>
+        <div class="fl"><b>Чанкинг</b> — длинное аудио → куски с перекрытием</div>
+        <div class="fl"><b>ASR</b> — faster-whisper на CUDA → текст с таймкодами</div>
+        <div class="fl"><b>Диаризация</b> — pyannote → кто и когда говорил</div>
+        <div class="fl"><b>Voiceprint</b> <i>(опц.)</i> — ECAPA-TDNN → идентификация известных голосов</div>
+        <div class="fl out"><b>Выход</b> — <code>*-transcript.md</code> + сегменты (<code>jsonl</code>/<code>vtt</code>) + <code>state.json</code> (для Hub)</div>
+      </div>
+    </section>
+
     <section id="use">
-      <h2><span class="n">7</span>Три режима использования</h2>
+      <h2><span class="n">▸</span>Режимы запуска</h2>
       <p class="step-meta">логика ASR общая — различается оркестрация и источник файлов</p>
       <p>Движок используется тремя способами — спектр <b>от оркестрации к простоте</b>: через
         AI-агента, напрямую из командной строки или просто складывая файлы в локальную папку.
@@ -429,6 +452,22 @@
 
       <div class="warn">Во всех режимах: <code>PYTHONUTF8=1</code> для кириллицы в выводе;
         ASR — CUDA-only (fail-fast без GPU).</div>
+    </section>
+
+    <section id="quick">
+      <h2><span class="n">▶</span>Быстрый запуск (.ps1)</h2>
+      <p>Для регулярной работы есть готовая обёртка <code>scripts/transcribe.ps1</code> с настройками по
+        умолчанию — не нужно держать в голове флаги CLI. Принимает файл <b>или папку</b> (тогда пакетно).</p>
+      <pre><code><span class="c"># один файл</span>
+.\scripts\transcribe.ps1 -InputPath <span class="s">C:\work\inbox\meeting.m4a</span>
+<span class="c"># целая папка (пакетно по всем медиа)</span>
+.\scripts\transcribe.ps1 -InputPath <span class="s">C:\work\inbox</span> -OutputDir <span class="s">C:\work\output</span>
+<span class="c"># с параметрами</span>
+.\scripts\transcribe.ps1 -InputPath <span class="s">C:\work\inbox\meeting.m4a</span> -Model <span class="s">medium</span> -SpeakerMode <span class="s">on</span></code></pre>
+      <div class="note">Скрипт сам берёт venv-python (без активации), выставляет <code>PYTHONUTF8=1</code>,
+        поддерживает файл и папку, переживает ложный <code>exit 9</code>. Параметры по умолчанию:
+        <code>-OutputDir C:\work\output</code>, <code>-Model medium</code>, <code>-SpeakerMode on</code>,
+        <code>-PythonBin C:\work\venvs\asr\Scripts\python.exe</code> — меняйте под себя.</div>
     </section>
 
     <section id="multi">
