@@ -112,6 +112,7 @@
       <a href="#multi">Мультиузел</a>
       <a href="#trouble">Troubleshooting</a>
       <a href="#privacy">Приватность</a>
+      <a href="#macos">macOS (Apple Silicon)</a>
     </nav>
   </aside>
 
@@ -198,10 +199,24 @@
       <h2><span class="n">3</span>Python-окружение</h2>
       <p class="step-meta">~15–25 мин · venv + зависимости + cuDNN + ffmpeg</p>
 
-      <h3>3.1 · Виртуальное окружение (Python 3.11)</h3>
-      <pre><code><span class="k">py</span> -3.11 -m venv <span class="s">C:\work\venvs\asr</span>
-<span class="s">C:\work\venvs\asr</span>\Scripts\python -m pip install -U pip wheel setuptools</code></pre>
-      <div class="note">Именно <b>3.11</b> — pyannote/torch стабильнее, чем на самых новых интерпретаторах.</div>
+      <h3>3.1 · Установить Python 3.11 (если нет) и создать venv</h3>
+      <pre><code><span class="c">:: проверить наличие 3.11 (системный может быть другой версии)</span>
+<span class="k">py</span> -3.11 --version
+<span class="c">:: если нет — поставить, затем открыть НОВОЕ окно терминала:</span>
+<span class="k">winget</span> install --id <span class="s">Python.Python.3.11</span> -e
+
+<span class="c">:: создать venv</span>
+<span class="k">py</span> -3.11 -m venv <span class="s">C:\work\venvs\asr</span>
+<span class="c">:: АКТИВИРОВАТЬ venv (PowerShell):</span>
+<span class="s">C:\work\venvs\asr\Scripts\Activate.ps1</span>
+<span class="c">::   в cmd.exe вместо этого: C:\work\venvs\asr\Scripts\activate.bat</span>
+<span class="c">:: после активации команды python и pip относятся к venv</span>
+<span class="k">python</span> -m pip install -U pip wheel setuptools</code></pre>
+      <div class="warn"><b>Если <code>pip</code> «не распознано»</b> — venv не активирован. Глобального pip в PATH
+        обычно нет; активируйте venv (команда выше) <i>или</i> вызывайте через полный путь:
+        <code>C:\work\venvs\asr\Scripts\python -m pip ...</code>. Все шаги ниже предполагают <b>активированный</b> venv.</div>
+      <div class="note">Именно <b>3.11</b> — у pyannote/torch есть готовые бинарные колёса под него; на самых
+        новых интерпретаторах pip может полезть собирать из исходников (медленно, часто падает на Windows).</div>
 
       <h3>3.2 · PyTorch под CUDA 12.8 (ставить отдельно от индекса PyTorch)</h3>
       <pre><code><span class="c"># сборки +cu128 не лежат на PyPI — нужен индекс PyTorch</span>
@@ -392,6 +407,51 @@
       </div>
       <p>Убедитесь, что <code>.gitignore</code> покрывает: <code>*.local.json</code>, voiceprint-дерево,
         секреты, медиа и транскрипты.</p>
+    </section>
+
+    <section id="macos">
+      <h2><span class="n">🍎</span>Вариант: macOS (Apple Silicon)</h2>
+      <p class="step-meta">M-series · CUDA отсутствует → ASR на CPU (int8)</p>
+      <p>На Mac (M1–M4) нет NVIDIA/CUDA, поэтому движок работает в <b>CPU-режиме</b>. Ниже — дельта от
+        Windows-инструкции; шаги по токенам (4) и идея конфигурации (5) те же.</p>
+
+      <div class="warn"><b>Главное отличие:</b> здесь нет CUDA/cuDNN/eGPU. Производительность ниже
+        (CPU int8 ≈ 2× реального времени). Ускорители whisper.cpp Metal / MLX — опционально, вне этой инструкции.</div>
+
+      <h3>1 · Инструменты и код</h3>
+      <pre><code><span class="c"># Homebrew (если нет) — см. brew.sh; затем:</span>
+<span class="k">brew</span> install <span class="s">python@3.11 ffmpeg git</span>
+<span class="k">git</span> clone <span class="s">https://github.com/cless75/speaker-transcribe</span> ~/work/speaker-transcribe
+<span class="k">cd</span> ~/work/speaker-transcribe</code></pre>
+
+      <h3>2 · venv + зависимости</h3>
+      <pre><code><span class="k">python3.11</span> -m venv ~/work/venvs/asr
+<span class="k">source</span> ~/work/venvs/asr/bin/activate     <span class="c"># активировать venv (далее pip/python — из venv)</span>
+<span class="k">pip</span> install -U pip wheel setuptools
+<span class="c"># torch для macOS — обычная сборка (без cu128; CTranslate2 на Mac работает на CPU)</span>
+<span class="k">pip</span> install <span class="s">torch torchaudio</span>
+<span class="k">pip</span> install -r <span class="s">requirements.txt</span></code></pre>
+      <div class="note">cuDNN и nvidia-cudnn-cu12 на macOS <b>не нужны</b> (это CUDA-стек). ffmpeg ставится через brew.</div>
+
+      <h3>3 · Токен</h3>
+      <pre><code><span class="k">huggingface-cli</span> login   <span class="c"># как на Windows (см. шаг 4)</span></code></pre>
+
+      <h3>4 · Конфигурация (CPU-профиль)</h3>
+      <pre><code>{
+  <span class="k">"runtime"</span>: { <span class="k">"device"</span>: <span class="s">"cpu"</span>, <span class="k">"compute_type"</span>: <span class="s">"int8"</span>, <span class="k">"diarization_device"</span>: <span class="s">"cpu"</span> },
+  <span class="k">"voiceprint_mode"</span>: <span class="s">"off"</span>
+}</code></pre>
+
+      <h3>5 · Запуск и проверка</h3>
+      <pre><code><span class="c"># прямой ASR одного файла (CPU int8)</span>
+<span class="k">python</span> src/media_transcribe_cli.py --input <span class="s">~/work/recordings/meeting.m4a</span> \
+  --output-dir <span class="s">~/work/output</span> --model <span class="s">medium</span> --speaker-mode <span class="s">on</span>
+
+<span class="c"># локальная папка (batch) — bash:</span>
+<span class="k">for</span> f <span class="k">in</span> ~/work/inbox/*.{m4a,mp4,wav}; <span class="k">do</span>
+  python src/media_transcribe_cli.py --input <span class="s">"$f"</span> --output-dir <span class="s">~/work/output</span> --model medium
+<span class="k">done</span></code></pre>
+      <div class="note">На macOS вывод по умолчанию UTF-8 — <code>PYTHONUTF8=1</code> не требуется (в отличие от Windows).</div>
     </section>
 
     <footer>
