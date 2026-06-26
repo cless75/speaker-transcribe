@@ -22,7 +22,8 @@ param(
   [string]$SpeakerMode = "on",                          # диаризация спикеров
   [ValidateSet("hms","vtt","both","none")]
   [string]$Timestamps  = "both",
-  [string]$PythonBin   = "C:\work\venvs\asr\Scripts\python.exe"  # venv python (не активируем)
+  [string]$PythonBin   = "C:\work\venvs\asr\Scripts\python.exe",  # venv python (не активируем)
+  [switch]$ListOnly                                              # только показать, что в Inbox, без запуска ASR
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,8 +48,10 @@ function Invoke-One([string]$file) {
 }
 
 if (Test-Path $InputPath -PathType Container) {
-  $files = Get-ChildItem $InputPath -Recurse -File -Include $exts
-  Write-Host "Папка: найдено $($files.Count) медиафайлов" -ForegroundColor Yellow
+  $files = Get-ChildItem $InputPath -Recurse -File -Include $exts | Sort-Object Length
+  Write-Host "Inbox: $InputPath — найдено $($files.Count) медиафайлов" -ForegroundColor Yellow
+  $files | ForEach-Object { "{0,7:N0} MB  {1}" -f ($_.Length/1MB), $_.FullName } | Write-Host
+  if ($ListOnly) { Write-Host "(-ListOnly: ASR не запускался)" -ForegroundColor DarkGray; return }
   foreach ($f in $files) { Invoke-One $f.FullName }
 }
 else {
