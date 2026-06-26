@@ -105,7 +105,8 @@
       <div class="grp">Старт</div>
       <a href="#about">О документе</a>
       <a href="#req">Требования</a>
-      <div class="grp">Установка</div>
+      <a href="#agent">Через AI-агента</a>
+      <div class="grp">Установка (вручную)</div>
       <a href="#s1">1 · Код</a>
       <a href="#s2">2 · GPU и драйвер</a>
       <a href="#s3">3 · Python-окружение</a>
@@ -163,6 +164,31 @@
       </table>
       <div class="warn"><b>ASR CUDA-only.</b> Узел сознательно падает с явной ошибкой, если CUDA недоступна
         (никакого тихого отката на CPU). Это защищает от медленной незаметной обработки.</div>
+    </section>
+
+    <section id="agent">
+      <h2><span class="n">⚡</span>Быстрый путь: установка через AI-агента</h2>
+      <p class="step-meta">если на машине уже есть Claude Code или Codex</p>
+      <p>Если у вас установлен <b>Claude Code</b> или <b>Codex</b> (либо другой агент с доступом к терминалу) —
+        не копируйте команды вручную. Делегируйте установку агенту: он сам адаптируется к вашему железу
+        (GPU, диски, пути), обработает типовые затыки (ExecutionPolicy, PATH, cuDNN) и доложит результат
+        каждого гейта. Дайте агенту такой промпт:</p>
+      <pre><code>Установи speaker-transcribe на эту машину (Windows, NVIDIA CUDA).
+
+1. Поставь Git (winget Git.Git) и Python 3.11 (winget Python.Python.3.11), если их нет.
+2. Склонируй https://github.com/cless75/speaker-transcribe в C:\work\speaker-transcribe
+3. Следуй docs/node-setup.html: venv в C:\work\venvs\asr; torch 2.11.0 + torchaudio 2.11.0
+   из индекса https://download.pytorch.org/whl/cu128; затем pip install -r requirements.txt;
+   nvidia-cudnn-cu12; ffmpeg (winget Gyan.FFmpeg).
+4. Вызывай venv python напрямую (C:\work\venvs\asr\Scripts\python -m pip ...) — без активации,
+   чтобы обойти PowerShell ExecutionPolicy.
+5. Проверь гейты и доложи: nvidia-smi видит GPU; torch.cuda.is_available() == True;
+   оба smoke-теста (PYTHONUTF8=1) зелёные.
+
+Среда: только диск C:. GPU — внешняя NVIDIA RTX 3050 (eGPU). Движок CUDA-only.</code></pre>
+      <div class="note">Агент пройдёт те же шаги, что в разделах ниже, но без ручного копирования.
+        Дальше (токены, конфиг, режимы) — там же. На <b>macOS</b> уточните агенту: CPU-профиль (int8),
+        без CUDA/cuDNN, ffmpeg через brew (см. секцию macOS).</div>
     </section>
 
     <section id="s1">
