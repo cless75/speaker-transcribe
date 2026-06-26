@@ -13,14 +13,20 @@ and [pyannote.audio](https://github.com/pyannote/pyannote-audio).
 - Speaker diarization (pyannote)
 - Per-project voiceprint: a global registry of voices, projected per project,
   cached locally on each node
-- Two usage modes: **from an AI agent** (MCP server) and **from the command line**
+- Three usage modes: **AI agent** (MCP), **command line**, and **local folder** (manual drop + batch)
 - Multi-node coordination via a shared hub (claim + merge-union, no fragile locks)
 
 ## Quickstart
 
-Open **[`docs/node-setup.html`](docs/node-setup.html)** in a browser — a
-self-contained, step-by-step setup guide (requirements → CUDA → Python env →
-tokens → config → run). Both usage modes (agent / CLI) are covered there.
+The full setup guide lives in **[`docs/node-setup.html`](docs/node-setup.html)** — a
+self-contained, step-by-step walkthrough (requirements → CUDA → Python env → tokens →
+config → run), covering all three usage modes (agent / CLI / local folder).
+
+GitHub shows the `.html` file as source, not a rendered page. To read it as a page:
+
+- **Rendered (quick):** <https://raw.githack.com/cless75/speaker-transcribe/main/docs/node-setup.html>
+- **GitHub Pages:** <https://cless75.github.io/speaker-transcribe/docs/node-setup.html> (once Pages is enabled)
+- **Local:** clone the repo and open `docs/node-setup.html` in a browser
 
 > The setup guide is currently in Russian; an English version is planned.
 
