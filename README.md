@@ -37,10 +37,35 @@ tokens → config → run). Both usage modes (agent / CLI) are covered there.
 data. Voiceprints are biometric personal data and are **never** committed — they
 live only in your private hub. See **[PRIVACY.md](PRIVACY.md)**.
 
+## Repository layout
+
+```
+src/        engine — ASR + diarization + voiceprint
+  media_transcribe.py        core worker (faster-whisper + pyannote + ECAPA-TDNN)
+  media_transcribe_cli.py    CLI for a single file
+  merge_speaker_tracks.py    merge per-speaker tracks (Zoom multi-track)
+  apply_speaker_identities.py post-ASR voiceprint binding
+scripts/    run-media-transcribe-direct.ps1  (PowerShell wrapper)
+config/     node.example.json  (copy to node.local.json)
+docs/       node-setup.html    (full setup guide)
+```
+
+## Engine quickstart (CLI)
+
+```bash
+python src/media_transcribe_cli.py \
+    --input  C:/work/recordings/meeting.m4a \
+    --output-dir C:/work/output/my-project \
+    --model medium --speaker-mode on --timestamps both
+```
+
+Requires `HF_TOKEN` for diarization (gated pyannote models) — see the setup guide.
+
 ## Status
 
-Work in progress — engine extraction from a private monorepo is ongoing. The
-setup documentation and project scaffolding land first; engine modules follow.
+Work in progress. Landed: setup docs, project scaffolding, **engine core**
+(`src/`, CLI, PowerShell wrapper). Pending: watcher / hub orchestration layer,
+MCP server, voiceprint-in-hub, English docs.
 
 ## License
 

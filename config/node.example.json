@@ -1,0 +1,30 @@
+{
+  "_comment": "Copy to node.local.json (gitignored) and fill in your own paths. Placeholders {hub_root}/{pid}/{cache_root}/{sid} resolve at runtime.",
+  "node": {
+    "host_label": "<UNIQUE-NODE-NAME>",
+    "capabilities": ["gpu-cuda", "diarization", "asr-fast"],
+    "cache_root": "C:/work/cache"
+  },
+  "runtime": {
+    "device": "cuda",
+    "compute_type": "float16",
+    "diarization_device": "cuda"
+  },
+  "transcribe_python": "C:/work/venvs/asr/Scripts/python.exe",
+  "sources": [
+    { "root": "{hub_root}/_inbox", "route": "mapper", "claim": true }
+  ],
+  "outputs": {
+    "transcript_dir": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/transcripts",
+    "state_dir": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/pipeline",
+    "voiceprints": {
+      "global_registry": "{hub_root}/_voiceprints",
+      "project_projection": "{hub_root}/{pid}/Speakers",
+      "local_cache": "{cache_root}/{pid}"
+    }
+  },
+  "hub_root": "<GOOGLE_DRIVE>/Hub",
+  "voiceprint_mode": "off",
+  "enable_multi_machine": true,
+  "secrets": { "hf_token": "env:HF_TOKEN" }
+}
