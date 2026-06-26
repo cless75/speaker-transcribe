@@ -439,7 +439,12 @@
       <h2><span class="n">▶</span>Быстрый запуск (.ps1)</h2>
       <p>Для регулярной работы есть готовая обёртка <code>scripts/transcribe.ps1</code> с настройками по
         умолчанию — не нужно держать в голове флаги CLI. Принимает файл <b>или папку</b> (тогда пакетно).</p>
-      <pre><code><span class="c"># один файл</span>
+      <div class="warn">PowerShell по умолчанию блокирует <code>.ps1</code>. Если «выполнение сценариев
+        отключено» — один раз на сессию: <code>Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass</code>
+        (или запуск через <code>powershell -ExecutionPolicy Bypass -File .\scripts\transcribe.ps1 ...</code>).</div>
+      <pre><code><span class="c"># быстрая проверка Inbox (список файлов, без запуска ASR)</span>
+.\scripts\transcribe.ps1 -InputPath <span class="s">C:\work\inbox</span> -ListOnly
+<span class="c"># один файл</span>
 .\scripts\transcribe.ps1 -InputPath <span class="s">C:\work\inbox\meeting.m4a</span>
 <span class="c"># целая папка (пакетно по всем медиа)</span>
 .\scripts\transcribe.ps1 -InputPath <span class="s">C:\work\inbox</span> -OutputDir <span class="s">C:\work\output</span>
