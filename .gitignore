@@ -1,0 +1,43 @@
+# ─── Secrets — NEVER commit ───────────────────────────────
+*.local.json
+credentials*.json
+**/token.json
+**/*.env
+.env
+
+# ─── Biometric data — voiceprints (personal data) ─────────
+**/_voiceprints/
+**/Speakers/
+*voiceprint-profiles.json
+*-voiceprint-cache.json
+
+# ─── User media & transcripts ─────────────────────────────
+*.m4a
+*.mp4
+*.mov
+*.wav
+*.mp3
+*-transcript.md
+*-transcript.txt
+*-segments.*
+*-raw.json
+*-run-meta.json
+*-asr-*.json
+
+# ─── Python / virtualenv ──────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ─── Models & caches ──────────────────────────────────────
+*.bin
+models/
+.cache/
+
+# ─── OS / editor ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

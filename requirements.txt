@@ -1,0 +1,25 @@
+# speaker-transcribe — core dependencies (verified 2026-06-26)
+#
+# IMPORTANT: install torch separately from the PyTorch CUDA index — the +cuXXX
+# wheels are not on PyPI:
+#
+#   pip install torch==2.11.0 torchaudio==2.11.0 \
+#       --index-url https://download.pytorch.org/whl/cu128
+#
+# Then install the rest from this file:
+#   pip install -r requirements.txt
+
+faster-whisper==1.2.1
+ctranslate2==4.7.1
+pyannote.audio==4.0.4
+huggingface_hub<1.0
+speechbrain==1.1.0
+soundfile
+numpy
+psutil
+
+# cuDNN 9 (for CUDA 12) is required by CTranslate2 on GPU. Either install the
+# pip package below, or place system cuDNN 9 DLLs on PATH:
+# nvidia-cudnn-cu12
+
+# ffmpeg must be available on PATH (system install), not a pip package.

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Развёртывание ASR-узла · Распознавание + Диаризация</title>
+<style>
+  :root{
+    --navy:#1a2238; --navy-2:#2d3a5f; --gold:#c9a227; --teal:#2a9d8f;
+    --cream:#f7f4ec; --paper:#fffdf8; --ink:#20242c; --muted:#5b6472;
+    --line:#e4ddca; --code-bg:#1c2533; --code-ink:#e8eef7; --danger:#b3402f;
+    --ok:#2a9d8f; --warn:#c9882a;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--cream); color:var(--ink);
+    font:16px/1.65 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{display:grid; grid-template-columns:264px 1fr; max-width:1180px; margin:0 auto; min-height:100vh}
+  /* ---- sidebar / TOC ---- */
+  aside{
+    position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+    background:var(--navy); color:#cdd6e6; padding:26px 18px 40px;
+  }
+  aside .brand{font-weight:700; color:#fff; font-size:15px; letter-spacing:.3px; line-height:1.35}
+  aside .brand span{color:var(--gold)}
+  aside .sub{color:#8c9bb8; font-size:12px; margin:4px 0 20px}
+  nav a{
+    display:block; color:#b9c4da; text-decoration:none; font-size:13.5px;
+    padding:6px 10px; border-radius:7px; border-left:2px solid transparent; margin:1px 0;
+  }
+  nav a:hover{background:rgba(255,255,255,.06); color:#fff}
+  nav a.active{background:rgba(201,162,39,.16); color:#fff; border-left-color:var(--gold)}
+  nav .grp{font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:#6f7e9c; margin:18px 0 6px 10px}
+  /* ---- content ---- */
+  main{padding:46px 54px 90px; background:var(--cream)}
+  header.head{border-bottom:2px solid var(--line); padding-bottom:22px; margin-bottom:30px}
+  header.head h1{font-size:30px; line-height:1.18; margin:0 0 8px; color:var(--navy)}
+  header.head h1 b{color:var(--gold)}
+  header.head .lead{color:var(--muted); font-size:16px; margin:0; max-width:62ch}
+  .pillrow{margin-top:16px; display:flex; gap:8px; flex-wrap:wrap}
+  .pill{font-size:12px; background:#fff; border:1px solid var(--line); color:var(--navy-2); padding:4px 11px; border-radius:30px; font-weight:600}
+  section{margin:0 0 34px; scroll-margin-top:20px}
+  h2{font-size:22px; color:var(--navy); margin:38px 0 14px; padding-top:6px}
+  h2 .n{display:inline-grid; place-items:center; width:30px; height:30px; background:var(--navy); color:#fff;
+    border-radius:8px; font-size:14px; margin-right:11px; vertical-align:2px}
+  h3{font-size:16.5px; color:var(--navy-2); margin:22px 0 8px}
+  p{margin:10px 0; max-width:70ch}
+  ul,ol{max-width:70ch; padding-left:22px}
+  li{margin:6px 0}
+  code{background:#efe9d8; color:#7a3b16; padding:1.5px 6px; border-radius:5px; font-size:13.5px;
+    font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace}
+  pre{background:var(--code-bg); color:var(--code-ink); padding:16px 18px; border-radius:10px; overflow-x:auto;
+    font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:13px; line-height:1.55;
+    border:1px solid #0e151f; box-shadow:0 1px 0 rgba(0,0,0,.04)}
+  pre code{background:none; color:inherit; padding:0; font-size:13px}
+  pre .c{color:#7f8ea8}            /* comment */
+  pre .k{color:#e8b85f}            /* keyword/cmd */
+  pre .s{color:#8fd6c2}            /* string/value */
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:14px; background:var(--paper);
+    border:1px solid var(--line); border-radius:10px; overflow:hidden}
+  th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{background:var(--navy); color:#fff; font-size:12.5px; letter-spacing:.02em}
+  tr:last-child td{border-bottom:none}
+  /* ---- callouts ---- */
+  .box{border-radius:10px; padding:13px 16px 13px 46px; margin:16px 0; position:relative; font-size:14.5px; border:1px solid}
+  .box::before{position:absolute; left:14px; top:12px; font-size:17px}
+  .note{background:#eafaf6; border-color:#bfe9df}    .note::before{content:"💡"}
+  .ok{background:#e9f7f1; border-color:#b6e3d4}       .ok::before{content:"✅"}
+  .warn{background:#fdf4e3; border-color:#f0dcae}     .warn::before{content:"⚠️"}
+  .danger{background:#fcecea; border-color:#f1c3bc}   .danger::before{content:"⛔"}
+  .priv{background:var(--navy); color:#e7edf7; border-color:var(--navy-2); padding-left:46px}
+  .priv::before{content:"🔒"} .priv b{color:var(--gold)} .priv code{background:#2a3856; color:#ffd98a}
+  .step-meta{font-size:13px; color:var(--muted); margin:-4px 0 12px}
+  .check{font-size:13.5px; background:#fff; border:1px dashed var(--teal); border-radius:8px; padding:8px 13px; margin:10px 0; color:var(--navy-2)}
+  .check b{color:var(--teal)}
+  footer{margin-top:50px; padding-top:20px; border-top:2px solid var(--line); color:var(--muted); font-size:13px}
+  footer code{font-size:12.5px}
+  a.inl{color:#1d6b5f; text-decoration:none; border-bottom:1px solid #a9d6cb}
+  a.inl:hover{border-bottom-color:#1d6b5f}
+  @media (max-width:880px){
+    .wrap{grid-template-columns:1fr}
+    aside{position:static; height:auto}
+    nav{display:flex; flex-wrap:wrap; gap:4px}
+    nav .grp{width:100%}
+    main{padding:30px 22px 70px}
+    .grid2{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <aside>
+    <div class="brand">ASR-узел · <span>Распознавание + Диаризация</span></div>
+    <div class="sub">Quickstart развёртывания на новой машине</div>
+    <nav id="toc">
+      <div class="grp">Старт</div>
+      <a href="#about">О документе</a>
+      <a href="#req">Требования</a>
+      <div class="grp">Установка</div>
+      <a href="#s1">1 · Код</a>
+      <a href="#s2">2 · GPU и драйвер</a>
+      <a href="#s3">3 · Python-окружение</a>
+      <a href="#s4">4 · Токены</a>
+      <a href="#s5">5 · Конфигурация</a>
+      <a href="#s6">6 · Проверка и запуск</a>
+      <a href="#use">7 · Использование</a>
+      <div class="grp">Дополнительно</div>
+      <a href="#multi">Мультиузел</a>
+      <a href="#trouble">Troubleshooting</a>
+      <a href="#privacy">Приватность</a>
+    </nav>
+  </aside>
+
+  <main>
+    <header class="head">
+      <h1>Развёртывание <b>ASR-узла</b><br>распознавание речи + диаризация</h1>
+      <p class="lead">Пошаговая инструкция по установке узла транскрибации с диаризацией спикеров и
+        пер-проектным voiceprint на новой Windows-машине. Узел работает как headless-обработчик:
+        читает источники, делает ASR на GPU, складывает результаты в общий Hub.</p>
+      <div class="pillrow">
+        <span class="pill">Windows 10/11</span>
+        <span class="pill">NVIDIA CUDA 12.8</span>
+        <span class="pill">Python 3.11</span>
+        <span class="pill">faster-whisper + pyannote</span>
+        <span class="pill">self-contained</span>
+      </div>
+    </header>
+
+    <section id="about">
+      <h2><span class="n">i</span>О документе</h2>
+      <p>Этот файл лежит в репозитории и открывается локально (один HTML-файл, без внешних
+        зависимостей). Он проведёт от чистой машины до работающего узла, который участвует в
+        распределённой обработке записей.</p>
+      <div class="priv">
+        <b>Принцип: код публичный — данные приватные.</b> В этой инструкции все токены, пути и имена —
+        <b>плейсхолдеры</b>. Подставляйте свои значения локально. Никогда не коммитьте реальные секреты,
+        голосовые отпечатки, транскрипты и имена в репозиторий. Голос = биометрические персональные данные;
+        он живёт только в вашем приватном Hub. Подробнее — раздел <a href="#privacy" class="inl" style="color:#ffd98a;border-color:#8a6f2e">Приватность</a>.
+      </div>
+      <div class="note">Плейсхолдеры в командах: <code>&lt;...&gt;</code> — заменить на своё;
+        <code>{cache_root}</code>, <code>{hub_root}</code> — корни путей вашей машины.</div>
+    </section>
+
+    <section id="req">
+      <h2><span class="n">0</span>Требования</h2>
+      <table>
+        <tr><th>Компонент</th><th>Минимум</th><th>Заметка</th></tr>
+        <tr><td>ОС</td><td>Windows 10/11 x64</td><td>инструкция под Windows; на Linux/macOS пути и установка отличаются</td></tr>
+        <tr><td>GPU</td><td>NVIDIA с CUDA, ≥ 6 ГБ VRAM</td><td>ASR работает только на CUDA (fail-fast без неё). eGPU через Thunderbolt поддерживается</td></tr>
+        <tr><td>RAM</td><td>16 ГБ+</td><td>диаризация + ASR упираются в RAM/VRAM</td></tr>
+        <tr><td>Диск</td><td>~15 ГБ свободно</td><td>модели + локальный кэш медиа (Heavy)</td></tr>
+        <tr><td>Сеть</td><td>Google Drive (Hub)</td><td>общий источник/приёмник; виртуальный диск, не занимает физический том</td></tr>
+      </table>
+      <div class="warn"><b>ASR CUDA-only.</b> Узел сознательно падает с явной ошибкой, если CUDA недоступна
+        (никакого тихого отката на CPU). Это защищает от медленной незаметной обработки.</div>
+    </section>
+
+    <section id="s1">
+      <h2><span class="n">1</span>Получить код</h2>
+      <p class="step-meta">~2 мин · клонирование репозитория</p>
+      <pre><code><span class="k">git</span> clone &lt;REPO_URL&gt; <span class="s">C:\work\asr-node</span>
+<span class="k">cd</span> C:\work\asr-node</code></pre>
+      <p>Репозиторий самодостаточен по коду — пути под машину задаются в конфиге (шаг 5), Python-файлы
+        не редактируются.</p>
+    </section>
+
+    <section id="s2">
+      <h2><span class="n">2</span>GPU и драйвер</h2>
+      <p class="step-meta">первый аппаратный гейт</p>
+      <ol>
+        <li>Установить актуальный драйвер <b>NVIDIA</b> (Game Ready / Studio).</li>
+        <li>Для <b>eGPU</b>: убедиться, что порт Thunderbolt включён в BIOS и устройство авторизовано в Windows.</li>
+        <li>Проверить, что карта видна:</li>
+      </ol>
+      <pre><code><span class="k">nvidia-smi</span></code></pre>
+      <div class="check"><b>Гейт:</b> вывод показывает вашу видеокарту и объём VRAM. Если карты нет —
+        проблема на уровне драйвера/Thunderbolt, дальше идти бессмысленно.</div>
+    </section>
+
+    <section id="s3">
+      <h2><span class="n">3</span>Python-окружение</h2>
+      <p class="step-meta">~15–25 мин · venv + зависимости + cuDNN + ffmpeg</p>
+
+      <h3>3.1 · Виртуальное окружение (Python 3.11)</h3>
+      <pre><code><span class="k">py</span> -3.11 -m venv <span class="s">C:\work\venvs\asr</span>
+<span class="s">C:\work\venvs\asr</span>\Scripts\python -m pip install -U pip wheel setuptools</code></pre>
+      <div class="note">Именно <b>3.11</b> — pyannote/torch стабильнее, чем на самых новых интерпретаторах.</div>
+
+      <h3>3.2 · PyTorch под CUDA 12.8 (ставить отдельно от индекса PyTorch)</h3>
+      <pre><code><span class="c"># сборки +cu128 не лежат на PyPI — нужен индекс PyTorch</span>
+<span class="k">pip</span> install torch==<span class="s">2.11.0</span> torchaudio==<span class="s">2.11.0</span> --index-url <span class="s">https://download.pytorch.org/whl/cu128</span></code></pre>
+
+      <h3>3.3 · Остальные зависимости</h3>
+      <pre><code><span class="k">pip</span> install <span class="s">faster-whisper==1.2.1 ctranslate2==4.7.1 \
+  "pyannote.audio==4.0.4" "huggingface_hub&lt;1.0" \
+  speechbrain==1.1.0 soundfile numpy psutil</span>
+<span class="c"># либо целиком из лок-файла (кроме torch — он из индекса cu128 выше):</span>
+<span class="c"># pip install -r requirements.lock.txt</span></code></pre>
+
+      <h3>3.4 · cuDNN 9 и ffmpeg (частые затыки)</h3>
+      <ul>
+        <li><b>cuDNN 9</b> для CUDA 12: <code>faster-whisper</code>/CTranslate2 на GPU требует cuDNN-DLL в
+          <code>PATH</code> (иначе «Could not load cudnn…»). Вариант: pip-пакет <code>nvidia-cudnn-cu12</code>
+          в том же venv, либо системный cuDNN 9.x с добавлением <code>bin</code> в <code>PATH</code>.</li>
+        <li><b>ffmpeg</b> обязателен для извлечения аудио из видео — установить и добавить в <code>PATH</code>.</li>
+      </ul>
+      <div class="check"><b>Гейт окружения:</b></div>
+      <pre><code><span class="s">C:\work\venvs\asr</span>\Scripts\python -c <span class="s">"import torch; print(torch.cuda.is_available())"</span>
+<span class="c"># ожидается: True</span></code></pre>
+    </section>
+
+    <section id="s4">
+      <h2><span class="n">4</span>Токены</h2>
+      <p class="step-meta">для чистого ASR + диаризации достаточно одного — HF_TOKEN</p>
+      <table>
+        <tr><th>Токен</th><th>Зачем</th><th>Обязателен</th></tr>
+        <tr><td>HF_TOKEN (Hugging Face)</td><td>gated-модели pyannote (диаризация)</td><td><b>Да</b></td></tr>
+        <tr><td>Google OAuth</td><td>экспорт/импорт Google Docs</td><td>Нет (для ASR не нужен)</td></tr>
+      </table>
+
+      <h3>4.1 · HF_TOKEN — получение</h3>
+      <ol>
+        <li>Войти на <code>huggingface.co</code>.</li>
+        <li>Принять условия gated-моделей под тем же аккаунтом (в браузере, кнопка «Agree»):
+          <ul>
+            <li><code>huggingface.co/pyannote/segmentation-3.0</code></li>
+            <li><code>huggingface.co/pyannote/speaker-diarization-3.1</code></li>
+          </ul></li>
+        <li>Settings → Access Tokens → New token, тип <b>Read</b>, скопировать <code>hf_...</code></li>
+      </ol>
+
+      <h3>4.2 · HF_TOKEN — хранение (код читает HF_TOKEN / HUGGINGFACE_TOKEN)</h3>
+      <pre><code><span class="c"># Способ A — CLI-логин (рекомендуется): пишет в %USERPROFILE%\.cache\huggingface\token</span>
+<span class="k">huggingface-cli</span> login
+
+<span class="c"># Способ B — переменная окружения</span>
+<span class="k">setx</span> HF_TOKEN <span class="s">"hf_&lt;ВАШ_ТОКЕН&gt;"</span></code></pre>
+      <div class="note">Токен привязан к аккаунту, не к машине — на новом узле просто повторите логин.</div>
+      <div class="danger"><b>Никогда</b> не коммитьте токен в репозиторий и не кладите в Hub. В репозитории —
+        только <code>*.example</code> с пустыми плейсхолдерами.</div>
+    </section>
+
+    <section id="s5">
+      <h2><span class="n">5</span>Конфигурация узла</h2>
+      <p class="step-meta">машинно-локальный конфиг из шаблона; декларативные источники → приёмники</p>
+      <p>Скопируйте шаблон в локальный конфиг (он <b>gitignored</b>) и подставьте свои пути:</p>
+      <pre><code><span class="k">copy</span> config\node.example.json <span class="s">config\node.local.json</span></code></pre>
+      <pre><code>{
+  <span class="k">"node"</span>: { <span class="k">"host_label"</span>: <span class="s">"&lt;UNIQUE-NODE-NAME&gt;"</span>,
+            <span class="k">"capabilities"</span>: [<span class="s">"gpu-cuda"</span>,<span class="s">"diarization"</span>,<span class="s">"asr-fast"</span>],
+            <span class="k">"cache_root"</span>: <span class="s">"C:/work/cache"</span> },
+  <span class="k">"runtime"</span>: { <span class="k">"device"</span>: <span class="s">"cuda"</span>, <span class="k">"compute_type"</span>: <span class="s">"float16"</span>,
+               <span class="k">"diarization_device"</span>: <span class="s">"cuda"</span> },
+  <span class="k">"transcribe_python"</span>: <span class="s">"C:/work/venvs/asr/Scripts/python.exe"</span>,
+  <span class="k">"sources"</span>: [ { <span class="k">"root"</span>: <span class="s">"{hub_root}/_inbox"</span>, <span class="k">"route"</span>: <span class="s">"mapper"</span>, <span class="k">"claim"</span>: true } ],
+  <span class="k">"outputs"</span>: {
+    <span class="k">"transcript_dir"</span>: <span class="s">"{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/transcripts"</span>,
+    <span class="k">"voiceprints"</span>: { <span class="k">"global_registry"</span>: <span class="s">"{hub_root}/_voiceprints"</span>,
+                     <span class="k">"project_projection"</span>: <span class="s">"{hub_root}/{pid}/Speakers"</span>,
+                     <span class="k">"local_cache"</span>: <span class="s">"{cache_root}/{pid}"</span> }
+  },
+  <span class="k">"hub_root"</span>: <span class="s">"&lt;GOOGLE_DRIVE&gt;/Hub"</span>,
+  <span class="k">"voiceprint_mode"</span>: <span class="s">"off"</span>,
+  <span class="k">"enable_multi_machine"</span>: true
+}</code></pre>
+      <p>Создайте рабочие папки: локальный кэш, входящие, Heavy-зеркало:</p>
+      <pre><code><span class="k">mkdir</span> C:\work\cache  C:\work\Heavy</code></pre>
+      <div class="note"><code>voiceprint_mode: off</code> — безопасный старт. Включайте пер-проектный voiceprint,
+        когда настроите глобальный реестр голосов в Hub.</div>
+    </section>
+
+    <section id="s6">
+      <h2><span class="n">6</span>Проверка и запуск</h2>
+      <p class="step-meta">smoke-тесты → пробный прогон</p>
+
+      <h3>6.1 · Smoke-тесты</h3>
+      <div class="warn"><b>Важно:</b> задайте <code>PYTHONUTF8=1</code> перед запуском — иначе вывод кириллицы/
+        символов падает с <code>UnicodeEncodeError</code> на системной кодировке Windows (cp1251).</div>
+      <pre><code><span class="k">set</span> PYTHONUTF8=1
+<span class="s">C:\work\venvs\asr</span>\Scripts\python scripts\smoke_intake_tiering_a1.py
+<span class="s">C:\work\venvs\asr</span>\Scripts\python scripts\smoke_promote_archive_a1.py</code></pre>
+      <div class="check"><b>Ожидается:</b> оба теста — все PASS (например <code>19 pass / 0 fail</code> и
+        <code>15 pass / 0 fail</code>).</div>
+
+      <h3>6.2 · Пробный прогон узла</h3>
+      <pre><code><span class="s">C:\work\venvs\asr</span>\Scripts\python scripts\audio_inbox_watch.py --once --config <span class="s">config\node.local.json</span></code></pre>
+      <div class="check"><b>Успех:</b> файл заклеймлен, ASR прошёл на GPU, транскрипт и
+        <code>state.json</code> появились в Hub с вашим <code>host_label</code>.</div>
+      <div class="note"><b>Ложный сбой:</b> прогон может рапортовать <code>exit 9</code> (teardown CUDA) при
+        фактическом успехе. Судите по наличию <code>transcript.md</code> и <code>phase=stdout_json ok</code>,
+        а не по коду возврата.</div>
+    </section>
+
+    <section id="use">
+      <h2><span class="n">7</span>Два режима использования</h2>
+      <p class="step-meta">логика ASR общая — различается оркестрация</p>
+      <p>Узел используется двумя способами: через AI-агента или напрямую из командной строки.
+        Выбирайте по задаче — интерактив с пост-обработкой против автоматизации.</p>
+
+      <h3>A · Из агента (Claude Code / Cursor)</h3>
+      <p>Локальный MCP-сервер <code>media-transcription-mcp</code> даёт агенту инструменты транскрибации
+        с preflight-проверкой среды. Агент следует навыкам и оркеструет полный пайплайн
+        (входящие → ASR → Hub → карточки сессий / инсайты).</p>
+      <pre><code><span class="c"># запуск MCP-сервера (canonical entry: scripts/media-transcription-mcp.mjs)</span>
+<span class="k">cd</span> media-transcription-mcp
+<span class="k">npm</span> start
+<span class="c"># env для воркера (пути под вашу машину):</span>
+<span class="k">set</span> TRANSCRIPTION_PYTHON=<span class="s">C:\work\venvs\asr\Scripts\python.exe</span>
+<span class="k">set</span> TRANSCRIPTION_MODEL_ROOT=<span class="s">C:\work\models</span>
+<span class="k">set</span> FFMPEG_BIN=<span class="s">ffmpeg</span></code></pre>
+      <ul>
+        <li>Подключить сервер в MCP-конфиге агента (Cursor / Claude Code) — после этого инструменты
+          транскрибации доступны в диалоге.</li>
+        <li>Навыки: <code>media-transcription</code> (preflight + ASR), <code>process-audio-inbox</code>
+          (полный пайплайн входящих). Команда агенту, например: «обработай свежие транскрипты».</li>
+      </ul>
+      <div class="note">Подходит для <b>интерактивной</b> работы и пост-обработки: инсайты, карточки сессий,
+        маршрутизация по проектам.</div>
+
+      <h3>B · Из командной строки (CLI)</h3>
+      <p>Прямой запуск без агента — для автоматизации, планировщика задач и headless-серверов.</p>
+      <pre><code><span class="c"># 1) Фоновая обработка очереди источников (claim → ASR → Hub)</span>
+<span class="k">python</span> scripts\audio_inbox_watch.py --once --config <span class="s">config\node.local.json</span>
+
+<span class="c"># 2) Прямой ASR одного файла</span>
+<span class="k">python</span> scripts\media_transcribe_cli.py --input <span class="s">&lt;media&gt;</span> --output-dir <span class="s">&lt;dir&gt;</span> \
+  --model <span class="s">medium</span> --speaker-mode <span class="s">on</span> --timestamps <span class="s">both</span>
+
+<span class="c"># 3) PowerShell-обёртка (явные параметры прогона)</span>
+<span class="k">pwsh</span> scripts\run-media-transcribe-direct.ps1 -InputPath <span class="s">&lt;media&gt;</span> `
+  -RuntimeDevice <span class="s">cuda</span> -Model <span class="s">medium</span> -SpeakerMode <span class="s">on</span> -ChunkMinutes <span class="s">20</span></code></pre>
+      <ul>
+        <li><b>watcher</b> — для постоянного узла кластера (можно по расписанию / в автозапуске).</li>
+        <li><b>media_transcribe_cli</b> / <b>ps1-обёртка</b> — для разовых прогонов и скриптов.</li>
+      </ul>
+      <div class="warn">Для CLI-вывода с кириллицей задавайте <code>PYTHONUTF8=1</code> (см. шаг 6).
+        ASR в обоих режимах остаётся CUDA-only (fail-fast без GPU).</div>
+    </section>
+
+    <section id="multi">
+      <h2><span class="n">+</span>Мультиузел (несколько машин)</h2>
+      <p>Узлы координируются через Hub файлами <code>.claim.json</code> + heartbeat. Каждому узлу — свой
+        уникальный <code>host_label</code>. Канонический результат (транскрипт + state) всегда в Hub, поэтому
+        машины не зависят от локальных дисков друг друга.</p>
+      <div class="warn"><b>Одна GPU на несколько машин (переключаемая карта).</b> Если видеокарта одна и
+        переезжает между машинами, запускайте watcher только там, где карта сейчас физически подключена.
+        Узел без CUDA честно падает fail-fast и не «застолбит» файл.</div>
+    </section>
+
+    <section id="trouble">
+      <h2><span class="n">?</span>Troubleshooting</h2>
+      <table>
+        <tr><th>Симптом</th><th>Причина / решение</th></tr>
+        <tr><td><code>torch.cuda.is_available() == False</code></td><td>драйвер NVIDIA не виден / eGPU не авторизован / поставлена CPU-сборка torch вместо cu128</td></tr>
+        <tr><td>«Could not load cudnn…»</td><td>нет cuDNN 9: поставить <code>nvidia-cudnn-cu12</code> в venv или системный cuDNN в PATH</td></tr>
+        <tr><td>Диаризация падает на загрузке модели</td><td>не принят gated-доступ pyannote или не задан HF_TOKEN (шаг 4)</td></tr>
+        <tr><td><code>UnicodeEncodeError</code> в выводе</td><td>не задан <code>PYTHONUTF8=1</code> (cp1251 не кодирует юникод)</td></tr>
+        <tr><td>ffmpeg not found</td><td>ffmpeg не в PATH — нужен для видео</td></tr>
+        <tr><td>Процесс рапортует <code>exit 9</code></td><td>ложный teardown CUDA; проверять по наличию transcript.md</td></tr>
+      </table>
+    </section>
+
+    <section id="privacy">
+      <h2><span class="n">🔒</span>Приватность</h2>
+      <div class="priv">
+        <b>Код публичный — данные приватные.</b> Движок не собирает и не передаёт ваши данные.
+        В репозиторий едут только код, схемы и <code>*.example</code>. Никогда не попадают в репозиторий и в Hub:
+        <ul style="margin:8px 0 2px">
+          <li>токены и секреты (<code>credentials.local.json</code>, OAuth-файлы);</li>
+          <li>голосовые отпечатки (<code>_voiceprints/</code>, <code>profiles/*.json</code>) — биометрические ПД;</li>
+          <li>транскрипты, аудио, имена участников, личные пути.</li>
+        </ul>
+      </div>
+      <p>Убедитесь, что <code>.gitignore</code> покрывает: <code>*.local.json</code>, voiceprint-дерево,
+        секреты, медиа и транскрипты.</p>
+    </section>
+
+    <footer>
+      <div>Quickstart развёртывания ASR-узла · self-contained · версия от 2026-06-26 · язык: RU
+        (EN-версия — для публичного распространения).</div>
+      <div style="margin-top:6px">Версии проверены: <code>torch 2.11.0+cu128</code> ·
+        <code>ctranslate2 4.7.1</code> · <code>faster-whisper 1.2.1</code> ·
+        <code>pyannote.audio 4.0.4</code> · <code>speechbrain 1.1.0</code>.</div>
+    </footer>
+  </main>
+</div>
+
+<script>
+  // scroll-spy: подсветка активного раздела в TOC (inline, без зависимостей)
+  (function(){
+    var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+    var map = {};
+    links.forEach(function(a){ var id=a.getAttribute('href').slice(1); var el=document.getElementById(id); if(el) map[id]=a; });
+    var ids = Object.keys(map);
+    function onScroll(){
+      var pos = window.scrollY + 120, cur = ids[0];
+      ids.forEach(function(id){ if(document.getElementById(id).offsetTop <= pos) cur = id; });
+      links.forEach(function(a){ a.classList.remove('active'); });
+      if(map[cur]) map[cur].classList.add('active');
+    }
+    window.addEventListener('scroll', onScroll, {passive:true});
+    onScroll();
+  })();
+</script>
+</body>
+</html>
