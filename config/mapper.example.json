@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to mapper.local.json (gitignored). Maps a source-relative folder prefix to a project id (pid). The watcher matches the DEEPEST prefix first, then falls back to _default, then to a numeric token in the top-level folder name. Examples below are neutral placeholders — replace with your own.",
+  "folders": {
+    "project-alpha": { "project_id": "alpha" },
+    "project-alpha/2026-q1": { "project_id": "alpha", "note": "deeper prefix wins over the parent" },
+    "client-beta/interviews": { "project_id": "beta" }
+  },
+  "_default": { "project_id": "_unrouted" }
+}

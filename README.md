@@ -49,10 +49,12 @@ live only in your private hub. See **[PRIVACY.md](PRIVACY.md)**.
 src/        engine — ASR + diarization + voiceprint
   media_transcribe.py        core worker (faster-whisper + pyannote + ECAPA-TDNN)
   media_transcribe_cli.py    CLI for a single file
+  audio_inbox_watch.py       watcher — scan sources, state machine, dispatch ASR
   merge_speaker_tracks.py    merge per-speaker tracks (Zoom multi-track)
   apply_speaker_identities.py post-ASR voiceprint binding
-scripts/    run-media-transcribe-direct.ps1  (PowerShell wrapper)
-config/     node.example.json  (copy to node.local.json)
+scripts/    transcribe.ps1   (single file / folder)   watch.ps1  (run the watcher)
+            run-media-transcribe-direct.ps1  (low-level PowerShell wrapper)
+config/     node.example.json   mapper.example.json   (copy to *.local.json)
 docs/       node-setup.html    (full setup guide)
 ```
 
@@ -67,11 +69,40 @@ python src/media_transcribe_cli.py \
 
 Requires `HF_TOKEN` for diarization (gated pyannote models) — see the setup guide.
 
+## Watcher (headless node)
+
+The watcher turns a machine into an unattended ASR node: it scans the **sources**
+you declare, runs ASR on each new recording, and writes transcripts + state to the
+**outputs** templates — resolving `{hub_root}` / `{pid}` / `{sid}` / `{YYYY-MM}` at
+runtime, so the repo carries no personal absolute paths.
+
+```bash
+cp config/node.example.json   config/node.local.json     # fill in your paths
+cp config/mapper.example.json config/mapper.local.json   # folder -> project id
+
+python src/audio_inbox_watch.py --config config/node.local.json --once
+# Windows:  .\scripts\watch.ps1 -Once
+```
+
+Run it on a timer (Task Scheduler / launchd / cron) for continuous pickup. Key
+behaviour, all config-driven:
+
+- **State machine** per file via a sidecar `*.state.json`: `queued -> in-progress
+  -> asr-done` (with retry / `_failed/` on repeated errors).
+- **CPU-aware**: defers ASR while the machine is busy (`respect_cpu_load`).
+- **Multi-node** (opt-in `enable_multi_machine`): per-file claim-and-verify with a
+  lease + heartbeat — several nodes share one hub without fragile locks.
+- **Zoom bundles**: a multi-file meeting export is transcribed once (primary), its
+  siblings are tracked but skipped.
+- **Obsidian session card** is an *optional* output adapter
+  (`outputs.session_card.adapter`, default `none`) — the core is vault-agnostic.
+
 ## Status
 
 Work in progress. Landed: setup docs, project scaffolding, **engine core**
-(`src/`, CLI, PowerShell wrapper). Pending: watcher / hub orchestration layer,
-MCP server, voiceprint-in-hub, English docs.
+(`src/`, CLI, PowerShell wrapper), **watcher / orchestration layer**
+(`src/audio_inbox_watch.py`, `scripts/watch.ps1`). Pending: MCP server,
+voiceprint-in-hub, English docs.
 
 ## License
 

@@ -1,0 +1,1387 @@
+#!/usr/bin/env python3
+"""Audio Inbox watcher — generic, hub-oriented, cross-platform.
+
+Scans the source folders declared in the node config, manages a per-file state
+machine via a sidecar JSON, and dispatches ASR through ``media_transcribe_cli``.
+Outputs (transcripts + state) are written to declarative ``outputs`` templates
+with runtime placeholders (``{hub_root}`` / ``{pid}`` / ``{sid}`` / ``{YYYY-MM}``
+/ ``{cache_root}``) so the repository never carries personal absolute paths.
+
+State machine (per source file, sidecar ``<file>.state.json``):
+
+    queued  -> in-progress -> asr-done       (success path)
+    queued  -> in-progress -> queued (retry) (transient failure, attempts < max)
+    queued  -> in-progress -> failed         (attempts >= max -> moved to _failed/)
+
+Marker: ``<file>.processed-asr`` (zero-byte, redundant signal for downstream code).
+
+Multi-node coordination is opt-in (``enable_multi_machine``): a per-file
+``<file>.claim.json`` in the shared source uses claim-and-verify + lease +
+heartbeat instead of a fragile filesystem lock (resilient to cloud-drive
+eventual consistency).
+
+Design: run on a timer (Windows Task Scheduler / launchd / cron). A host-local
+lock makes concurrent invocations on the same machine safe.
+
+The engine is vault-agnostic. Writing an Obsidian session card is an *optional*
+output adapter (``outputs.session_card.adapter``); the default ``none`` keeps the
+core fully generic.
+
+Usage::
+
+    python audio_inbox_watch.py --config config/node.local.json --once
+    python audio_inbox_watch.py --config config/node.local.json --catch-up-only
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import errno
+import json
+import os
+import pathlib
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unicodedata
+
+DEFAULT_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "config" / "node.local.json"
+
+# Default watcher knobs — overridable from the node config.
+DEFAULT_SCAN_EXTENSIONS = [".m4a", ".mp3", ".wav", ".oga", ".mp4", ".mov", ".webm", ".m4v"]
+DEFAULT_SKIP_FOLDERS = ["_failed", "_archive", "sessions", "Audio Record", "Transcripts"]
+DEFAULT_SKIP_FOLDER_PREFIXES = ["_", "."]
+DEFAULT_SKIP_FILENAME_SUFFIXES = [
+    "-transcript.md", "-transcript.txt", "_original.txt",
+    "-segments.vtt", "-segments.jsonl", "-raw.json", "-run-meta.json",
+]
+DEFAULT_SKIP_FILENAME_PATTERNS = [r"^_PROJECT-.*", r"^_README.*"]
+
+# Cyrillic -> Latin transliteration for slug generation (filename -> ASCII slug).
+_CYR_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
+AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".oga"}
+PRIMARY_NAME_PATTERN = re.compile(r".*Recording.*\.m4a$", re.IGNORECASE)
+BUNDLE_TS_PATTERN = re.compile(r"(?:GMT)?(\d{8}[-_]\d{6})")
+
+
+# ---------------------------------------------------------------------------
+# Logging / time / atomic IO
+# ---------------------------------------------------------------------------
+
+
+def log(msg: str) -> None:
+    ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sys.stderr.write(f"[{ts}] {msg}\n")
+    sys.stderr.flush()
+
+
+def now_iso() -> str:
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def utcnow_iso() -> str:
+    """UTC ISO timestamp with ``Z`` suffix (cross-machine claim coordination)."""
+    return utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_utc(s: str | None) -> dt.datetime | None:
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        d = dt.datetime.fromisoformat(s)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=dt.timezone.utc)
+        return d
+    except Exception:
+        return None
+
+
+def atomic_write_json(path: pathlib.Path, data: dict) -> None:
+    """Atomic write: tmp -> fsync -> os.replace. Retries os.replace on EDEADLK.
+
+    Cloud-drive FUSE backends (e.g. GoogleDriveFS on macOS) occasionally raise
+    ``OSError errno=11 (EDEADLK)`` on os.replace when mid-sync. A single shot then
+    loses state.json. Linear backoff 2/4/6s, 3 attempts.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        max_retries, base_sleep = 3, 2.0
+        for attempt in range(max_retries):
+            try:
+                os.replace(tmp_name, path)
+                return
+            except OSError as exc:
+                if exc.errno != errno.EDEADLK or attempt == max_retries - 1:
+                    raise
+                sleep_for = base_sleep * (attempt + 1)
+                log(f"atomic_write EDEADLK on {path.name} attempt {attempt + 1}/{max_retries}; "
+                    f"retry in {sleep_for:.0f}s")
+                time.sleep(sleep_for)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _copy_with_edeadlk_retry(src: pathlib.Path, dst: pathlib.Path,
+                             max_retries: int = 3, base_sleep: float = 2.0) -> None:
+    """shutil.copy2 with retry-on-EDEADLK for cloud-drive sync conflicts."""
+    last_exc: BaseException | None = None
+    for attempt in range(max_retries):
+        try:
+            shutil.copy2(src, dst)
+            return
+        except OSError as exc:
+            last_exc = exc
+            if exc.errno != errno.EDEADLK or attempt == max_retries - 1:
+                raise
+            sleep_for = base_sleep * (attempt + 1)
+            log(f"copy EDEADLK on attempt {attempt + 1}/{max_retries} ({src.name}); "
+                f"retry in {sleep_for:.0f}s")
+            time.sleep(sleep_for)
+    if last_exc:
+        raise last_exc
+
+
+def load_config(path: pathlib.Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Config helpers: placeholders, node fields, watcher knobs
+# ---------------------------------------------------------------------------
+
+
+def node_field(cfg: dict, key: str, default=None):
+    """Read a field from the ``node`` block (falls back to top-level then default)."""
+    node = cfg.get("node") or {}
+    if key in node:
+        return node[key]
+    return cfg.get(key, default)
+
+
+def host_label_of(cfg: dict) -> str:
+    return node_field(cfg, "host_label", None) or socket.gethostname()
+
+
+def resolve_template(template: str, ctx: dict) -> str:
+    """Substitute ``{placeholder}`` tokens from ctx into ``template``.
+
+    Unknown placeholders are left intact (so a partially-resolved template can be
+    completed later). Backslashes from Windows paths are preserved.
+    """
+    def _sub(m: re.Match) -> str:
+        key = m.group(1)
+        val = ctx.get(key)
+        return str(val) if val is not None else m.group(0)
+
+    # Placeholder names may contain hyphens (e.g. {YYYY-MM}, {YYYY-MM-DD}).
+    return re.sub(r"\{([a-zA-Z0-9_-]+)\}", _sub, template)
+
+
+def base_placeholder_ctx(cfg: dict) -> dict:
+    """Placeholders that do not depend on a specific file/session."""
+    return {
+        "hub_root": cfg.get("hub_root", ""),
+        "cache_root": node_field(cfg, "cache_root", ""),
+        "local": node_field(cfg, "cache_root", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Slug + SessionId
+# ---------------------------------------------------------------------------
+
+
+def slugify_from_filename(stem: str) -> str:
+    """Convert a filename stem -> kebab-case ASCII slug.
+
+    Transliterates Cyrillic, strips diacritics and Zoom-style timestamp tokens,
+    lowercases, keeps only ``[a-z0-9]`` collapsing runs to a single ``-``.
+    Returns "" if nothing usable remains (caller falls back to ``voice-note``).
+    """
+    s = stem or ""
+    out_chars: list[str] = []
+    for ch in s:
+        low = ch.lower()
+        if low in _CYR_TRANSLIT:
+            mapped = _CYR_TRANSLIT[low]
+            out_chars.append(mapped.upper() if ch.isupper() and mapped else mapped)
+        else:
+            out_chars.append(ch)
+    s = "".join(out_chars)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"(?:GMT)?\d{8}[-_]\d{6}", "", s)
+    s = re.sub(r"\d{6}[_-]\d{6}", "", s)
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s
+
+
+def sanitize_pid(value: str) -> str:
+    """Make an arbitrary routing value safe as a path segment.
+
+    Leading underscores are preserved on purpose — sentinel pids like ``_unrouted``
+    / ``_shared`` use them as a sortable marker. Only stray edge punctuation and
+    whitespace are trimmed.
+    """
+    v = slugify_from_filename(value) if re.search(r"[^a-zA-Z0-9_-]", value or "") else (value or "")
+    v = v.strip("-. ") or "_unrouted"
+    return v
+
+
+def started_at_for(audio: pathlib.Path) -> dt.datetime:
+    """Best-effort recording time: file mtime (stable across re-scans)."""
+    try:
+        return dt.datetime.fromtimestamp(audio.stat().st_mtime)
+    except OSError:
+        return dt.datetime.now()
+
+
+def generate_session_id(audio: pathlib.Path, started_at_dt: dt.datetime) -> str:
+    """Return SessionId ``S{YYYYMMDD}T{HHMM}-{slug}`` (collision handled by caller)."""
+    date_part = started_at_dt.strftime("%Y%m%d")
+    time_part = started_at_dt.strftime("T%H%M")
+    slug = slugify_from_filename(audio.stem) or "voice-note"
+    return f"S{date_part}{time_part}-{slug}"
+
+
+# ---------------------------------------------------------------------------
+# Routing: source folder -> project id (pid)
+# ---------------------------------------------------------------------------
+
+
+def load_mapper(cfg: dict) -> dict:
+    routing = cfg.get("routing") or {}
+    mapper_path = routing.get("mapper")
+    if not mapper_path:
+        return {}
+    p = pathlib.Path(resolve_template(mapper_path, base_placeholder_ctx(cfg))).expanduser()
+    if not p.is_absolute():
+        # resolve relative to config file dir if provided, else CWD
+        cfg_dir = pathlib.Path(cfg.get("_config_dir", ".")).expanduser()
+        p = (cfg_dir / p)
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"mapper unreadable: {exc}")
+        return {}
+
+
+def parse_pid_from_name(folder_name: str, aliases: dict) -> str | None:
+    """Heuristic pid from a folder name: first numeric token, else alias match."""
+    for token in re.findall(r"\d+", folder_name):
+        if int(token) >= 100:
+            return token
+    for alias, pid in (aliases or {}).items():
+        if alias.lower() in folder_name.lower():
+            return str(pid)
+    return None
+
+
+def route_pid_for_audio(audio: pathlib.Path, source_root: pathlib.Path,
+                        source: dict, cfg: dict, mapper: dict) -> tuple[str, bool]:
+    """Return (pid, needs_classification).
+
+    Routing strategies (``source.route``):
+      - ``"mapper"``: match the deepest relative subfolder prefix in ``mapper.folders``.
+      - ``"literal"``/``"fixed"``: use ``source.project`` verbatim.
+      - else / no match: derive from the top-level subfolder name (numeric token
+        or alias), falling back to ``shared_name`` with needs_classification=True.
+    """
+    route = source.get("route", "mapper")
+    if route in ("literal", "fixed") and source.get("project"):
+        return sanitize_pid(str(source["project"])), False
+
+    try:
+        rel = audio.relative_to(source_root)
+    except ValueError:
+        rel = pathlib.Path(audio.name)
+    parts = rel.parts[:-1]  # drop filename
+
+    if route == "mapper" and mapper:
+        folders = mapper.get("folders", {})
+        for depth in range(len(parts), 0, -1):
+            candidate = "/".join(parts[:depth])
+            if candidate in folders:
+                rule = folders[candidate]
+                pid = rule.get("project_id") or rule.get("project")
+                if pid is not None:
+                    return sanitize_pid(str(pid)), False
+        default_rule = mapper.get("_default", {})
+        if default_rule.get("project_id"):
+            return sanitize_pid(str(default_rule["project_id"])), False
+
+    aliases = cfg.get("project_aliases", {})
+    if parts:
+        pid = parse_pid_from_name(parts[0], aliases)
+        if pid:
+            return sanitize_pid(pid), False
+        return sanitize_pid(parts[0]), False
+
+    return cfg.get("shared_name", "_shared"), True
+
+
+# ---------------------------------------------------------------------------
+# Scan: discover source files
+# ---------------------------------------------------------------------------
+
+
+def is_skipped_path(rel: pathlib.Path, skip_folders: list[str],
+                    skip_prefixes: list[str]) -> bool:
+    for part in rel.parts[:-1]:  # only folder components, never the filename
+        if part in skip_folders:
+            return True
+        for prefix in skip_prefixes:
+            if prefix and part.startswith(prefix) and part not in (".", ".."):
+                return True
+    return False
+
+
+def is_output_artifact(name: str, suffixes: list[str]) -> bool:
+    return any(name.endswith(suf) for suf in suffixes)
+
+
+def is_marker_file(name: str, patterns: list[str]) -> bool:
+    for pat in patterns or []:
+        try:
+            if re.match(pat, name):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+def _scan_one_source(root: pathlib.Path, cfg: dict, *, recursive: bool) -> list[pathlib.Path]:
+    extensions = {ext.lower() for ext in cfg.get("scan_extensions", DEFAULT_SCAN_EXTENSIONS)}
+    skip_folders = cfg.get("skip_folders", DEFAULT_SKIP_FOLDERS)
+    skip_prefixes = cfg.get("skip_folder_prefixes", DEFAULT_SKIP_FOLDER_PREFIXES)
+    skip_suffixes = cfg.get("skip_filename_suffixes", DEFAULT_SKIP_FILENAME_SUFFIXES)
+    skip_patterns = cfg.get("skip_filename_patterns", DEFAULT_SKIP_FILENAME_PATTERNS)
+    found: list[pathlib.Path] = []
+    pattern = "**/*" if recursive else "*"
+    for path in root.glob(pattern):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in extensions:
+            continue
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if is_skipped_path(rel, skip_folders, skip_prefixes):
+            continue
+        if is_output_artifact(path.name, skip_suffixes):
+            continue
+        if is_marker_file(path.name, skip_patterns):
+            continue
+        found.append(path)
+    return found
+
+
+def resolved_sources(cfg: dict) -> list[tuple[pathlib.Path, dict]]:
+    """Return [(resolved_root, source_dict), ...] for existing source roots."""
+    ctx = base_placeholder_ctx(cfg)
+    out: list[tuple[pathlib.Path, dict]] = []
+    for source in cfg.get("sources", []):
+        root_tpl = source.get("root", "")
+        root = pathlib.Path(resolve_template(root_tpl, ctx)).expanduser()
+        out.append((root, source))
+    return out
+
+
+def find_audio_files(cfg: dict) -> list[tuple[pathlib.Path, pathlib.Path, dict]]:
+    """Scan all sources. Return [(audio, source_root, source_dict), ...], LIFO by mtime."""
+    seen: set[pathlib.Path] = set()
+    results: list[tuple[pathlib.Path, pathlib.Path, dict]] = []
+    for root, source in resolved_sources(cfg):
+        if not root.is_dir():
+            continue
+        recursive = source.get("recursive", cfg.get("scan_recursive", True))
+        for path in _scan_one_source(root, cfg, recursive=recursive):
+            if path in seen:
+                continue
+            seen.add(path)
+            results.append((path, root, source))
+    results.sort(key=lambda t: _safe_mtime(t[0]), reverse=True)
+    return results
+
+
+def _safe_mtime(p: pathlib.Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def source_for_audio(audio: pathlib.Path, cfg: dict) -> tuple[pathlib.Path, dict] | None:
+    """Find which configured source root is an ancestor of ``audio``."""
+    for root, source in resolved_sources(cfg):
+        try:
+            audio.relative_to(root)
+            return root, source
+        except ValueError:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Meeting-bundle detection (Zoom full-export: mixed audio + video + tracks).
+# A bundle has one ASR'd primary; siblings are tracked but never transcribed.
+# ---------------------------------------------------------------------------
+
+
+def detect_bundle(directory: pathlib.Path,
+                  candidates: list[pathlib.Path]) -> tuple[pathlib.Path | None, list[pathlib.Path], str | None]:
+    if len(candidates) < 2:
+        return None, [], None
+    audios = sorted(p for p in candidates if p.suffix.lower() in AUDIO_EXTS)
+    videos = sorted(p for p in candidates if p.suffix.lower() in VIDEO_EXTS)
+    primary: pathlib.Path | None = None
+
+    if audios:
+        primary = next((p for p in audios if PRIMARY_NAME_PATTERN.match(p.name)), None)
+        if primary is None and videos:
+            eligible = [p for p in audios if not p.name.lower().startswith("audio_only_")]
+            if eligible:
+                try:
+                    primary = max(eligible, key=lambda p: p.stat().st_size)
+                except OSError:
+                    primary = eligible[0]
+
+    if primary is None and len(videos) >= 2:
+        toks = [m.group(1) if m else None for m in (BUNDLE_TS_PATTERN.search(v.name) for v in videos)]
+        unique_ts = {t for t in toks if t}
+        if len(unique_ts) == 1 and all(t is not None for t in toks):
+            avo = [v for v in videos if "_avo_" in v.name.lower()]
+            if avo:
+                primary = avo[0]
+            else:
+                try:
+                    primary = min(videos, key=lambda p: p.stat().st_size)
+                except OSError:
+                    primary = videos[0]
+
+    if primary is None:
+        return None, [], None
+    siblings = [p for p in audios + videos if p != primary]
+    if not siblings:
+        return None, [], None
+    m = BUNDLE_TS_PATTERN.search(primary.name)
+    bundle_id = m.group(1) if m else f"{directory.name}__{primary.stem}"
+    return primary, siblings, bundle_id
+
+
+def sibling_role(audio: pathlib.Path) -> str:
+    return "sibling-video" if audio.suffix.lower() in VIDEO_EXTS else "sibling-audio"
+
+
+def stamp_bundle_sibling(audio: pathlib.Path, bundle_id: str, primary: pathlib.Path,
+                         pid: str | None, host_label: str) -> None:
+    """Mark ``audio`` as a bundle sibling (tracked, never ASR'd). Idempotent."""
+    sf = state_path(audio)
+    if sf.exists():
+        try:
+            existing = json.loads(sf.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+        if existing.get("status") in {"asr-done", "in-progress", "failed", "bundle-sibling"}:
+            changed = False
+            for k, v in (("bundle_id", bundle_id), ("bundle_primary", str(primary)),
+                         ("bundle_role", existing.get("bundle_role") or sibling_role(audio))):
+                if existing.get(k) != v:
+                    existing[k] = v
+                    changed = True
+            if changed:
+                atomic_write_json(sf, existing)
+            return
+    atomic_write_json(sf, {
+        "status": "bundle-sibling", "pid": pid, "attempts": 0,
+        "started_at": None, "finished_at": None, "transcript_path": None,
+        "last_error": None, "host": host_label, "duration_sec": None,
+        "bundle_id": bundle_id, "bundle_role": sibling_role(audio),
+        "bundle_primary": str(primary),
+    })
+
+
+def detect_bundle_for_file(audio: pathlib.Path, source_root: pathlib.Path,
+                           cfg: dict) -> tuple[bool, str | None, list[pathlib.Path]]:
+    extensions = {ext.lower() for ext in cfg.get("scan_extensions", DEFAULT_SCAN_EXTENSIONS)}
+    skip_folders = cfg.get("skip_folders", DEFAULT_SKIP_FOLDERS)
+    skip_prefixes = cfg.get("skip_folder_prefixes", DEFAULT_SKIP_FOLDER_PREFIXES)
+    skip_suffixes = cfg.get("skip_filename_suffixes", DEFAULT_SKIP_FILENAME_SUFFIXES)
+    members: list[pathlib.Path] = []
+    try:
+        entries = list(audio.parent.iterdir())
+    except OSError:
+        return False, None, []
+    for sib in entries:
+        if not sib.is_file() or sib.suffix.lower() not in extensions:
+            continue
+        try:
+            rel = sib.relative_to(source_root)
+        except ValueError:
+            continue
+        if is_skipped_path(rel, skip_folders, skip_prefixes):
+            continue
+        if is_output_artifact(sib.name, skip_suffixes):
+            continue
+        members.append(sib)
+    primary, siblings, bundle_id = detect_bundle(audio.parent, members)
+    if primary == audio:
+        return True, bundle_id, siblings
+    return False, None, []
+
+
+def maybe_stamp_primary_bundle(state: dict, audio: pathlib.Path,
+                               source_root: pathlib.Path, cfg: dict) -> dict:
+    is_primary, bid, siblings = detect_bundle_for_file(audio, source_root, cfg)
+    if is_primary:
+        state["bundle_id"] = bid
+        state["bundle_role"] = "primary"
+        state["bundle_members"] = sorted(str(s) for s in siblings)
+    return state
+
+
+def apply_bundle_metadata(candidates: list[tuple[pathlib.Path, pathlib.Path, dict]],
+                          cfg: dict, mapper: dict) -> list[tuple[pathlib.Path, pathlib.Path, dict]]:
+    """Group by directory + Zoom timestamp, stamp siblings, drop them from the queue.
+
+    Files without a Zoom timestamp token are never bundled (each is standalone).
+    """
+    host_label = host_label_of(cfg)
+    by_dir: dict[pathlib.Path, list[tuple[pathlib.Path, pathlib.Path, dict]]] = {}
+    for tup in candidates:
+        by_dir.setdefault(tup[0].parent, []).append(tup)
+
+    kept: list[tuple[pathlib.Path, pathlib.Path, dict]] = []
+    for directory, dir_members in by_dir.items():
+        by_ts: dict[str, list[tuple[pathlib.Path, pathlib.Path, dict]]] = {}
+        for tup in dir_members:
+            m = BUNDLE_TS_PATTERN.search(tup[0].name)
+            key = m.group(1) if m else "_no_ts"
+            by_ts.setdefault(key, []).append(tup)
+        for ts_key, members in by_ts.items():
+            if ts_key == "_no_ts":
+                kept.extend(members)
+                continue
+            paths = [t[0] for t in members]
+            primary, siblings, bundle_id = detect_bundle(directory, paths)
+            if primary is None:
+                kept.extend(members)
+                continue
+            primary_tup = next(t for t in members if t[0] == primary)
+            src_root = primary_tup[1]
+            log(f"bundle in {directory.name}/[{ts_key}]: primary={primary.name} "
+                f"siblings={len(siblings)} (id={bundle_id})")
+            pid, _ = route_pid_for_audio(primary, src_root, primary_tup[2], cfg, mapper)
+            for sib in siblings:
+                stamp_bundle_sibling(sib, bundle_id, primary, pid, host_label)
+            kept.append(primary_tup)
+    return kept
+
+
+# ---------------------------------------------------------------------------
+# State machine: sidecar, markers, transitions
+# ---------------------------------------------------------------------------
+
+
+def state_path(audio: pathlib.Path) -> pathlib.Path:
+    return audio.with_suffix(audio.suffix + ".state.json")
+
+
+def claim_path(audio: pathlib.Path) -> pathlib.Path:
+    return audio.with_suffix(audio.suffix + ".claim.json")
+
+
+def marker_processed_asr(audio: pathlib.Path) -> pathlib.Path:
+    return audio.with_suffix(audio.suffix + ".processed-asr")
+
+
+def existing_transcript(audio: pathlib.Path,
+                        transcript_dir: pathlib.Path | None = None) -> pathlib.Path | None:
+    """Look for an already-written transcript (catch-up of pre-existing work).
+
+    Searches, in order: the resolved ``transcript_dir`` for this file, a local
+    ``Transcripts/`` next to the audio, and historical sidecar formats. Falls back
+    to recording-timestamp matching because the ASR worker transliterates names.
+    """
+    base = audio.stem
+    direct = [
+        audio.parent / f"{base}-transcript.md",
+        audio.parent / "Transcripts" / f"{base}-transcript.md",
+        audio.parent / f"{base}_original.txt",
+    ]
+    search_dirs = [transcript_dir] if transcript_dir else []
+    search_dirs.append(audio.parent / "Transcripts")
+    for d in search_dirs:
+        if d and d.is_dir():
+            for c in d.glob(f"*{base}*-transcript.md"):
+                direct.append(c)
+            translit = slugify_from_filename(base)
+            if translit:
+                for c in d.glob(f"*{translit}*-transcript.md"):
+                    direct.append(c)
+    for c in direct:
+        if c.is_file():
+            return c
+    tokens = re.findall(r"\d{6,}", base)
+    if not tokens:
+        return None
+    for d in search_dirs:
+        if d and d.is_dir():
+            for tr in d.glob("*-transcript.md"):
+                if any(token in tr.name for token in tokens):
+                    return tr
+    return None
+
+
+def caught_up_state(transcript: pathlib.Path, pid: str | None, host_label: str) -> dict:
+    mtime = dt.datetime.fromtimestamp(transcript.stat().st_mtime).isoformat(timespec="seconds")
+    return {
+        "status": "asr-done", "pid": pid, "attempts": 1,
+        "started_at": mtime, "finished_at": mtime,
+        "transcript_path": str(transcript), "last_error": None,
+        "host": f"{host_label}-CATCHUP", "duration_sec": None, "caught_up": True,
+    }
+
+
+def queued_state(pid: str | None, host_label: str) -> dict:
+    return {
+        "status": "queued", "pid": pid, "attempts": 0,
+        "started_at": None, "finished_at": None,
+        "transcript_path": None, "last_error": None,
+        "host": host_label, "duration_sec": None, "caught_up": False,
+    }
+
+
+def reset_stuck(state: dict, threshold_min: int) -> bool:
+    if state.get("status") != "in-progress":
+        return False
+    started_at = state.get("started_at")
+    if not started_at:
+        return False
+    try:
+        started = dt.datetime.fromisoformat(started_at)
+    except Exception:
+        return False
+    age_min = (dt.datetime.now() - started).total_seconds() / 60
+    if age_min > threshold_min:
+        state["status"] = "queued"
+        state["last_error"] = f"stuck > {threshold_min}m, reset"
+        return True
+    return False
+
+
+def move_to_failed(audio: pathlib.Path, source_root: pathlib.Path, error_tail: str) -> None:
+    """Move a permanently-failed file (+ sidecars) into ``{source_root}/_failed/``."""
+    failed_dir = source_root / "_failed"
+    failed_dir.mkdir(parents=True, exist_ok=True)
+    for p in (audio, state_path(audio), marker_processed_asr(audio), claim_path(audio)):
+        if p.exists():
+            try:
+                shutil.move(str(p), str(failed_dir / p.name))
+            except Exception as exc:
+                log(f"move_to_failed {p.name} failed: {exc}")
+    try:
+        (failed_dir / f"{audio.name}.error.txt").write_text(error_tail or "", encoding="utf-8")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# CPU-aware scheduling
+# ---------------------------------------------------------------------------
+
+
+def measure_cpu_percent(sample_sec: float = 1.0) -> float | None:
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return None
+    try:
+        return float(psutil.cpu_percent(interval=sample_sec))
+    except Exception:
+        return None
+
+
+def wait_for_cpu_available(cfg: dict) -> tuple[bool, str]:
+    """Wait until CPU load drops below threshold, bounded by a max wait time.
+
+    Returns (proceed, reason). If psutil is unavailable, proceeds (graceful no-op).
+    proceed=False means: exceeded max wait; keep the file queued and retry later.
+    """
+    if not cfg.get("respect_cpu_load", True):
+        return True, "cpu-check disabled in config"
+    threshold = float(cfg.get("cpu_threshold_percent", 70))
+    poll_sec = float(cfg.get("cpu_check_poll_sec", 60))
+    max_wait_sec = float(cfg.get("cpu_check_max_wait_min", 30)) * 60.0
+    initial = measure_cpu_percent(sample_sec=2.0)
+    if initial is None:
+        return True, "cpu-check skipped (psutil unavailable)"
+    if initial < threshold:
+        return True, f"cpu={initial:.0f}% below threshold {threshold:.0f}%"
+    log(f"cpu busy: {initial:.0f}% >= {threshold:.0f}%; waiting up to {max_wait_sec/60:.0f}m")
+    waited = 0.0
+    while waited < max_wait_sec:
+        time.sleep(poll_sec)
+        waited += poll_sec
+        current = measure_cpu_percent(sample_sec=2.0)
+        if current is None:
+            return True, f"cpu-check skipped mid-wait after {waited/60:.1f}m"
+        if current < threshold:
+            return True, f"cpu={current:.0f}% available after {waited/60:.1f}m"
+        log(f"cpu still busy: {current:.0f}% (waited {waited/60:.1f}m / {max_wait_sec/60:.0f}m)")
+    return False, f"cpu busy >{max_wait_sec/60:.0f}m, deferred"
+
+
+# ---------------------------------------------------------------------------
+# Host-local lock + process window
+# ---------------------------------------------------------------------------
+
+
+def acquire_watcher_lock() -> pathlib.Path | None:
+    """Guard concurrent invocations on THIS machine (not cross-machine claim)."""
+    lock_dir = pathlib.Path(tempfile.gettempdir()) / "audio-inbox"
+    lock_dir.mkdir(exist_ok=True)
+    lock = lock_dir / f"watcher-{socket.gethostname()}.lock"
+    if lock.exists():
+        try:
+            data = json.loads(lock.read_text(encoding="utf-8"))
+            started = dt.datetime.fromisoformat(data.get("started_at", ""))
+            age_min = (dt.datetime.now() - started).total_seconds() / 60
+            if age_min < 360:
+                log(f"watcher lock present, age {age_min:.1f}m (pid={data.get('pid')}); skipping")
+                return None
+            log(f"watcher lock stale ({age_min:.1f}m); taking over")
+        except Exception:
+            log("watcher lock unparseable; taking over")
+    atomic_write_json(lock, {
+        "host": socket.gethostname(), "pid": os.getpid(),
+        "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+    })
+    return lock
+
+
+def release_watcher_lock(lock: pathlib.Path) -> None:
+    try:
+        lock.unlink()
+    except OSError:
+        pass
+
+
+def _within_process_window(window: str | None, now: dt.datetime | None = None) -> bool:
+    """True if ``now`` is within ``"HH:MM-HH:MM"`` (overnight ranges supported)."""
+    if not window:
+        return True
+    try:
+        start_str, end_str = window.split("-", 1)
+        sh, sm = (int(x) for x in start_str.strip().split(":"))
+        eh, em = (int(x) for x in end_str.strip().split(":"))
+    except (ValueError, AttributeError):
+        return True
+    cur = (now or dt.datetime.now()).time()
+    start, end = dt.time(sh, sm), dt.time(eh, em)
+    if start <= end:
+        return start <= cur < end
+    return cur >= start or cur < end
+
+
+# ---------------------------------------------------------------------------
+# Multi-node claim coordination (opt-in: cfg.enable_multi_machine).
+# Per-file <file>.claim.json on the shared source; claim-and-verify + lease +
+# heartbeat. Resilient to cloud-drive eventual consistency.
+# ---------------------------------------------------------------------------
+
+
+def is_claim_expired(claim: dict, now_utc: dt.datetime, lease_minutes: int) -> bool:
+    lease = _parse_utc(claim.get("lease_until"))
+    if lease is None:
+        claimed = _parse_utc(claim.get("claimed_at"))
+        if claimed is None:
+            return True
+        lease = claimed + dt.timedelta(minutes=lease_minutes)
+    return now_utc >= lease
+
+
+def resolve_claim_winner(a: dict, b: dict) -> dict:
+    ta = _parse_utc(a.get("claimed_at")) or utcnow()
+    tb = _parse_utc(b.get("claimed_at")) or utcnow()
+    if ta != tb:
+        return a if ta < tb else b
+    return a if a.get("claimed_by", "") <= b.get("claimed_by", "") else b
+
+
+def host_can_process(cfg: dict) -> bool:
+    """A file's required capabilities vs this host's. Generic: gate by config.
+
+    ``required_capabilities`` (top-level) must be a subset of node capabilities.
+    Returns True when multi-machine is off or no requirement is configured.
+    """
+    if not cfg.get("enable_multi_machine"):
+        return True
+    required = set(cfg.get("required_capabilities", []))
+    if not required:
+        return True
+    have = set(node_field(cfg, "capabilities", []) or [])
+    return required.issubset(have)
+
+
+def try_claim_file(audio: pathlib.Path, cfg: dict) -> bool:
+    """Claim-and-verify over a cloud-synced claim.json.
+
+    Single-machine (enable_multi_machine false) -> True immediately (no claim file).
+    """
+    if not cfg.get("enable_multi_machine"):
+        return True
+    host = host_label_of(cfg)
+    lease_min = int(cfg.get("claim_lease_minutes", 30))
+    wait_sec = float(cfg.get("claim_sync_wait_seconds", 8))
+    now = utcnow()
+    cp = claim_path(audio)
+    existing = {}
+    if cp.is_file():
+        try:
+            existing = json.loads(cp.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    claim = existing.get("claim") or {}
+    preempt = int(claim.get("preempt_count", 0))
+    if claim.get("claimed_by") and claim["claimed_by"] != host:
+        if not is_claim_expired(claim, now, lease_min):
+            log(f"claim held by {claim['claimed_by']} (lease ok): yield {audio.name}")
+            return False
+        log(f"claim by {claim['claimed_by']} expired; preempting {audio.name}")
+        preempt += 1
+    my_claim = {
+        "claimed_by": host,
+        "claimed_at": utcnow_iso(),
+        "lease_until": (now + dt.timedelta(minutes=lease_min)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "heartbeat_at": utcnow_iso(),
+        "claim_phase": "pickup",
+        "preempt_count": preempt,
+    }
+    atomic_write_json(cp, {"claim": my_claim, "audio": audio.name})
+    time.sleep(wait_sec)  # let the cloud drive converge before re-reading
+    final = {}
+    if cp.is_file():
+        try:
+            final = json.loads(cp.read_text(encoding="utf-8"))
+        except Exception:
+            final = {}
+    final_claim = final.get("claim") or {}
+    if final_claim.get("claimed_by") == host:
+        return True
+    log(f"race-lost: {audio.name} -> {final_claim.get('claimed_by') or 'unknown'}")
+    return False
+
+
+class _ClaimHeartbeat:
+    """Daemon thread refreshing claim.json heartbeat + extending the lease."""
+
+    def __init__(self, audio: pathlib.Path, cfg: dict):
+        self.audio = audio
+        self.cfg = cfg
+        self.host = host_label_of(cfg)
+        self.enabled = bool(cfg.get("enable_multi_machine"))
+        self.interval = max(30, int(cfg.get("claim_heartbeat_minutes", 5)) * 60)
+        self.lease_min = int(cfg.get("claim_lease_minutes", 30))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _beat_once(self) -> None:
+        cp = claim_path(self.audio)
+        if not cp.is_file():
+            return
+        try:
+            data = json.loads(cp.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        claim = data.get("claim") or {}
+        if claim.get("claimed_by") != self.host:
+            return  # preempted — stop refreshing someone else's claim
+        now = utcnow()
+        claim["heartbeat_at"] = utcnow_iso()
+        claim["lease_until"] = (now + dt.timedelta(minutes=self.lease_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        claim["claim_phase"] = "asr"
+        data["claim"] = claim
+        try:
+            atomic_write_json(cp, data)
+        except Exception as exc:
+            log(f"heartbeat write failed (non-critical): {exc}")
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            self._beat_once()
+
+    def __enter__(self):
+        if self.enabled:
+            self._thread = threading.Thread(target=self._run, daemon=True, name="claim-heartbeat")
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        return False
+
+
+def retire_claim(audio: pathlib.Path, cfg: dict) -> None:
+    """Mark claim_phase=done after asr-done (tidy signal; lease already covers it)."""
+    if not cfg.get("enable_multi_machine"):
+        return
+    host = host_label_of(cfg)
+    cp = claim_path(audio)
+    if not cp.is_file():
+        return
+    try:
+        data = json.loads(cp.read_text(encoding="utf-8"))
+        claim = data.get("claim") or {}
+        if claim.get("claimed_by") == host:
+            claim["claim_phase"] = "done"
+            claim["heartbeat_at"] = utcnow_iso()
+            data["claim"] = claim
+            atomic_write_json(cp, data)
+    except Exception as exc:
+        log(f"retire claim failed (non-critical): {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Output resolution: transcript_dir / state_dir / session-card adapter
+# ---------------------------------------------------------------------------
+
+
+def session_placeholder_ctx(cfg: dict, pid: str, sid: str, started: dt.datetime) -> dict:
+    ctx = base_placeholder_ctx(cfg)
+    ctx.update({
+        "pid": pid,
+        "sid": sid,
+        "YYYY": started.strftime("%Y"),
+        "YYYY-MM": started.strftime("%Y-%m"),
+        "YYYY-MM-DD": started.strftime("%Y-%m-%d"),
+    })
+    return ctx
+
+
+def resolve_output_dir(cfg: dict, key: str, ctx: dict, fallback: pathlib.Path) -> pathlib.Path:
+    outputs = cfg.get("outputs") or {}
+    tpl = outputs.get(key)
+    if not tpl:
+        return fallback
+    return pathlib.Path(resolve_template(tpl, ctx)).expanduser()
+
+
+def write_session_card(cfg: dict, state: dict, audio: pathlib.Path,
+                       transcript: pathlib.Path | None, ctx: dict) -> None:
+    """Optional output adapter. Default 'none' = no card (fully generic core).
+
+    'obsidian' writes a minimal stub session note with frontmatter; the personal
+    enrichment layer (project 258) extends it. Kept intentionally small.
+    """
+    outputs = cfg.get("outputs") or {}
+    card_cfg = outputs.get("session_card") or {}
+    adapter = card_cfg.get("adapter", "none")
+    if adapter == "none":
+        return
+    if adapter != "obsidian":
+        log(f"unknown session_card adapter '{adapter}'; skipping")
+        return
+    target_tpl = card_cfg.get("target")
+    if not target_tpl:
+        return
+    target_dir = pathlib.Path(resolve_template(target_tpl, ctx)).expanduser()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    sid = state.get("session_id") or audio.stem
+    card = target_dir / f"{sid}.md"
+    if card.exists():
+        return
+    tr = str(transcript) if transcript else ""
+    body = (
+        "---\n"
+        "tags: [note, audio-session]\n"
+        f"SessionId: {sid}\n"
+        f"pid: \"{state.get('pid', '')}\"\n"
+        f"media_primary: \"{audio.name}\"\n"
+        f"transcript_file: \"{tr}\"\n"
+        f"CDate: {dt.datetime.now().strftime('%Y-%m-%d')}\n"
+        "stage: 1\n"
+        "---\n\n"
+        f"# Session: {sid}\n\n"
+        f"- Audio: `{audio.name}`\n"
+        f"- Transcript: `{tr}`\n"
+    )
+    try:
+        card.write_text(body, encoding="utf-8")
+    except Exception as exc:
+        log(f"session card write failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# ASR dispatch
+# ---------------------------------------------------------------------------
+
+
+def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
+            source_root: pathlib.Path, output_dir: pathlib.Path,
+            config_path: pathlib.Path) -> tuple[bool, str, pathlib.Path | None]:
+    """Invoke media_transcribe_cli for one file. Returns (ok, error_tail, transcript)."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    python = node_field(cfg, "transcribe_python", None) or sys.executable
+    cli = cfg.get("transcribe_cli")
+    if not cli:
+        cli = str(pathlib.Path(__file__).resolve().parent / "media_transcribe_cli.py")
+
+    cmd: list[str] = [
+        python, cli,
+        "--config", str(config_path),
+        "--input", str(audio),
+        "--output-dir", str(output_dir),
+        "--quality-preset", cfg.get("quality_preset", "medium"),
+        "--speaker-mode", cfg.get("speaker_mode", "diarize"),
+        "--timestamps", cfg.get("timestamps", "both"),
+        "--inbox", str(source_root),
+    ]
+    if pid:
+        cmd += ["--project-id", str(pid)]
+
+    log(f"ASR start: {audio.name} (pid={pid}, output={output_dir})")
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
+        )
+    except Exception as exc:
+        return False, f"subprocess error: {exc}", None
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    def _tee(stream, sink: list[str]) -> None:
+        for line in iter(stream.readline, ""):
+            sink.append(line)
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        stream.close()
+
+    t_out = threading.Thread(target=_tee, args=(proc.stdout, stdout_lines), daemon=True)
+    t_err = threading.Thread(target=_tee, args=(proc.stderr, stderr_lines), daemon=True)
+    t_out.start()
+    t_err.start()
+    proc.wait()
+    t_out.join()
+    t_err.join()
+
+    full_stderr = "".join(stderr_lines)
+    stderr_tail = "\n".join(full_stderr.splitlines()[-30:])
+    # The worker may write all artifacts then SIGSEGV in the CUDA destructor at
+    # atexit (Windows + some GPUs + float16). A `phase=stdout_json ok` marker is a
+    # definitive success signal regardless of the exit code — don't waste retries.
+    stdout_json_ok = "phase=stdout_json ok" in full_stderr
+    if proc.returncode != 0 and not stdout_json_ok:
+        return False, stderr_tail, None
+    if proc.returncode != 0 and stdout_json_ok:
+        log(f"exit={proc.returncode} but stdout_json ok — proceeding (cosmetic atexit crash)")
+
+    # Discover the transcript the worker wrote (it transliterates names).
+    transcript = None
+    for cand in output_dir.glob(f"*{audio.stem}*-transcript.md"):
+        transcript = cand
+        break
+    if transcript is None:
+        translit = slugify_from_filename(audio.stem)
+        if translit:
+            for cand in output_dir.glob(f"*{translit}*-transcript.md"):
+                transcript = cand
+                break
+    if transcript is None:
+        m = re.search(r"(\d{6})[_-](\d{6})", audio.stem)
+        if m:
+            ts_token = f"{m.group(1)}_{m.group(2)}"
+            for cand in output_dir.glob("*-transcript.md"):
+                if ts_token in cand.name:
+                    transcript = cand
+                    break
+    return True, stderr_tail, transcript
+
+
+# ---------------------------------------------------------------------------
+# Per-file processing
+# ---------------------------------------------------------------------------
+
+
+def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dict,
+                     cfg: dict, mapper: dict, config_path: pathlib.Path) -> None:
+    state_file = state_path(audio)
+    host_label = host_label_of(cfg)
+    pid, needs_class = route_pid_for_audio(audio, source_root, source, cfg, mapper)
+    started = started_at_for(audio)
+
+    if not host_can_process(cfg):
+        return
+    claim_required = source.get("claim", False)
+    if claim_required and not try_claim_file(audio, cfg):
+        return
+
+    # resolve outputs early (used for catch-up search + ASR + state mirror)
+    sid_preview = generate_session_id(audio, started)
+    ctx = session_placeholder_ctx(cfg, pid, sid_preview, started)
+    transcript_dir = resolve_output_dir(cfg, "transcript_dir", ctx, audio.parent / "Transcripts")
+    state_dir = resolve_output_dir(cfg, "state_dir", ctx, transcript_dir)
+
+    # 1) catch-up: existing transcript without a sidecar -> mark asr-done
+    if not state_file.exists():
+        transcript = existing_transcript(audio, transcript_dir)
+        if transcript:
+            state = caught_up_state(transcript, pid, host_label)
+            state["session_id"] = sid_preview
+            maybe_stamp_primary_bundle(state, audio, source_root, cfg)
+            atomic_write_json(state_file, state)
+            marker_processed_asr(audio).touch()
+            return
+        state = queued_state(pid, host_label)
+        state["session_id"] = sid_preview
+        if needs_class:
+            state["needs_classification"] = True
+        maybe_stamp_primary_bundle(state, audio, source_root, cfg)
+        atomic_write_json(state_file, state)
+
+    # 2) load + reset-stuck
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    if reset_stuck(state, cfg.get("stuck_threshold_minutes", 120)):
+        atomic_write_json(state_file, state)
+    status = state.get("status")
+    if status in {"asr-done", "failed", "in-progress", "bundle-sibling"}:
+        return
+    if not state.get("session_id"):
+        state["session_id"] = sid_preview
+
+    # 3) CPU-aware gate
+    proceed, cpu_reason = wait_for_cpu_available(cfg)
+    if not proceed:
+        log(f"defer ASR: {audio.name} ({cpu_reason})")
+        return
+
+    # 4) queued -> in-progress -> ASR
+    state["status"] = "in-progress"
+    state["started_at"] = now_iso()
+    state["host"] = host_label
+    atomic_write_json(state_file, state)
+
+    log(f"asr start: {audio.name} session={state.get('session_id')} "
+        f"speaker_mode={cfg.get('speaker_mode', 'diarize')}")
+    t0 = time.time()
+    with _ClaimHeartbeat(audio, cfg):
+        ok, err_tail, transcript = run_asr(audio, cfg, pid, source_root, transcript_dir, config_path)
+    duration = time.time() - t0
+    state["duration_sec"] = round(duration, 1)
+    state["finished_at"] = now_iso()
+    log(f"asr done: {audio.name} ok={ok} elapsed={duration/60:.1f}m "
+        f"transcript={transcript.name if transcript else 'NONE'}")
+
+    if ok and transcript:
+        state["status"] = "asr-done"
+        state["transcript_path"] = str(transcript)
+        state["last_error"] = None
+        if cfg.get("enable_multi_machine"):
+            state["processed_by_host"] = host_label
+        atomic_write_json(state_file, state)
+        # mirror canonical state into outputs.state_dir + optional session card
+        try:
+            mirror = state_dir / "state.json"
+            atomic_write_json(mirror, state)
+        except Exception as exc:
+            log(f"state_dir mirror failed: {exc}")
+        try:
+            write_session_card(cfg, state, audio, transcript, ctx)
+        except Exception as exc:
+            log(f"session card adapter failed: {exc}")
+        retire_claim(audio, cfg)
+        marker_processed_asr(audio).touch()
+        log(f"ASR ok: {audio.name} ({duration/60:.1f}m)")
+        return
+
+    # failure -> retry or terminal
+    state["attempts"] = int(state.get("attempts", 0)) + 1
+    state["last_error"] = err_tail or "unknown error"
+    max_attempts = int(cfg.get("max_attempts", 3))
+    if state["attempts"] < max_attempts:
+        state["status"] = "queued"
+        atomic_write_json(state_file, state)
+        log(f"ASR fail (retry {state['attempts']}/{max_attempts}): {audio.name}")
+    else:
+        state["status"] = "failed"
+        atomic_write_json(state_file, state)
+        log(f"ASR fail (final): {audio.name} -> _failed/")
+        try:
+            move_to_failed(audio, source_root, err_tail or "")
+        except Exception as exc:
+            log(f"move_to_failed error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Sweep orchestration
+# ---------------------------------------------------------------------------
+
+
+def run_once(cfg: dict, config_path: pathlib.Path, *,
+             catch_up_only: bool = False,
+             time_budget_minutes: int | None = None,
+             max_files: int | None = None,
+             force_window: bool = False) -> None:
+    sources = resolved_sources(cfg)
+    if not sources:
+        log("no sources configured")
+        return
+    existing_roots = [r for r, _ in sources if r.is_dir()]
+    if not existing_roots:
+        log(f"no source root exists yet: {[str(r) for r, _ in sources]}")
+        return
+
+    window = cfg.get("process_window_local")
+    if window and not force_window and not _within_process_window(window):
+        log(f"outside process_window_local={window}; skipping tick")
+        return
+    if window and force_window and not _within_process_window(window):
+        log(f"--force-window: bypassing process_window_local={window}")
+
+    lock = acquire_watcher_lock()
+    if lock is None:
+        return
+
+    mapper = load_mapper(cfg)
+    host_label = host_label_of(cfg)
+    stop_flag = existing_roots[0] / ".audio-inbox-stop"
+    try:
+        if catch_up_only:
+            files = find_audio_files(cfg)
+            files = apply_bundle_metadata(files, cfg, mapper)
+            log(f"found {len(files)} candidate files (post-bundle filter)")
+            for audio, root, source in files:
+                if state_path(audio).exists():
+                    continue
+                pid, _ = route_pid_for_audio(audio, root, source, cfg, mapper)
+                started = started_at_for(audio)
+                ctx = session_placeholder_ctx(cfg, pid, generate_session_id(audio, started), started)
+                transcript_dir = resolve_output_dir(cfg, "transcript_dir", ctx, audio.parent / "Transcripts")
+                transcript = existing_transcript(audio, transcript_dir)
+                if not transcript:
+                    continue
+                st = caught_up_state(transcript, pid, host_label)
+                atomic_write_json(state_path(audio), st)
+                marker_processed_asr(audio).touch()
+                log(f"caught-up: {audio.name}")
+            return
+
+        start_time = time.time()
+        budget_sec = (time_budget_minutes * 60) if time_budget_minutes else None
+        processed = 0
+        while True:
+            if stop_flag.exists():
+                log("graceful shutdown via .audio-inbox-stop")
+                try:
+                    stop_flag.unlink()
+                except OSError as exc:
+                    log(f"stop-flag unlink failed: {exc}")
+                break
+            if max_files is not None and processed >= max_files:
+                log(f"max-files limit reached ({max_files}); exiting")
+                break
+            if budget_sec is not None and (time.time() - start_time) > budget_sec:
+                log(f"time-budget exhausted ({time_budget_minutes}m); exiting")
+                break
+
+            files = find_audio_files(cfg)
+            files = apply_bundle_metadata(files, cfg, mapper)
+            actionable: list[tuple[pathlib.Path, pathlib.Path, dict]] = []
+            for audio, root, source in files:
+                if not host_can_process(cfg):
+                    continue
+                sf = state_path(audio)
+                if not sf.exists():
+                    actionable.append((audio, root, source))
+                    continue
+                try:
+                    s = json.loads(sf.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if s.get("status") == "queued":
+                    actionable.append((audio, root, source))
+            if not actionable:
+                log("queue empty; nothing more to process; exiting cleanly")
+                break
+            audio, root, source = actionable[0]
+            log(f"queue rebuilt: {len(actionable)} actionable; processing newest: {audio.name}")
+            process_one_file(audio, root, source, cfg, mapper, config_path)
+            processed += 1
+        log(f"run_once done: processed={processed} in {(time.time()-start_time)/60:.1f}m")
+    finally:
+        release_watcher_lock(lock)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Audio Inbox watcher (generic)")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG),
+                        help=f"Path to node config JSON (default: {DEFAULT_CONFIG})")
+    parser.add_argument("--once", action="store_true",
+                        help="Run a single sweep and exit (the only mode currently)")
+    parser.add_argument("--catch-up-only", action="store_true",
+                        help="Only mark files with existing transcripts as asr-done; never run ASR")
+    parser.add_argument("--time-budget-minutes", type=int, default=None,
+                        help="Max wall-clock minutes; exits cleanly between files when exhausted")
+    parser.add_argument("--max-files", type=int, default=None,
+                        help="Max files to process this run (graceful stop after N)")
+    parser.add_argument("--force-window", action="store_true",
+                        help="Bypass process_window_local gate for an urgent local run")
+    args = parser.parse_args()
+
+    cfg_path = pathlib.Path(args.config).expanduser().resolve()
+    if not cfg_path.is_file():
+        sys.stderr.write(
+            f"config not found: {cfg_path}\n"
+            "Copy config/node.example.json -> config/node.local.json and fill in your paths.\n"
+        )
+        return 2
+    cfg = load_config(cfg_path)
+    cfg["_config_dir"] = str(cfg_path.parent)
+
+    run_once(cfg, cfg_path,
+             catch_up_only=args.catch_up_only,
+             time_budget_minutes=args.time_budget_minutes,
+             max_files=args.max_files,
+             force_window=args.force_window)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

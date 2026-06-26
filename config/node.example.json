@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to node.local.json (gitignored) and fill in your own paths. Placeholders {hub_root}/{pid}/{cache_root}/{sid} resolve at runtime.",
+  "_comment": "Copy to node.local.json (gitignored) and fill in your own paths. Placeholders {hub_root}/{pid}/{cache_root}/{sid}/{YYYY-MM} resolve at runtime. The watcher (src/audio_inbox_watch.py) reads this file.",
   "node": {
     "host_label": "<UNIQUE-NODE-NAME>",
     "capabilities": ["gpu-cuda", "diarization", "asr-fast"],
@@ -11,9 +11,13 @@
     "diarization_device": "cuda"
   },
   "transcribe_python": "C:/work/venvs/asr/Scripts/python.exe",
+  "_transcribe_cli": "optional: path to media_transcribe_cli.py; defaults to the one next to the watcher",
+
   "sources": [
-    { "root": "{hub_root}/_inbox", "route": "mapper", "claim": true }
+    { "root": "{hub_root}/_inbox", "route": "mapper", "claim": true, "recursive": true }
   ],
+  "routing": { "mapper": "config/mapper.local.json" },
+
   "outputs": {
     "transcript_dir": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/transcripts",
     "state_dir": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/pipeline",
@@ -21,10 +25,39 @@
       "global_registry": "{hub_root}/_voiceprints",
       "project_projection": "{hub_root}/{pid}/Speakers",
       "local_cache": "{cache_root}/{pid}"
-    }
+    },
+    "session_card": { "adapter": "none", "target": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}" }
   },
+
   "hub_root": "<GOOGLE_DRIVE>/Hub",
   "voiceprint_mode": "off",
+
+  "_asr_knobs": "forwarded to media_transcribe_cli",
+  "quality_preset": "medium",
+  "speaker_mode": "diarize",
+  "timestamps": "both",
+
+  "_scan_knobs": "which files the watcher picks up; omit any key to use built-in defaults",
+  "scan_extensions": [".m4a", ".mp3", ".wav", ".oga", ".mp4", ".mov", ".webm", ".m4v"],
+  "scan_recursive": true,
+  "skip_folders": ["_failed", "_archive", "sessions", "Audio Record", "Transcripts"],
+  "skip_folder_prefixes": ["_", "."],
+
+  "_scheduling_knobs": "CPU-aware deferral + retry policy + optional time window",
+  "respect_cpu_load": true,
+  "cpu_threshold_percent": 70,
+  "cpu_check_poll_sec": 60,
+  "cpu_check_max_wait_min": 30,
+  "max_attempts": 3,
+  "stuck_threshold_minutes": 120,
+  "process_window_local": "",
+
+  "_multi_node": "opt-in cross-machine coordination via per-file claim.json",
   "enable_multi_machine": true,
+  "required_capabilities": [],
+  "claim_lease_minutes": 30,
+  "claim_heartbeat_minutes": 5,
+  "claim_sync_wait_seconds": 8,
+
   "secrets": { "hf_token": "env:HF_TOKEN" }
 }
