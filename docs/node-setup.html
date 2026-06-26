@@ -212,14 +212,22 @@
 
 <span class="c">:: создать venv</span>
 <span class="k">py</span> -3.11 -m venv <span class="s">C:\work\venvs\asr</span>
-<span class="c">:: АКТИВИРОВАТЬ venv (PowerShell):</span>
+
+<span class="c">:: --- ВАРИАНТ A (рекомендуется): без активации, вызывать venv python напрямую ---</span>
+<span class="c">::     работает всегда, не зависит от политики выполнения скриптов</span>
+<span class="s">C:\work\venvs\asr</span>\Scripts\python -m pip install -U pip wheel setuptools
+
+<span class="c">:: --- ВАРИАНТ B: активировать venv, чтобы потом писать просто pip/python ---</span>
+<span class="c">::     PowerShell по умолчанию блокирует .ps1 → сначала разрешить для текущей сессии:</span>
+<span class="k">Set-ExecutionPolicy</span> -Scope Process -ExecutionPolicy Bypass
 <span class="s">C:\work\venvs\asr\Scripts\Activate.ps1</span>
-<span class="c">::   в cmd.exe вместо этого: C:\work\venvs\asr\Scripts\activate.bat</span>
-<span class="c">:: после активации команды python и pip относятся к venv</span>
-<span class="k">python</span> -m pip install -U pip wheel setuptools</code></pre>
-      <div class="warn"><b>Если <code>pip</code> «не распознано»</b> — venv не активирован. Глобального pip в PATH
-        обычно нет; активируйте venv (команда выше) <i>или</i> вызывайте через полный путь:
-        <code>C:\work\venvs\asr\Scripts\python -m pip ...</code>. Все шаги ниже предполагают <b>активированный</b> venv.</div>
+<span class="c">::     в cmd.exe вместо двух строк выше: C:\work\venvs\asr\Scripts\activate.bat</span></code></pre>
+      <div class="warn"><b>Две частые ошибки на Windows:</b><br>
+        • <code>pip</code> «не распознано» — venv не активирован; глобального pip в PATH обычно нет.<br>
+        • «<i>выполнение сценариев отключено в этой системе</i>» — PowerShell блокирует <code>Activate.ps1</code>.<br>
+        <b>Простое решение для обоих:</b> используйте <b>Вариант A</b> — вызывайте
+        <code>C:\work\venvs\asr\Scripts\python -m pip ...</code> напрямую (далее в инструкции команды
+        с <code>pip</code> подразумевают активированный venv <i>либо</i> этот полный путь).</div>
       <div class="note">Именно <b>3.11</b> — у pyannote/torch есть готовые бинарные колёса под него; на самых
         новых интерпретаторах pip может полезть собирать из исходников (медленно, часто падает на Windows).</div>
 
