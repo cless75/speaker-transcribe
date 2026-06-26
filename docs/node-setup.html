@@ -530,7 +530,17 @@
       btn.className='copy-btn'; btn.type='button'; btn.textContent='Копировать';
       btn.addEventListener('click', function(){
         var code=pre.querySelector('code');
-        var text=(code?code.innerText:pre.innerText).replace(/\s+$/,'');
+        var raw=(code?code.innerText:pre.innerText);
+        // 1) drop comment lines (:: # //) and blank lines; trim trailing space
+        var lines=raw.split('\n').map(function(l){return l.replace(/\s+$/,'');})
+          .filter(function(l){ var t=l.trim();
+            return t!=='' && t.indexOf('::')!==0 && t.charAt(0)!=='#' && t.indexOf('//')!==0; });
+        // 2) join line-continuations (\ or `) into a single line — safe to paste in PowerShell
+        var out=[];
+        for(var i=0;i<lines.length;i++){ var cur=lines[i];
+          while(/[\\`]$/.test(cur) && i+1<lines.length){ cur=cur.replace(/[\\`]\s*$/,' ')+lines[++i].trim(); }
+          out.push(cur); }
+        var text=out.join('\n');
         copyText(text).then(function(){
           btn.textContent='Скопировано ✓'; btn.classList.add('ok');
           setTimeout(function(){ btn.textContent='Копировать'; btn.classList.remove('ok'); }, 1500);
