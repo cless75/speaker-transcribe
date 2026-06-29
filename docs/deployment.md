@@ -190,7 +190,7 @@ Point several machines at the same hub and set `enable_multi_machine: true` with
 
 | Symptom | Cause → fix |
 |---|---|
-| `No Python at '…'` / exit 103 | venv copied from another machine → **recreate the venv locally** (§2) |
+| `No Python at '…'` / exit 103 | broken venv — copied from another machine, **or** `pyvenv.cfg` `home` got a stray quote (note the leading `"` in the bad path). The venv's base interpreter can't be found. Fix: `Remove-Item -Recurse -Force <venv>; py -3.11 -m venv <venv>` then reinstall deps (§2). Check `pyvenv.cfg` `home` has **no quotes**: `home = C:\…\Python311`. Never copy a venv between machines. |
 | `running scripts is disabled` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or run via `-ExecutionPolicy Bypass` |
 | `Register-ScheduledTask: Access Denied (0x80070005)` | run the installer from an **elevated** shell / "Run as administrator" |
 | `Duration … P99999999…` registering a task | don't use `[TimeSpan]::MaxValue` for repetition — omit the duration (the installer already does) |
