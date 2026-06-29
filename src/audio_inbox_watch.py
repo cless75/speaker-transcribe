@@ -1191,6 +1191,43 @@ def _write_asr_log(audio: pathlib.Path, cmd: list[str], returncode,
         log(f"asr-log write failed: {exc}")
 
 
+def _discover_transcript(output_dir: pathlib.Path, stem: str) -> pathlib.Path | None:
+    """Find the transcript the worker wrote in this session's transcripts dir.
+
+    Name-based matches first (the worker transliterates names: spaces->_, lower),
+    then a session-scoped fallback — any top-level ``*-transcript.md`` in
+    ``output_dir`` is THIS file's result, because the dir is per-session.
+    Subdirectories (``asr/`` intermediates) are not considered (glob is top-level).
+    """
+    patterns = [
+        f"*{stem}*-transcript.md",
+        f"*{slugify_from_filename(stem)}*-transcript.md",
+        f"*{stem.lower().replace(' ', '_')}*-transcript.md",
+    ]
+    for pat in patterns:
+        try:
+            for cand in output_dir.glob(pat):
+                if cand.is_file():
+                    return cand
+        except (OSError, ValueError):
+            continue
+    m = re.search(r"(\d{6})[_-](\d{6})", stem)
+    if m:
+        ts = f"{m.group(1)}_{m.group(2)}"
+        for cand in output_dir.glob("*-transcript.md"):
+            if ts in cand.name:
+                return cand
+    pool = [p for p in output_dir.glob("*-transcript.md") if p.is_file()]
+    named = [p for p in pool if p.name != "session-transcript.md"]
+    chosen = named or pool
+    if chosen:
+        try:
+            return max(chosen, key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return chosen[0]
+    return None
+
+
 def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             source_root: pathlib.Path, output_dir: pathlib.Path,
             config_path: pathlib.Path) -> tuple[bool, str, pathlib.Path | None]:
@@ -1272,35 +1309,21 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     full_stderr = "".join(stderr_lines)
     stderr_tail = "\n".join(full_stderr.splitlines()[-30:])
     _write_asr_log(audio, cmd, proc.returncode, full_stdout, full_stderr)
-    # The worker may write all artifacts then SIGSEGV in the CUDA destructor at
-    # atexit (Windows + some GPUs + float16). A `phase=stdout_json ok` marker is a
-    # definitive success signal regardless of the exit code — don't waste retries.
+    # Success criterion = a transcript was produced. output_dir is the session's
+    # own transcripts dir, so ANY top-level *-transcript.md in it is THIS file's
+    # result. The worker transliterates names unpredictably (spaces->_, lowercase),
+    # so name-based globs miss — the session-scoped fallback is the reliable signal.
+    transcript = _discover_transcript(output_dir, audio.stem)
     stdout_json_ok = "phase=stdout_json ok" in full_stderr
-    if proc.returncode != 0 and not stdout_json_ok:
-        return False, stderr_tail, None
+    if transcript is not None:
+        if proc.returncode != 0:
+            log(f"exit={proc.returncode} but transcript present — treating as success "
+                f"(non-fatal/atexit crash; artifacts on disk)")
+        return True, stderr_tail, transcript
+    # No transcript produced -> genuine failure.
     if proc.returncode != 0 and stdout_json_ok:
-        log(f"exit={proc.returncode} but stdout_json ok — proceeding (cosmetic atexit crash)")
-
-    # Discover the transcript the worker wrote (it transliterates names).
-    transcript = None
-    for cand in output_dir.glob(f"*{audio.stem}*-transcript.md"):
-        transcript = cand
-        break
-    if transcript is None:
-        translit = slugify_from_filename(audio.stem)
-        if translit:
-            for cand in output_dir.glob(f"*{translit}*-transcript.md"):
-                transcript = cand
-                break
-    if transcript is None:
-        m = re.search(r"(\d{6})[_-](\d{6})", audio.stem)
-        if m:
-            ts_token = f"{m.group(1)}_{m.group(2)}"
-            for cand in output_dir.glob("*-transcript.md"):
-                if ts_token in cand.name:
-                    transcript = cand
-                    break
-    return True, stderr_tail, transcript
+        log(f"exit={proc.returncode}, stdout_json ok, but no transcript in {output_dir} — failing")
+    return False, stderr_tail, None
 
 
 # ---------------------------------------------------------------------------
