@@ -1228,6 +1228,38 @@ def _discover_transcript(output_dir: pathlib.Path, stem: str) -> pathlib.Path | 
     return None
 
 
+def _cleanup_intermediates(output_dir: pathlib.Path, cfg: dict) -> None:
+    """Prune heavy intermediate ASR artifacts from a session output dir after success.
+
+    Removes decoded chunk WAV/JSON, raw + merged segment dumps, and the ``asr/``
+    scratch subdir — keeping the transcript, segments (vtt/jsonl) and run-meta.
+    Recovery only matters for incomplete runs, so deleting on success is safe.
+    Disable with ``cleanup_intermediates: false``; override the lists with
+    ``cleanup_globs`` / ``cleanup_dirs``.
+    """
+    if not cfg.get("cleanup_intermediates", True):
+        return
+    globs = cfg.get("cleanup_globs", [
+        "*-asr-chunk-*.wav", "*-asr-chunk-*.json", "*-raw.json", "*-asr-merged.json",
+    ])
+    dirs = cfg.get("cleanup_dirs", ["asr"])
+    removed = 0
+    for pat in globs:
+        for p in output_dir.glob(pat):
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    for sub in dirs:
+        d = output_dir / sub
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+    if removed:
+        log(f"cleaned {removed} intermediate artifact(s) in {output_dir.name}")
+
+
 def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             source_root: pathlib.Path, output_dir: pathlib.Path,
             config_path: pathlib.Path) -> tuple[bool, str, pathlib.Path | None]:
@@ -1430,6 +1462,10 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
         retire_claim(audio, cfg)
         marker_processed_asr(audio).touch()
         asr_log_path(audio).unlink(missing_ok=True)  # keep logs only on failure
+        try:
+            _cleanup_intermediates(transcript_dir, cfg)
+        except Exception as exc:
+            log(f"cleanup_intermediates failed: {exc}")
         log(f"ASR ok: {audio.name} ({duration/60:.1f}m)")
         return
 

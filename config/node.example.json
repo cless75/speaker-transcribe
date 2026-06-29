@@ -39,6 +39,10 @@
   "speaker_mode": "diarize",
   "timestamps": "both",
 
+  "_cleanup_note": "keep the hub tidy. copy_asr_chunk_artifacts:false stops decoded chunk WAV/JSON from landing in outputs (set true to keep crash-recovery chunks). cleanup_intermediates:true prunes raw/merged dumps + the asr/ scratch dir after a successful run, keeping transcript + segments + run-meta.",
+  "copy_asr_chunk_artifacts": false,
+  "cleanup_intermediates": true,
+
   "_scan_knobs": "which files the watcher picks up; omit any key to use built-in defaults",
   "scan_extensions": [".m4a", ".mp3", ".wav", ".oga", ".mp4", ".mov", ".webm", ".m4v"],
   "scan_recursive": true,
