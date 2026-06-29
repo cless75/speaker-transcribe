@@ -389,23 +389,57 @@ def _scan_one_source(root: pathlib.Path, cfg: dict, *, recursive: bool) -> list[
     skip_patterns = cfg.get("skip_filename_patterns", DEFAULT_SKIP_FILENAME_PATTERNS)
     found: list[pathlib.Path] = []
     pattern = "**/*" if recursive else "*"
-    for path in root.glob(pattern):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in extensions:
-            continue
-        try:
-            rel = path.relative_to(root)
-        except ValueError:
-            continue
-        if is_skipped_path(rel, skip_folders, skip_prefixes):
-            continue
-        if is_output_artifact(path.name, skip_suffixes):
-            continue
-        if is_marker_file(path.name, skip_patterns):
-            continue
-        found.append(path)
+    try:
+        for path in root.glob(pattern):
+            try:
+                if not path.is_file():
+                    continue
+                if path.suffix.lower() not in extensions:
+                    continue
+                rel = path.relative_to(root)
+            except ValueError:
+                continue
+            except OSError:
+                continue  # a single denied/locked entry shouldn't drop the whole scan
+            if is_skipped_path(rel, skip_folders, skip_prefixes):
+                continue
+            if is_output_artifact(path.name, skip_suffixes):
+                continue
+            if is_marker_file(path.name, skip_patterns):
+                continue
+            found.append(path)
+    except OSError as exc:
+        log(f"scan interrupted on {root}: {exc}")
     return found
+
+
+def _probe_dir(path: pathlib.Path) -> tuple[bool, str | None]:
+    """Return (usable_dir, error_message). Tolerates cloud-drive access errors.
+
+    A missing path is not an error — it may appear later — so it returns
+    (False, None) silently. A ``PermissionError`` (Windows WinError 5 / macOS TCC)
+    or other ``OSError`` is reported with an actionable hint instead of crashing
+    the sweep.
+    """
+    try:
+        if not path.is_dir():
+            return (False, None)
+    except PermissionError as exc:
+        return (False,
+            f"PERMISSION DENIED reading source {path}: {exc}\n"
+            "    The path exists but access is denied. Common causes:\n"
+            "    - cloud drive not signed in to the account that owns this folder\n"
+            "    - folder shared from another account (add a shortcut to My Drive / add the shared drive)\n"
+            "    - drive still initializing, or the folder is online-only and not materialized yet\n"
+            "    - (macOS) the launchd process lacks Full Disk Access")
+    except OSError as exc:
+        return (False, f"cannot read source {path}: {exc}")
+    try:
+        for _ in path.iterdir():
+            break  # confirm we can actually list it, not just stat it
+    except OSError as exc:
+        return (False, f"PERMISSION DENIED listing source {path}: {exc}")
+    return (True, None)
 
 
 def resolved_sources(cfg: dict) -> list[tuple[pathlib.Path, dict]]:
@@ -1263,9 +1297,15 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
     if not sources:
         log("no sources configured")
         return
-    existing_roots = [r for r, _ in sources if r.is_dir()]
+    existing_roots = []
+    for r, _ in sources:
+        ok, err = _probe_dir(r)
+        if err:
+            log(err)
+        if ok:
+            existing_roots.append(r)
     if not existing_roots:
-        log(f"no source root exists yet: {[str(r) for r, _ in sources]}")
+        log("no readable source root this sweep (see messages above); nothing to do")
         return
 
     window = cfg.get("process_window_local")
