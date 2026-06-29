@@ -1148,6 +1148,23 @@ def write_session_card(cfg: dict, state: dict, audio: pathlib.Path,
 # ---------------------------------------------------------------------------
 
 
+class AsrEnvironmentError(Exception):
+    """The ASR worker could not be launched at all (bad interpreter / env).
+
+    This is an infrastructure failure that affects every file equally, so it must
+    NOT count against a file's attempts or quarantine it to ``_failed/``; the sweep
+    aborts cleanly instead and resumes once the environment is fixed.
+    """
+
+
+def _clean_path_value(v: str | None) -> str | None:
+    """Strip stray quotes / trailing '>' / whitespace that creep into config paths
+    via copy-paste (e.g. a value pasted with a PowerShell prompt ``>`` suffix)."""
+    if not v:
+        return v
+    return str(v).strip().strip('"').strip("'").rstrip(">").strip() or None
+
+
 def asr_log_path(audio: pathlib.Path) -> pathlib.Path:
     return audio.with_suffix(audio.suffix + ".asr-log.txt")
 
@@ -1179,8 +1196,8 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             config_path: pathlib.Path) -> tuple[bool, str, pathlib.Path | None]:
     """Invoke media_transcribe_cli for one file. Returns (ok, error_tail, transcript)."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    python = node_field(cfg, "transcribe_python", None) or sys.executable
-    cli = cfg.get("transcribe_cli")
+    python = _clean_path_value(node_field(cfg, "transcribe_python", None)) or sys.executable
+    cli = _clean_path_value(cfg.get("transcribe_cli"))
     if not cli:
         cli = str(pathlib.Path(__file__).resolve().parent / "media_transcribe_cli.py")
 
@@ -1207,7 +1224,9 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     except Exception as exc:
         msg = f"subprocess error: {exc}"
         _write_asr_log(audio, cmd, "spawn-failed", "", msg)
-        return False, msg, None
+        # Infra failure: the worker never started (bad interpreter / env). Don't
+        # blame this file — let process_one_file reset it and abort the sweep.
+        raise AsrEnvironmentError(f"{msg} (interpreter: {python})") from exc
 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -1328,8 +1347,18 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     log(f"asr start: {audio.name} session={state.get('session_id')} "
         f"speaker_mode={cfg.get('speaker_mode', 'diarize')}")
     t0 = time.time()
-    with _ClaimHeartbeat(audio, cfg):
-        ok, err_tail, transcript = run_asr(audio, cfg, pid, source_root, transcript_dir, config_path)
+    try:
+        with _ClaimHeartbeat(audio, cfg):
+            ok, err_tail, transcript = run_asr(audio, cfg, pid, source_root, transcript_dir, config_path)
+    except AsrEnvironmentError as exc:
+        # Roll the file back to queued without counting an attempt or quarantining
+        # it; re-raise so the sweep aborts (every file would hit the same wall).
+        state["status"] = "queued"
+        state["last_error"] = str(exc)
+        state["finished_at"] = now_iso()
+        atomic_write_json(state_file, state)
+        retire_claim(audio, cfg)
+        raise
     duration = time.time() - t0
     state["duration_sec"] = round(duration, 1)
     state["finished_at"] = now_iso()
@@ -1437,6 +1466,15 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 log(f"caught-up: {audio.name}")
             return
 
+        # ASR interpreter preflight — a missing/garbled transcribe_python would fail
+        # every file and quarantine the whole inbox. Check once up front; abort the
+        # sweep (touching nothing) so a config typo never trashes the queue.
+        py = _clean_path_value(node_field(cfg, "transcribe_python", None))
+        if py and not pathlib.Path(py).expanduser().is_file():
+            log(f"transcribe_python not found: {py!r} — fix the node config "
+                f"(stray quote/'>' or wrong path/venv). Aborting sweep; no files touched.")
+            return
+
         start_time = time.time()
         budget_sec = (time_budget_minutes * 60) if time_budget_minutes else None
         processed = 0
@@ -1476,7 +1514,12 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 break
             audio, root, source = actionable[0]
             log(f"queue rebuilt: {len(actionable)} actionable; processing newest: {audio.name}")
-            process_one_file(audio, root, source, cfg, mapper, config_path)
+            try:
+                process_one_file(audio, root, source, cfg, mapper, config_path)
+            except AsrEnvironmentError as exc:
+                log(f"ASR environment error — aborting sweep; no files quarantined. "
+                    f"Fix the ASR env (transcribe_python/venv/deps), then re-run. Detail: {exc}")
+                break
             processed += 1
         log(f"run_once done: processed={processed} in {(time.time()-start_time)/60:.1f}m")
     finally:
