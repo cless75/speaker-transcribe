@@ -144,6 +144,16 @@ def _build_payload(args: argparse.Namespace) -> dict:
         payload["output_base_name"] = args.output_base_name
     if args.timestamps:
         payload["timestamps"] = args.timestamps
+    if args.project_speaker_registry_path:
+        payload["project_speaker_registry_path"] = str(
+            pathlib.Path(args.project_speaker_registry_path).expanduser().resolve()
+        )
+    if args.machine_local_voiceprint_store_path:
+        payload["machine_local_voiceprint_store_path"] = str(
+            pathlib.Path(args.machine_local_voiceprint_store_path).expanduser().resolve()
+        )
+    if args.voiceprint_mode:
+        payload["voiceprint_mode"] = args.voiceprint_mode
 
     identification = dict(payload.get("identification") or {})
     if args.project_id:
@@ -211,6 +221,17 @@ def main() -> int:
     parser.add_argument("--work-root", dest="work_root", default=None)
     parser.add_argument("--output-base-name", dest="output_base_name", default=None)
     parser.add_argument("--timestamps", default=None, choices=("hms", "vtt", "both", "none"))
+    parser.add_argument(
+        "--project-speaker-registry", dest="project_speaker_registry_path", default=None,
+        help="Directory for the per-project speaker registry (index.json + profiles/). "
+             "Set to the project root to keep voiceprints with the project.",
+    )
+    parser.add_argument(
+        "--voiceprint-store", dest="machine_local_voiceprint_store_path", default=None,
+        help="Node-local voiceprint store file (embeddings) used for match/enroll. Keep off the shared hub.",
+    )
+    parser.add_argument("--voiceprint-mode", dest="voiceprint_mode", default=None,
+                        help="off | match | enroll")
     parser.add_argument(
         "--worker", default=None,
         help="Path to media_transcribe.py (defaults to the file alongside this script).",

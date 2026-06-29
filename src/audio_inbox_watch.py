@@ -1214,6 +1214,28 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     if pid:
         cmd += ["--project-id", str(pid)]
 
+    # Voiceprint storage at the PROJECT ROOT ({hub_root}/{pid}) when enabled.
+    # The registry (index.json + profiles/) lives with the project; the embeddings
+    # store stays node-local (off the shared hub). Skipped for reserved pids (_…)
+    # and when voiceprint_mode is off.
+    vp = (cfg.get("outputs") or {}).get("voiceprints") or {}
+    vmode = cfg.get("voiceprint_mode", "off")
+    if pid and not str(pid).startswith("_") and vmode != "off":
+        vctx = base_placeholder_ctx(cfg)
+        vctx["pid"] = str(pid)
+        reg_tpl = vp.get("project_projection")
+        store_tpl = vp.get("local_cache")
+        if reg_tpl:
+            cmd += ["--project-speaker-registry", resolve_template(reg_tpl, vctx)]
+        if store_tpl:
+            store_dir = pathlib.Path(resolve_template(store_tpl, vctx)).expanduser()
+            try:
+                store_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            cmd += ["--voiceprint-store", str(store_dir / "voiceprints.json")]
+        cmd += ["--voiceprint-mode", vmode]
+
     log(f"ASR start: {audio.name} (pid={pid}, output={output_dir})")
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     try:

@@ -22,15 +22,16 @@
   "outputs": {
     "transcript_dir": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/transcripts",
     "state_dir": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/pipeline",
+    "_voiceprints_note": "project_projection = where the per-project speaker registry (index.json + profiles/) lives; set to {hub_root}/{pid} to keep voiceprints at the project root. local_cache = node-local dir for the embeddings store (voiceprints.json), kept OFF the shared hub. Active only when voiceprint_mode != off (see below).",
     "voiceprints": {
-      "global_registry": "{hub_root}/_voiceprints",
-      "project_projection": "{hub_root}/{pid}/Speakers",
+      "project_projection": "{hub_root}/{pid}",
       "local_cache": "{cache_root}/{pid}"
     },
     "session_card": { "adapter": "none", "target": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}" }
   },
 
   "hub_root": "<GOOGLE_DRIVE>/Hub",
+  "_voiceprint_mode_note": "off = diarization only (SPEAKER_00/01…); enroll = build the project registry from new voices (first bootstrap pass); match = identify speakers against the existing registry. Requires speaker_mode: diarize + HF token.",
   "voiceprint_mode": "off",
 
   "_asr_knobs": "forwarded to media_transcribe_cli",
