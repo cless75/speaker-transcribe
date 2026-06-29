@@ -1239,8 +1239,10 @@ def _cleanup_intermediates(output_dir: pathlib.Path, cfg: dict) -> None:
     """
     if not cfg.get("cleanup_intermediates", True):
         return
+    # NOTE: *-raw.json is kept on purpose — speaker_pass reuses it to re-run
+    # diarization/voiceprints without re-ASR. Override via cleanup_globs to drop it.
     globs = cfg.get("cleanup_globs", [
-        "*-asr-chunk-*.wav", "*-asr-chunk-*.json", "*-raw.json", "*-asr-merged.json",
+        "*-asr-chunk-*.wav", "*-asr-chunk-*.json", "*-asr-merged.json",
     ])
     dirs = cfg.get("cleanup_dirs", ["asr"])
     removed = 0
@@ -1262,8 +1264,13 @@ def _cleanup_intermediates(output_dir: pathlib.Path, cfg: dict) -> None:
 
 def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             source_root: pathlib.Path, output_dir: pathlib.Path,
-            config_path: pathlib.Path) -> tuple[bool, str, pathlib.Path | None]:
-    """Invoke media_transcribe_cli for one file. Returns (ok, error_tail, transcript)."""
+            config_path: pathlib.Path,
+            execution_mode: str | None = None) -> tuple[bool, str, pathlib.Path | None]:
+    """Invoke media_transcribe_cli for one file. Returns (ok, error_tail, transcript).
+
+    ``execution_mode`` (e.g. ``speaker_pass``) is forwarded to the worker to reuse
+    existing ASR (``*-raw.json``) and run only diarization/voiceprints — no whisper.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     python = _clean_path_value(node_field(cfg, "transcribe_python", None)) or sys.executable
     cli = _clean_path_value(cfg.get("transcribe_cli"))
@@ -1282,6 +1289,8 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     ]
     if pid:
         cmd += ["--project-id", str(pid)]
+    if execution_mode:
+        cmd += ["--execution-mode", execution_mode]
 
     # Voiceprint storage at the PROJECT ROOT ({hub_root}/{pid}) when enabled.
     # The registry (index.json + profiles/) lives with the project; the embeddings
@@ -1409,6 +1418,30 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     if not state.get("session_id"):
         state["session_id"] = sid_preview
 
+    # Reuse an existing session transcript instead of re-running full ASR.
+    # transcript_dir is session-scoped, so a transcript there belongs to this file.
+    # Voiceprints off -> adopt it and skip ASR. Voiceprints on -> reuse the ASR via
+    # speaker_pass (no whisper) when a *-raw.json is present; else fall back to full.
+    exec_mode: str | None = None
+    vmode = cfg.get("voiceprint_mode", "off")
+    need_vp = vmode != "off" and bool(pid) and not str(pid).startswith("_")
+    existing = _discover_transcript(transcript_dir, audio.stem)
+    if existing is not None:
+        if not need_vp:
+            state["status"] = "asr-done"
+            state["transcript_path"] = str(existing)
+            state["last_error"] = None
+            state["finished_at"] = now_iso()
+            state["reused_transcript"] = True
+            atomic_write_json(state_file, state)
+            retire_claim(audio, cfg)
+            marker_processed_asr(audio).touch()
+            log(f"reuse existing transcript (skip ASR): {audio.name}")
+            return
+        if any(transcript_dir.glob("*-raw.json")):
+            exec_mode = "speaker_pass"
+            log(f"reuse ASR via speaker_pass (voiceprints only, no whisper): {audio.name}")
+
     # 3) CPU-aware gate
     proceed, cpu_reason = wait_for_cpu_available(cfg)
     if not proceed:
@@ -1426,7 +1459,8 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     t0 = time.time()
     try:
         with _ClaimHeartbeat(audio, cfg):
-            ok, err_tail, transcript = run_asr(audio, cfg, pid, source_root, transcript_dir, config_path)
+            ok, err_tail, transcript = run_asr(audio, cfg, pid, source_root, transcript_dir,
+                                               config_path, execution_mode=exec_mode)
     except AsrEnvironmentError as exc:
         # Roll the file back to queued without counting an attempt or quarantining
         # it; re-raise so the sweep aborts (every file would hit the same wall).
