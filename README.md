@@ -55,7 +55,7 @@ src/        engine — ASR + diarization + voiceprint
 scripts/    transcribe.ps1   (single file / folder)   watch.ps1  (run the watcher)
             run-media-transcribe-direct.ps1  (low-level PowerShell wrapper)
 config/     node.example.json   mapper.example.json   (copy to *.local.json)
-docs/       node-setup.html    (full setup guide)
+docs/       node-setup.html  (install)    deployment.md  (operate: run, reboots, multi-node)
 ```
 
 ## Engine quickstart (CLI)
