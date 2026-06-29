@@ -13,8 +13,9 @@
   "transcribe_python": "C:/work/venvs/asr/Scripts/python.exe",
   "_transcribe_cli": "optional: path to media_transcribe_cli.py; defaults to the one next to the watcher",
 
+  "_sources_note": "discover=project-inboxes scans {hub_root}/_inbox AND {hub_root}/<pid>/_<pid>_inbox/ AND {hub_root}/<pid>/ top-level files; pid = the <pid> folder name. For a single flat inbox instead use: {\"root\":\"{hub_root}/_inbox\",\"route\":\"mapper\",\"claim\":true}.",
   "sources": [
-    { "root": "{hub_root}/_inbox", "route": "mapper", "claim": true, "recursive": true }
+    { "root": "{hub_root}", "discover": "project-inboxes", "claim": true }
   ],
   "routing": { "mapper": "config/mapper.local.json" },
 

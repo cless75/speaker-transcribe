@@ -443,7 +443,8 @@ def _probe_dir(path: pathlib.Path) -> tuple[bool, str | None]:
 
 
 def resolved_sources(cfg: dict) -> list[tuple[pathlib.Path, dict]]:
-    """Return [(resolved_root, source_dict), ...] for existing source roots."""
+    """Return [(resolved_root, source_dict), ...] for the *configured* source roots
+    (pre-discovery). Used for the permission preflight in run_once."""
     ctx = base_placeholder_ctx(cfg)
     out: list[tuple[pathlib.Path, dict]] = []
     for source in cfg.get("sources", []):
@@ -453,14 +454,68 @@ def resolved_sources(cfg: dict) -> list[tuple[pathlib.Path, dict]]:
     return out
 
 
+def _discover_project_inboxes(hub_root: pathlib.Path, source: dict, cfg: dict
+                              ) -> list[tuple[pathlib.Path, dict, bool]]:
+    """Expand a ``"discover": "project-inboxes"`` source into concrete scan dirs.
+
+    Layout convention: drops live in ``{hub_root}/<pid>/_<pid>_inbox/`` (per-project
+    intake) and/or directly in ``{hub_root}/<pid>/`` (top level), plus a shared
+    ``{hub_root}/_inbox``. Returns ``[(scan_dir, source_for_routing, recursive), ...]``
+    where pid is the ``<pid>`` folder name (injected as a literal route).
+    """
+    out: list[tuple[pathlib.Path, dict, bool]] = []
+    inbox_name = cfg.get("hub_inbox_root_name", "_inbox")
+    pattern = source.get("project_inbox_pattern", "_{pid}_inbox")
+    scan_roots = source.get("scan_project_roots", True)
+    skip = set(cfg.get("discover_skip_names",
+                       [inbox_name, "_shared", "_meta", "_voiceprints", "_archive", "_failed"]))
+
+    root_inbox = hub_root / inbox_name
+    if _safe_is_dir_bool(root_inbox):
+        out.append((root_inbox, source, True))  # shared drop -> route via mapper/folder
+
+    try:
+        children = sorted(hub_root.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        name = child.name
+        if name in skip or name.startswith(".") or not _safe_is_dir_bool(child):
+            continue
+        literal = {**source, "route": "literal", "project": name}
+        pinbox = child / pattern.replace("{pid}", name)
+        if _safe_is_dir_bool(pinbox):
+            out.append((pinbox, literal, True))
+        if scan_roots:
+            out.append((child, {**literal, "_flat": True}, False))  # top-level files only
+    return out
+
+
+def expand_sources(cfg: dict) -> list[tuple[pathlib.Path, dict, bool]]:
+    """Resolve configured sources into concrete ``(scan_dir, source, recursive)``.
+
+    A source with ``"discover": "project-inboxes"`` is expanded into per-project
+    intake dirs; a plain source scans its ``root`` directly.
+    """
+    ctx = base_placeholder_ctx(cfg)
+    out: list[tuple[pathlib.Path, dict, bool]] = []
+    for source in cfg.get("sources", []):
+        root = pathlib.Path(resolve_template(source.get("root", ""), ctx)).expanduser()
+        if source.get("discover") == "project-inboxes":
+            out.extend(_discover_project_inboxes(root, source, cfg))
+        else:
+            recursive = source.get("recursive", cfg.get("scan_recursive", True))
+            out.append((root, source, recursive))
+    return out
+
+
 def find_audio_files(cfg: dict) -> list[tuple[pathlib.Path, pathlib.Path, dict]]:
     """Scan all sources. Return [(audio, source_root, source_dict), ...], LIFO by mtime."""
     seen: set[pathlib.Path] = set()
     results: list[tuple[pathlib.Path, pathlib.Path, dict]] = []
-    for root, source in resolved_sources(cfg):
-        if not root.is_dir():
+    for root, source, recursive in expand_sources(cfg):
+        if not _safe_is_dir_bool(root):
             continue
-        recursive = source.get("recursive", cfg.get("scan_recursive", True))
         for path in _scan_one_source(root, cfg, recursive=recursive):
             if path in seen:
                 continue
@@ -475,6 +530,13 @@ def _safe_mtime(p: pathlib.Path) -> float:
         return p.stat().st_mtime
     except OSError:
         return 0.0
+
+
+def _safe_is_dir_bool(p: pathlib.Path) -> bool:
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
 
 
 def source_for_audio(audio: pathlib.Path, cfg: dict) -> tuple[pathlib.Path, dict] | None:

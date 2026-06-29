@@ -62,12 +62,20 @@ Edit `config/node.local.json` — the fields that matter most:
 | `transcribe_python` | the venv python from step 2 |
 | `runtime.device` / `compute_type` | `cuda`/`float16` with a GPU, else `cpu`/`int8` |
 | `hub_root` | your mounted hub path (check the drive letter / mount point) |
-| `sources[].root` | usually `{hub_root}/_inbox` |
+| `sources[].root` + how to scan | see source modes below |
 | `enable_multi_machine` + `sources[].claim` | `true` when several nodes share one hub |
 | `secrets.hf_token` | `env:HF_TOKEN` (set the variable, see §6) |
 
-`config/mapper.local.json` maps a source-relative folder to a project id (`pid`);
-deepest prefix wins, then `_default`, then the folder name.
+**Source modes** — a source is either a plain folder or an auto-discovering hub:
+
+- **Flat:** `{ "root": "{hub_root}/_inbox", "route": "mapper", "claim": true }` — scans
+  one folder; `pid` comes from `mapper.local.json` (deepest prefix wins, then
+  `_default`, then the folder name).
+- **Project inboxes (hub layout):** `{ "root": "{hub_root}", "discover": "project-inboxes", "claim": true }`
+  — auto-scans `{hub_root}/_inbox`, every `{hub_root}/<pid>/_<pid>_inbox/`, and
+  top-level files in `{hub_root}/<pid>/`; `pid` is the `<pid>` folder name. New
+  project folders are picked up automatically (no config edit). Outputs
+  (`sessions/`) and meta dirs (`_meta`, `_voiceprints`, …) are skipped.
 
 ## 4. First run (smoke test)
 
