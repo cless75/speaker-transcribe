@@ -802,7 +802,8 @@ def move_to_failed(audio: pathlib.Path, source_root: pathlib.Path, error_tail: s
     """Move a permanently-failed file (+ sidecars) into ``{source_root}/_failed/``."""
     failed_dir = source_root / "_failed"
     failed_dir.mkdir(parents=True, exist_ok=True)
-    for p in (audio, state_path(audio), marker_processed_asr(audio), claim_path(audio)):
+    for p in (audio, state_path(audio), marker_processed_asr(audio), claim_path(audio),
+              asr_log_path(audio)):
         if p.exists():
             try:
                 shutil.move(str(p), str(failed_dir / p.name))
@@ -1147,6 +1148,32 @@ def write_session_card(cfg: dict, state: dict, audio: pathlib.Path,
 # ---------------------------------------------------------------------------
 
 
+def asr_log_path(audio: pathlib.Path) -> pathlib.Path:
+    return audio.with_suffix(audio.suffix + ".asr-log.txt")
+
+
+def _write_asr_log(audio: pathlib.Path, cmd: list[str], returncode,
+                   full_stdout: str, full_stderr: str) -> None:
+    """Persist the full ASR worker output next to the audio for post-mortem.
+
+    Stays beside the file on failure (and moves into ``_failed/`` with it on the
+    final attempt); removed on success. The captured stderr/stdout is the full
+    worker output, not just the tail recorded in state.json.
+    """
+    try:
+        asr_log_path(audio).write_text(
+            "# ASR processing log\n"
+            f"file: {audio}\n"
+            f"when: {now_iso()}\n"
+            f"returncode: {returncode}\n"
+            f"command: {' '.join(cmd)}\n\n"
+            f"===== STDERR =====\n{full_stderr}\n"
+            f"===== STDOUT =====\n{full_stdout}\n",
+            encoding="utf-8")
+    except Exception as exc:
+        log(f"asr-log write failed: {exc}")
+
+
 def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             source_root: pathlib.Path, output_dir: pathlib.Path,
             config_path: pathlib.Path) -> tuple[bool, str, pathlib.Path | None]:
@@ -1178,7 +1205,9 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
         )
     except Exception as exc:
-        return False, f"subprocess error: {exc}", None
+        msg = f"subprocess error: {exc}"
+        _write_asr_log(audio, cmd, "spawn-failed", "", msg)
+        return False, msg, None
 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -1198,8 +1227,10 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     t_out.join()
     t_err.join()
 
+    full_stdout = "".join(stdout_lines)
     full_stderr = "".join(stderr_lines)
     stderr_tail = "\n".join(full_stderr.splitlines()[-30:])
+    _write_asr_log(audio, cmd, proc.returncode, full_stdout, full_stderr)
     # The worker may write all artifacts then SIGSEGV in the CUDA destructor at
     # atexit (Windows + some GPUs + float16). A `phase=stdout_json ok` marker is a
     # definitive success signal regardless of the exit code — don't waste retries.
@@ -1324,6 +1355,7 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
             log(f"session card adapter failed: {exc}")
         retire_claim(audio, cfg)
         marker_processed_asr(audio).touch()
+        asr_log_path(audio).unlink(missing_ok=True)  # keep logs only on failure
         log(f"ASR ok: {audio.name} ({duration/60:.1f}m)")
         return
 
