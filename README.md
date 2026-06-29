@@ -84,8 +84,11 @@ python src/audio_inbox_watch.py --config config/node.local.json --once
 # Windows:  .\scripts\watch.ps1 -Once
 ```
 
-Run it on a timer (Task Scheduler / launchd / cron) for continuous pickup. Key
-behaviour, all config-driven:
+Run it on a timer (Task Scheduler / launchd / cron) for continuous pickup. On
+Windows, `scripts\install-watch-task.ps1` (or double-click
+`scripts\install-watch-task.cmd`) registers a scheduled task that sweeps every N
+minutes while you are logged on — `-Remove` uninstalls it. Key behaviour, all
+config-driven:
 
 - **State machine** per file via a sidecar `*.state.json`: `queued -> in-progress
   -> asr-done` (with retry / `_failed/` on repeated errors).
