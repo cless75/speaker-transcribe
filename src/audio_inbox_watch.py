@@ -55,7 +55,8 @@ DEFAULT_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "config" / "no
 
 # Default watcher knobs — overridable from the node config.
 DEFAULT_SCAN_EXTENSIONS = [".m4a", ".mp3", ".wav", ".oga", ".mp4", ".mov", ".webm", ".m4v"]
-DEFAULT_SKIP_FOLDERS = ["_failed", "_archive", "sessions", "Audio Record", "Transcripts"]
+DEFAULT_SKIP_FOLDERS = ["_failed", "_archive", "sessions", "Audio Record", "Transcripts",
+                        "profiles", "Speakers", "recordings", "pipeline"]
 DEFAULT_SKIP_FOLDER_PREFIXES = ["_", "."]
 DEFAULT_SKIP_FILENAME_SUFFIXES = [
     "-transcript.md", "-transcript.txt", "_original.txt",
@@ -252,7 +253,7 @@ def sanitize_pid(value: str) -> str:
     / ``_shared`` use them as a sortable marker. Only stray edge punctuation and
     whitespace are trimmed.
     """
-    v = slugify_from_filename(value) if re.search(r"[^a-zA-Z0-9_-]", value or "") else (value or "")
+    v = slugify_from_filename(value) if re.search(r"[^a-zA-Z0-9_.-]", value or "") else (value or "")
     v = v.strip("-. ") or "_unrouted"
     return v
 
@@ -487,7 +488,12 @@ def _discover_project_inboxes(hub_root: pathlib.Path, source: dict, cfg: dict
         if _safe_is_dir_bool(pinbox):
             out.append((pinbox, literal, True))
         if scan_roots:
-            out.append((child, {**literal, "_flat": True}, False))  # top-level files only
+            # Scan the WHOLE project folder (recursive by default) so drops land
+            # anywhere inside {hub}/{pid}/ are picked up — not only the root or
+            # _{pid}_inbox/. skip_folders/prefixes prune sessions, _failed, _inbox,
+            # profiles, recordings, etc. Set scan_project_recursive:false for flat.
+            recursive = source.get("scan_project_recursive", True)
+            out.append((child, {**literal, "_flat": not recursive}, recursive))
     return out
 
 
@@ -1262,6 +1268,56 @@ def _cleanup_intermediates(output_dir: pathlib.Path, cfg: dict) -> None:
         log(f"cleaned {removed} intermediate artifact(s) in {output_dir.name}")
 
 
+def _write_project_index(hub_root: pathlib.Path, pid: str, cfg: dict) -> None:
+    """Write ``{hub_root}/{pid}/_sessions-index.md`` — processed vs pending files.
+
+    Status comes from the per-file ``*.state.json`` sidecars anywhere in the
+    project except ``sessions/`` (those are outputs). asr-done = processed;
+    queued/in-progress = pending; the rest (failed / bundle-sibling) listed apart.
+    """
+    proj = hub_root / pid
+    if not _safe_is_dir_bool(proj):
+        return
+    try:
+        sidecars = [p for p in proj.rglob("*.state.json")
+                    if "sessions" not in p.relative_to(proj).parts]
+    except OSError:
+        return
+    done, pending, other = [], [], []
+    for sf in sidecars:
+        try:
+            st = json.loads(sf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        name = sf.name[: -len(".state.json")]
+        status = st.get("status", "?")
+        sid = st.get("session_id", "") or ""
+        row = f"| `{name}` | {status} | {sid} |"
+        if status == "asr-done":
+            done.append(row)
+        elif status in ("queued", "in-progress"):
+            pending.append(row)
+        else:
+            other.append(row)
+
+    def section(title, rows):
+        uniq = sorted(set(rows))
+        return [f"## {title} ({len(uniq)})", "", "| Файл | Статус | SessionId |",
+                "|---|---|---|", *(uniq or ["| — | — | — |"]), ""]
+
+    lines = [f"# {pid} — индекс сессий", "",
+             f"_Авто-обновление watcher'ом. Обработано: {len(set(done))} · "
+             f"в очереди: {len(set(pending))} · прочее: {len(set(other))}._", ""]
+    lines += section("Обработанные (asr-done)", done)
+    lines += section("Необработанные (queued / in-progress)", pending)
+    if other:
+        lines += section("Прочие (failed / bundle-sibling)", other)
+    try:
+        (proj / "_sessions-index.md").write_text("\n".join(lines), encoding="utf-8")
+    except OSError as exc:
+        log(f"project index write failed for {pid}: {exc}")
+
+
 def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             source_root: pathlib.Path, output_dir: pathlib.Path,
             config_path: pathlib.Path,
@@ -1636,6 +1692,21 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                     f"Fix the ASR env (transcribe_python/venv/deps), then re-run. Detail: {exc}")
                 break
             processed += 1
+        # Refresh per-project session index (processed vs pending) for the hub.
+        if cfg.get("write_session_index", True) and cfg.get("hub_root"):
+            try:
+                hub_root = pathlib.Path(
+                    resolve_template(cfg["hub_root"], base_placeholder_ctx(cfg))).expanduser()
+                skip = set(cfg.get("discover_skip_names",
+                                   ["_inbox", "_shared", "_meta", "_voiceprints", "_archive", "_failed"]))
+                if _safe_is_dir_bool(hub_root):
+                    for child in sorted(hub_root.iterdir()):
+                        if child.name in skip or child.name.startswith(".") or not _safe_is_dir_bool(child):
+                            continue
+                        _write_project_index(hub_root, child.name, cfg)
+            except OSError as exc:
+                log(f"session index refresh failed: {exc}")
+
         log(f"run_once done: processed={processed} in {(time.time()-start_time)/60:.1f}m")
     finally:
         release_watcher_lock(lock)
