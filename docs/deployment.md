@@ -169,6 +169,17 @@ across reboots and independent of which user logs in:
    mounted before the first sweep, and confirm the mount path matches `hub_root`.
 4. **Task owned by that user** (the installer registers it for the current user at
    logon). Verify with `Get-ScheduledTask`.
+5. **Keep the machine awake.** A sleeping node stops transcribing (and drops remote
+   access). Disable sleep on AC power (admin shell):
+   ```powershell
+   powercfg /change standby-timeout-ac 0
+   powercfg /change hibernate-timeout-ac 0
+   ```
+6. **Remote access (optional).** To manage the node remotely (e.g. Chrome Remote
+   Desktop), enable **unattended** access with a PIN under the node's user. The
+   remote host runs per-user, so it must be the auto-login account (item 2) and the
+   machine must be awake (item 5) — if a different profile logs in, the host for the
+   node user isn't running and the machine is unreachable.
 
 > Auto-login means physical access = session access — fine for a dedicated node,
 > but a conscious trade-off.
