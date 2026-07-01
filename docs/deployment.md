@@ -114,6 +114,38 @@ timer — overlap is safe (a host-local lock + per-file claim).
 Or double-click `scripts\install-watch-task.cmd` (it sets ExecutionPolicy Bypass
 and prompts for elevation). Logs go to `<repo>\logs\watch.log`.
 
+The installer registers a task named **`speaker-transcribe-watch`** that runs
+`watch.ps1 -Once` at logon and repeats every N minutes. To inspect / run / remove
+it by hand:
+
+```powershell
+schtasks /query  /tn "speaker-transcribe-watch" /v /fo LIST   # inspect the task
+schtasks /run    /tn "speaker-transcribe-watch"               # trigger a sweep now
+schtasks /delete /tn "speaker-transcribe-watch" /f            # remove it
+```
+
+### Monitoring — is the watcher alive?
+
+```powershell
+# 1) task registered + last result (LastTaskResult 0 = ok; 267011 = never ran)
+Get-ScheduledTaskInfo -TaskName "speaker-transcribe-watch" |
+  Select-Object LastRunTime, LastTaskResult, NextRunTime
+
+# 2) is a sweep running right now? (watcher + ASR worker)
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Where-Object CommandLine -match 'audio_inbox_watch|media_transcribe' |
+  Select-Object ProcessId, CreationDate
+
+# 3) live log — follow what it's doing (Ctrl+C to stop)
+Get-Content C:\work\speaker-transcribe\logs\watch.log -Tail 40 -Wait
+```
+
+The log shows `queue rebuilt … processing newest: <file>`, `asr start …`,
+`asr done ok=True … transcript=…`, `cleaned N intermediate …`, and
+`queue empty … exiting cleanly`. For a status overview without the log, open the
+per-project index the watcher writes each sweep:
+**`{hub_root}/{pid}/_sessions-index.md`** — processed (asr-done) vs pending files.
+
 ### macOS — launchd
 
 `~/Library/LaunchAgents/com.speaker-transcribe.watch.plist`:
