@@ -2890,6 +2890,41 @@ def build_session_transcript_markdown(result: dict) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def write_asr_transcript_checkpoint(payload: dict, segments: list, language_detected) -> None:
+    """Write a usable ``{base}-transcript.md`` from ASR segments BEFORE diarization.
+
+    Guarantees a ready-to-use transcript always exists even if diarization is slow,
+    hangs, or the process is interrupted. It writes to the SAME path the final
+    ``write_outputs`` uses, so once diarization completes the speaker-labelled
+    version overwrites it. Non-fatal and gated by ``asr_transcript_checkpoint``.
+    """
+    if not payload.get("asr_transcript_checkpoint", True):
+        return
+    try:
+        output_dir = pathlib.Path(payload["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        base_name = str(payload.get("output_base_name") or pathlib.Path(payload["input_path"]).stem)
+        md_path = output_dir / f"{base_name}-transcript.md"
+        header = (
+            "---\n"
+            f"source_file: {json.dumps(str(payload.get('input_path')))}\n"
+            f"language: {json.dumps(language_detected)}\n"
+            "stage: asr-checkpoint\n"
+            "note: transcript from ASR before diarization; speaker labels added later\n"
+            "---\n\n## Transcript\n\n"
+        )
+        tmp = md_path.with_name(md_path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(header)
+            for block in build_display_blocks(segments):
+                block_text = " ".join(block["texts"]).strip()
+                f.write(f"[{timestamp_hms(block['start'])}] {block_text}".strip() + "\n")
+        os.replace(tmp, md_path)
+        log(payload, f"asr_transcript_checkpoint written: {md_path.name} ({len(segments)} segments)")
+    except Exception as exc:
+        log(payload, f"asr_transcript_checkpoint failed (non-fatal): {exc}")
+
+
 def write_outputs(payload: dict, result: dict) -> dict:
     output_dir = pathlib.Path(payload["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3687,6 +3722,10 @@ def main() -> None:
         language_detected = detected_languages[0] if detected_languages else None
         if payload["execution_mode"] in ("full", "asr_only") and collected:
             write_asr_merged_checkpoint(payload, collected, language_detected, audio_path, warnings)
+            # Ready-to-use transcript BEFORE diarization — always leaves a usable
+            # .md even if diarization is slow/hangs/interrupted (overwritten with
+            # speaker labels by write_outputs once diarization completes).
+            write_asr_transcript_checkpoint(payload, collected, language_detected)
 
         diarization_meta = {
             "enabled": payload.get("speaker_mode") == "diarize",
