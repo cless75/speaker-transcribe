@@ -36,6 +36,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import errno
 import json
@@ -43,6 +44,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -944,6 +946,84 @@ def resolve_claim_winner(a: dict, b: dict) -> dict:
     return a if a.get("claimed_by", "") <= b.get("claimed_by", "") else b
 
 
+def claim_is_dead(audio: pathlib.Path, cfg: dict) -> bool:
+    """True when an ``in-progress`` file's owner has stopped heartbeating, so another
+    node may take it over. Authoritative liveness signal is the claim lease: a live
+    owner refreshes it every ``claim_heartbeat_minutes`` (see _ClaimHeartbeat)."""
+    cp = claim_path(audio)
+    try:
+        if not cp.is_file():
+            return True  # in-progress but no claim at all -> orphaned
+        claim = (json.loads(cp.read_text(encoding="utf-8")) or {}).get("claim", {})
+    except OSError:
+        return False  # unreadable this sweep -> be conservative, leave it
+    except Exception:
+        return True   # garbled claim -> treat as dead
+    return is_claim_expired(claim, utcnow(), int(cfg.get("claim_lease_minutes", 30)))
+
+
+def inprogress_recoverable(audio: pathlib.Path, state: dict, cfg: dict) -> bool:
+    """Whether an ``in-progress`` file was orphaned by a dead node and may be re-queued.
+
+    Multi-machine: authoritative signal is an expired claim lease (owner stopped
+    heartbeating). Single-machine: fall back to wall-clock staleness, matching
+    ``reset_stuck`` — a crashed same-host run leaves no live heartbeat either.
+
+    Why this exists: ``reset_stuck`` and the claim-preempt both live inside
+    ``process_one_file``, but the queue admitted only ``queued``/no-state files, so a
+    hard node death (crash / power loss / host unreachable mid-ASR) left the file
+    ``in-progress`` forever — no node ever reached the recovery paths. This gate lets
+    the orphan back into the queue.
+    """
+    if cfg.get("enable_multi_machine"):
+        return claim_is_dead(audio, cfg)
+    started = state.get("started_at")
+    if not started:
+        return False
+    try:
+        age_min = (dt.datetime.now() - dt.datetime.fromisoformat(started)).total_seconds() / 60
+    except Exception:
+        return False
+    return age_min > int(cfg.get("stuck_threshold_minutes", 120))
+
+
+class _CloudOpTimeout(Exception):
+    """A filesystem syscall exceeded its watchdog budget (see _cloud_watchdog)."""
+
+
+@contextlib.contextmanager
+def _cloud_watchdog(seconds: int, label: str):
+    """Abort a wedged filesystem syscall instead of freezing the whole sweep.
+
+    macOS Google Drive (File Provider) can block a stat()/listdir()/open() on an
+    online-only path indefinitely with no timeout of its own (observed: a single
+    dataless recording hung the watcher 24m at 0% CPU). SIGALRM (POSIX, main thread)
+    interrupts the blocking call. No-op where SIGALRM is unavailable (Windows), which
+    does not exhibit this hang. Disarmed by ``_cancel_cloud_watchdog`` before the
+    legitimately long CPU-wait / ASR phase.
+    """
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise _CloudOpTimeout(f"cloud op exceeded {seconds}s: {label}")
+
+    previous = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _cancel_cloud_watchdog() -> None:
+    """Disarm the pickup watchdog before the (legitimately long) CPU-wait / ASR phase."""
+    if hasattr(signal, "SIGALRM"):
+        signal.alarm(0)
+
+
 def host_can_process(cfg: dict) -> bool:
     """A file's required capabilities vs this host's. Generic: gate by config.
 
@@ -1498,6 +1578,10 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
             exec_mode = "speaker_pass"
             log(f"reuse ASR via speaker_pass (voiceprints only, no whisper): {audio.name}")
 
+    # pickup (claim + cloud reads/writes) done — disarm the CloudStorage watchdog
+    # before the legitimately long CPU-wait / ASR phase (see _cloud_watchdog).
+    _cancel_cloud_watchdog()
+
     # 3) CPU-aware gate
     proceed, cpu_reason = wait_for_cpu_available(cfg)
     if not proceed:
@@ -1678,15 +1762,39 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                     s = json.loads(sf.read_text(encoding="utf-8"))
                 except Exception:
                     continue
-                if s.get("status") == "queued":
+                status = s.get("status")
+                if status == "queued":
                     actionable.append((audio, root, source))
+                elif status == "in-progress" and inprogress_recoverable(audio, s, cfg):
+                    # Orphaned by a node that died mid-ASR (hard crash / power loss /
+                    # host unreachable). reset_stuck + claim-preempt live in
+                    # process_one_file, but the queue previously admitted only
+                    # queued/no-state, so the orphan was never reached and stayed
+                    # stuck forever regardless of lease expiry. Re-queue it here; the
+                    # subsequent try_claim_file preempts the dead owner's stale claim.
+                    s["status"] = "queued"
+                    s["last_error"] = "orphaned in-progress reclaimed (owner died)"
+                    try:
+                        atomic_write_json(sf, s)
+                        log(f"reclaim orphaned in-progress: {audio.name} "
+                            f"(prev host={s.get('host')})")
+                        actionable.append((audio, root, source))
+                    except OSError as exc:
+                        log(f"reclaim write failed (skip this sweep) {audio.name}: {exc}")
             if not actionable:
                 log("queue empty; nothing more to process; exiting cleanly")
                 break
             audio, root, source = actionable[0]
             log(f"queue rebuilt: {len(actionable)} actionable; processing newest: {audio.name}")
             try:
-                process_one_file(audio, root, source, cfg, mapper, config_path)
+                with _cloud_watchdog(int(cfg.get("cloud_op_timeout_seconds", 120)),
+                                     f"pickup {audio.name}"):
+                    process_one_file(audio, root, source, cfg, mapper, config_path)
+            except _CloudOpTimeout as exc:
+                log(f"{exc} — CloudStorage wedged during pickup; aborting sweep "
+                    f"(scheduler/launchd will retry next tick). If this recurs, make "
+                    f"the Hub available-offline on this node.")
+                break
             except AsrEnvironmentError as exc:
                 log(f"ASR environment error — aborting sweep; no files quarantined. "
                     f"Fix the ASR env (transcribe_python/venv/deps), then re-run. Detail: {exc}")
