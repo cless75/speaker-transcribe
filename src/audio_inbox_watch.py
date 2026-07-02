@@ -392,25 +392,37 @@ def _scan_one_source(root: pathlib.Path, cfg: dict, *, recursive: bool) -> list[
     skip_patterns = cfg.get("skip_filename_patterns", DEFAULT_SKIP_FILENAME_PATTERNS)
     found: list[pathlib.Path] = []
     pattern = "**/*" if recursive else "*"
+    # macOS Google Drive (File Provider) can wedge a recursive listdir on a dataless
+    # subtree with NO Errno 60 and no timeout of its own (observed: a full-Hub scan
+    # hung 3h at 0% CPU). The per-entry OSError guard below only helps once the OS
+    # eventually *returns* an error; an indefinite hang never does. Bound the whole
+    # source scan with the cloud watchdog so a wedged subtree is skipped instead of
+    # freezing the sweep. Make the source available-offline to include one that keeps
+    # timing out. No-op on Windows (no SIGALRM), which does not exhibit this hang.
+    scan_timeout = int(cfg.get("scan_op_timeout_seconds", 90))
     try:
-        for path in root.glob(pattern):
-            try:
-                if not path.is_file():
+        with _cloud_watchdog(scan_timeout, f"scan {root.name}"):
+            for path in root.glob(pattern):
+                try:
+                    if not path.is_file():
+                        continue
+                    if path.suffix.lower() not in extensions:
+                        continue
+                    rel = path.relative_to(root)
+                except ValueError:
                     continue
-                if path.suffix.lower() not in extensions:
+                except OSError:
+                    continue  # a single denied/locked entry shouldn't drop the whole scan
+                if is_skipped_path(rel, skip_folders, skip_prefixes):
                     continue
-                rel = path.relative_to(root)
-            except ValueError:
-                continue
-            except OSError:
-                continue  # a single denied/locked entry shouldn't drop the whole scan
-            if is_skipped_path(rel, skip_folders, skip_prefixes):
-                continue
-            if is_output_artifact(path.name, skip_suffixes):
-                continue
-            if is_marker_file(path.name, skip_patterns):
-                continue
-            found.append(path)
+                if is_output_artifact(path.name, skip_suffixes):
+                    continue
+                if is_marker_file(path.name, skip_patterns):
+                    continue
+                found.append(path)
+    except _CloudOpTimeout as exc:
+        log(f"scan timed out on {root}: {exc} — dataless subtree wedged; skipping this "
+            f"source (make it available-offline to include it)")
     except OSError as exc:
         log(f"scan interrupted on {root}: {exc}")
     return found

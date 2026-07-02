@@ -49,6 +49,10 @@
   "skip_folders": ["_failed", "_archive", "sessions", "Audio Record", "Transcripts"],
   "skip_folder_prefixes": ["_", "."],
 
+  "_cloud_watchdog": "abort a wedged CloudStorage syscall — macOS Google Drive (File Provider) can hang a recursive listdir/stat/open on a dataless subtree indefinitely at 0% CPU, with no Errno of its own. scan_op_timeout_seconds bounds each per-source discovery scan (wedged source is logged + skipped); cloud_op_timeout_seconds bounds the per-file pickup. Make a source available-offline to include one that keeps timing out. No-op on Windows (no SIGALRM).",
+  "scan_op_timeout_seconds": 90,
+  "cloud_op_timeout_seconds": 120,
+
   "_scheduling_knobs": "CPU-aware deferral + retry policy + optional time window",
   "respect_cpu_load": true,
   "cpu_threshold_percent": 70,
