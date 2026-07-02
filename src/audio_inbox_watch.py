@@ -1767,32 +1767,46 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 if not host_can_process(cfg):
                     continue
                 sf = state_path(audio)
-                if not sf.exists():
-                    actionable.append((audio, root, source))
-                    continue
+                # The per-candidate state/claim reads below are cloud syscalls that can
+                # wedge indefinitely on a dataless sidecar with no Errno of their own
+                # (observed via `sample`: read() on a *.state.json hung the sweep at 0%
+                # CPU *after* the scan itself completed). Guard each candidate with the
+                # cloud watchdog: a wedged sidecar is skipped this sweep, not frozen.
                 try:
-                    s = json.loads(sf.read_text(encoding="utf-8"))
-                except Exception:
+                    with _cloud_watchdog(int(cfg.get("cloud_op_timeout_seconds", 120)),
+                                         f"inspect {audio.name}"):
+                        if not sf.exists():
+                            actionable.append((audio, root, source))
+                            continue
+                        try:
+                            s = json.loads(sf.read_text(encoding="utf-8"))
+                        except _CloudOpTimeout:
+                            raise                # wedged read -> outer handler skips it
+                        except Exception:
+                            continue             # garbled/unreadable state -> skip
+                        status = s.get("status")
+                        if status == "queued":
+                            actionable.append((audio, root, source))
+                        elif status == "in-progress" and inprogress_recoverable(audio, s, cfg):
+                            # Orphaned by a node that died mid-ASR (hard crash / power
+                            # loss / host unreachable). reset_stuck + claim-preempt live
+                            # in process_one_file, but the queue previously admitted only
+                            # queued/no-state, so the orphan was never reached and stayed
+                            # stuck forever regardless of lease expiry. Re-queue it here;
+                            # the subsequent try_claim_file preempts the dead owner's
+                            # stale claim.
+                            s["status"] = "queued"
+                            s["last_error"] = "orphaned in-progress reclaimed (owner died)"
+                            try:
+                                atomic_write_json(sf, s)
+                                log(f"reclaim orphaned in-progress: {audio.name} "
+                                    f"(prev host={s.get('host')})")
+                                actionable.append((audio, root, source))
+                            except OSError as exc:
+                                log(f"reclaim write failed (skip this sweep) {audio.name}: {exc}")
+                except _CloudOpTimeout as exc:
+                    log(f"state inspect timed out for {audio.name}: {exc}; skipping this sweep")
                     continue
-                status = s.get("status")
-                if status == "queued":
-                    actionable.append((audio, root, source))
-                elif status == "in-progress" and inprogress_recoverable(audio, s, cfg):
-                    # Orphaned by a node that died mid-ASR (hard crash / power loss /
-                    # host unreachable). reset_stuck + claim-preempt live in
-                    # process_one_file, but the queue previously admitted only
-                    # queued/no-state, so the orphan was never reached and stayed
-                    # stuck forever regardless of lease expiry. Re-queue it here; the
-                    # subsequent try_claim_file preempts the dead owner's stale claim.
-                    s["status"] = "queued"
-                    s["last_error"] = "orphaned in-progress reclaimed (owner died)"
-                    try:
-                        atomic_write_json(sf, s)
-                        log(f"reclaim orphaned in-progress: {audio.name} "
-                            f"(prev host={s.get('host')})")
-                        actionable.append((audio, root, source))
-                    except OSError as exc:
-                        log(f"reclaim write failed (skip this sweep) {audio.name}: {exc}")
             if not actionable:
                 log("queue empty; nothing more to process; exiting cleanly")
                 break
