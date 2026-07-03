@@ -835,6 +835,25 @@ def move_to_failed(audio: pathlib.Path, source_root: pathlib.Path, error_tail: s
         pass
 
 
+# Signatures of a cloud-mount / input-staging failure (not the file's fault). Such a
+# failure defers the file (re-queued, no attempt counted) instead of quarantining it.
+_TRANSIENT_CLOUD_ERROR_SIGNS = (
+    "resource deadlock avoided",  # EDEADLK (errno 11): macOS fcopyfile on a GDrive src
+    "errno 11",
+    "operation timed out",        # ETIMEDOUT (errno 60): dataless enumeration / read
+    "errno 60",
+    "stage_ascii_input",          # failed staging the unicode->ascii input copy
+    "input-ascii",                # staged-copy destination path in the traceback
+)
+
+
+def _is_transient_cloud_error(err_tail: str) -> bool:
+    """True if an ASR failure looks like a wedged cloud mount / input-staging problem
+    (dataless read, fcopyfile deadlock) rather than a real problem with the media."""
+    t = (err_tail or "").lower()
+    return any(sign in t for sign in _TRANSIENT_CLOUD_ERROR_SIGNS)
+
+
 # ---------------------------------------------------------------------------
 # CPU-aware scheduling
 # ---------------------------------------------------------------------------
@@ -1700,9 +1719,24 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
         log(f"ASR ok: {audio.name} ({duration/60:.1f}m)")
         return
 
+    # failure -> classify. A cloud-mount / input-staging failure (macOS fcopyfile
+    # EDEADLK on a Google Drive source, or a dataless read that never materializes)
+    # is NOT the file's fault: it must not burn an attempt or quarantine the file to
+    # _failed, which would strand real recordings that merely need the source made
+    # available-offline. Defer instead — roll back to queued, keep the claim retired.
+    err_tail = err_tail or "unknown error"
+    if _is_transient_cloud_error(err_tail):
+        state["status"] = "queued"
+        state["last_error"] = err_tail
+        atomic_write_json(state_file, state)
+        retire_claim(audio, cfg)
+        log(f"ASR deferred — transient cloud/staging error, attempt not counted "
+            f"(make the source available-offline if it persists): {audio.name}")
+        return
+
     # failure -> retry or terminal
     state["attempts"] = int(state.get("attempts", 0)) + 1
-    state["last_error"] = err_tail or "unknown error"
+    state["last_error"] = err_tail
     max_attempts = int(cfg.get("max_attempts", 3))
     if state["attempts"] < max_attempts:
         state["status"] = "queued"

@@ -8,6 +8,7 @@ import ctypes
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -997,6 +998,35 @@ def ascii_slug(value: str) -> str:
     return token or "media"
 
 
+def _copy_file_bounded(src: pathlib.Path, dst: pathlib.Path,
+                       timeout_sec: int = 180, chunk: int = 4 * 1024 * 1024) -> None:
+    """Copy ``src`` -> ``dst`` with a plain read/write loop under an optional timeout.
+
+    Deliberately NOT ``shutil.copy2``: on macOS copy2 uses the ``fcopyfile`` fast-path,
+    which deadlocks (EDEADLK / errno 11) or wedges on a Google Drive File Provider
+    source. A chunked ``copyfileobj`` avoids fcopyfile. The SIGALRM budget turns a
+    dataless source that never materializes into a fast failure — the watcher then
+    defers the file (see ``_is_transient_cloud_error``) instead of the ASR job hanging
+    forever. No-op timeout where SIGALRM is unavailable (Windows), which does not
+    exhibit this hang.
+    """
+    armed = False
+    if timeout_sec and hasattr(signal, "SIGALRM"):
+        def _on_timeout(_signum, _frame):
+            raise TimeoutError(
+                f"input-ascii staging copy exceeded {timeout_sec}s — dataless source "
+                f"not materialized (make it available-offline): {src}")
+        signal.signal(signal.SIGALRM, _on_timeout)
+        signal.alarm(timeout_sec)
+        armed = True
+    try:
+        with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+            shutil.copyfileobj(fsrc, fdst, chunk)
+    finally:
+        if armed:
+            signal.alarm(0)
+
+
 def stage_ascii_input(payload: dict, warnings: list[str], job_root: pathlib.Path) -> None:
     input_path = pathlib.Path(payload["input_path"])
     payload["original_input_path"] = str(input_path.resolve())
@@ -1006,7 +1036,8 @@ def stage_ascii_input(payload: dict, warnings: list[str], job_root: pathlib.Path
 
     stage_root = stage_dir(job_root, "input-ascii")
     staged_path = stage_root / f"{payload['output_base_name']}{input_path.suffix.lower()}"
-    shutil.copy2(input_path, staged_path)
+    _copy_file_bounded(input_path, staged_path,
+                       timeout_sec=int(payload.get("stage_copy_timeout_sec", 180)))
     payload["input_path"] = str(staged_path)
     warnings.append("unicode_source_path_workaround_ascii_copy")
 
