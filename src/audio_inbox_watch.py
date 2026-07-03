@@ -886,6 +886,43 @@ def wait_for_cpu_available(cfg: dict) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
+def _pid_alive(pid) -> bool:
+    """Best-effort: does a process with this PID exist on the local host?
+
+    Used to reclaim a watcher lock left by a run that crashed, was killed, or was
+    frozen by machine sleep — instead of waiting out the full stale window. The
+    lock is host-scoped (``watcher-{hostname}.lock``), so the PID is local and this
+    check is meaningful. Conservative: when liveness can't be determined, returns
+    True so the caller falls back to the age-based staleness check.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            k32 = ctypes.windll.kernel32
+            handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            code = ctypes.c_ulong()
+            ok = k32.GetExitCodeProcess(handle, ctypes.byref(code))
+            k32.CloseHandle(handle)
+            return bool(ok) and code.value == STILL_ACTIVE
+        except Exception:
+            return True  # can't tell on this host -> fall back to age check
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
+    except OSError:
+        return False
+    return True
+
+
 def acquire_watcher_lock() -> pathlib.Path | None:
     """Guard concurrent invocations on THIS machine (not cross-machine claim)."""
     lock_dir = pathlib.Path(tempfile.gettempdir()) / "audio-inbox"
@@ -894,12 +931,20 @@ def acquire_watcher_lock() -> pathlib.Path | None:
     if lock.exists():
         try:
             data = json.loads(lock.read_text(encoding="utf-8"))
-            started = dt.datetime.fromisoformat(data.get("started_at", ""))
-            age_min = (dt.datetime.now() - started).total_seconds() / 60
-            if age_min < 360:
-                log(f"watcher lock present, age {age_min:.1f}m (pid={data.get('pid')}); skipping")
-                return None
-            log(f"watcher lock stale ({age_min:.1f}m); taking over")
+            pid = data.get("pid")
+            # A same-host owner whose PID is gone crashed / was killed / slept through
+            # its run: reclaim immediately rather than blocking this node for the full
+            # 6h stale window (critical for a launchd/Task-Scheduler node that a laptop
+            # or Mac Mini can suspend mid-sweep).
+            if not _pid_alive(pid):
+                log(f"watcher lock owner pid={pid} not alive; taking over")
+            else:
+                started = dt.datetime.fromisoformat(data.get("started_at", ""))
+                age_min = (dt.datetime.now() - started).total_seconds() / 60
+                if age_min < 360:
+                    log(f"watcher lock present, age {age_min:.1f}m (pid={pid}); skipping")
+                    return None
+                log(f"watcher lock stale ({age_min:.1f}m); taking over")
         except Exception:
             log("watcher lock unparseable; taking over")
     atomic_write_json(lock, {
