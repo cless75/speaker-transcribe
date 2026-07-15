@@ -2305,9 +2305,9 @@ def _hf_pyannote_access_hint_from_exc(exc: BaseException) -> str:
     return (
         " | HF/pyannote: задайте HF_TOKEN/HUGGINGFACE_TOKEN (Read) и в браузере под тем же "
         "аккаунтом примите условия на https://huggingface.co/pyannote/segmentation-3.0 и "
-        "https://huggingface.co/pyannote/speaker-diarization-3.1 — затем "
-        "`python 02-CoreAutomation/scripts/verify_hf_pyannote_access.py` (из корня воркспейса). "
-        "Гайд: 2026/note-Hugging-Face-Hub-использование.md"
+        "https://huggingface.co/pyannote/speaker-diarization-3.1 — проверить токен: "
+        "`python -c \"from huggingface_hub import whoami; print(whoami())\"`. "
+        "Гайд: docs/hf-token.html"
     )
 
 
@@ -4187,9 +4187,24 @@ def main() -> None:
                     voiceprint_meta["error"] = str(exc)
                     warnings.append(f"voiceprint_failed: {exc}")
 
+        # Speaker clips exist to put a name to an anonymous voice — reviewing it by ear,
+        # or enrolling a voiceprint. An export that names its speakers leaves the first
+        # job with nothing to do, so cutting clips is pure ffmpeg time. Voiceprints still
+        # need the audio, so only skip the cut when they are off.
+        speakers_named_by_export = (
+            diarization_meta.get("source") in ("ktalk_txt", "zoom_vtt")
+            and str(payload.get("voiceprint_mode") or "off") == "off"
+        )
+        if speakers_named_by_export and payload.get("generate_speaker_clips"):
+            payload["generate_speaker_clips"] = False
+            log(payload, "phase=speaker_clips skipped (speakers named by export, voiceprints off)")
+
         clip_generation_meta = {
             "status": "disabled" if not payload.get("generate_speaker_clips") else "pending",
-            "reason": "clip_generation_disabled" if not payload.get("generate_speaker_clips") else None,
+            "reason": (
+                ("speakers_named_by_export" if speakers_named_by_export else "clip_generation_disabled")
+                if not payload.get("generate_speaker_clips") else None
+            ),
             "target_sec": payload.get("speaker_clip_target_sec"),
             "storage_mode": payload.get("speaker_clip_dir_mode"),
             "clips_generated": 0,
