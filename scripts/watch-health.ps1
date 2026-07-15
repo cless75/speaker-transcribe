@@ -92,7 +92,8 @@ if (-not $task) {
     try { $intervalMin = [int][System.Xml.XmlConvert]::ToTimeSpan($rep).TotalMinutes } catch { $intervalMin = 0 }
   }
   $last = if ($info.LastRunTime) { $info.LastRunTime.ToString("yyyy-MM-dd HH:mm") } else { "never" }
-  $detail = "state=$($task.State) user=$user interval=${intervalMin}m last=$last result=$($info.LastTaskResult)"
+  $next = if ($info.NextRunTime) { $info.NextRunTime.ToString("yyyy-MM-dd HH:mm") } else { "none" }
+  $detail = "state=$($task.State) user=$user interval=${intervalMin}m last=$last next=$next result=$($info.LastTaskResult)"
 
   if ($task.State -eq "Disabled") {
     Add-Check "task" "FAIL" "disabled -- $detail"
@@ -101,7 +102,18 @@ if (-not $task) {
   } elseif ($info.LastTaskResult -eq 0 -or $info.LastTaskResult -eq 267009) {
     Add-Check "task" "OK" $detail
   } else {
+    # The watcher itself exits 0 (ok) or 2 (no config) — any other code came from
+    # watch.ps1 throwing (venv python / watcher / config not found). See the log tail.
     Add-Check "task" "WARN" "last run failed -- $detail"
+  }
+
+  # A registered task is not a scheduled one: the trigger is AtLogOn, so its repetition
+  # only starts at the next logon. Registered mid-session (or started by hand) it sits
+  # there with no next run and the node stays silent — which looks identical to healthy.
+  if ($task.State -ne "Disabled" -and -not $info.NextRunTime) {
+    Add-Check "task-schedule" "WARN" ("no next run scheduled -- the AtLogOn trigger arms at the next logon. " +
+                                      "Sign out and back in (or reboot) to start the ${intervalMin}-min repetition; " +
+                                      "Start-ScheduledTask only fires a one-off sweep.")
   }
 
   if ($user -and $env:USERNAME -and ($user -notlike "*$env:USERNAME")) {
@@ -126,8 +138,11 @@ if (-not (Test-Path $logFile)) {
   else                        { Add-Check "log" "OK" $detail }
 
   # Errors in the recent tail: surface them, they do not by themselves mean the node is down.
+  # Covers both sides of the run: the python worker (Traceback / ok=False / OOM) AND the
+  # PowerShell wrapper, whose throws ("venv python not found: …") land in this same log and
+  # are what a non-zero task result usually means.
   $tail = Get-Content $logFile -Tail 200 -ErrorAction SilentlyContinue
-  $errs = $tail | Select-String -Pattern "Traceback|ok=False|ERROR|CUDA out of memory" -SimpleMatch:$false
+  $errs = $tail | Select-String -Pattern "Traceback|ok=False|ERROR|CUDA out of memory|not found:|FullyQualifiedErrorId|watcher exit code"
   if ($errs) {
     Add-Check "log-errors" "WARN" "$($errs.Count) error line(s) in the last 200 -- newest: $(($errs | Select-Object -Last 1).Line.Trim())"
   } else {
