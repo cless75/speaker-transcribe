@@ -559,6 +559,30 @@ def _safe_is_dir_bool(p: pathlib.Path) -> bool:
         return False
 
 
+# A Ktalk (Kontur.Talk) download is a media file plus a transcript named after it.
+# The transcript names its speakers, so when one is present the worker takes speakers
+# from it and skips diarization entirely (media_transcribe.resolve_speaker_turns).
+# Override via cfg.ktalk_sidecar_patterns if your export names them differently.
+KTALK_SIDECAR_PATTERNS = ["Транскрипция {stem}.txt"]
+
+
+def ktalk_sidecar_for(audio: pathlib.Path, cfg: dict) -> pathlib.Path | None:
+    """The Ktalk transcript sitting next to ``audio``, if the export included one."""
+    patterns = cfg.get("ktalk_sidecar_patterns")
+    if patterns is None:
+        patterns = KTALK_SIDECAR_PATTERNS
+    if not patterns:
+        return None
+    for pattern in patterns:
+        try:
+            candidate = audio.parent / str(pattern).format(stem=audio.stem)
+            if candidate.is_file():
+                return candidate
+        except (OSError, KeyError, IndexError):
+            continue
+    return None
+
+
 def source_for_audio(audio: pathlib.Path, cfg: dict) -> tuple[pathlib.Path, dict] | None:
     """Find which configured source root is an ancestor of ``audio``."""
     for root, source in resolved_sources(cfg):
@@ -1503,6 +1527,14 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
         cmd += ["--project-id", str(pid)]
     if execution_mode:
         cmd += ["--execution-mode", execution_mode]
+
+    # A Ktalk download brings its own named speakers -> hand them to the worker and
+    # let it skip diarization. Only meaningful when speakers were wanted at all.
+    if cfg.get("speaker_mode", "diarize") == "diarize":
+        ktalk_txt = ktalk_sidecar_for(audio, cfg)
+        if ktalk_txt:
+            cmd += ["--ktalk-txt", str(ktalk_txt)]
+            log(f"ktalk transcript found (speakers from export, no diarization): {ktalk_txt.name}")
 
     # Voiceprint storage at the PROJECT ROOT ({hub_root}/{pid}) when enabled.
     # The registry (index.json + profiles/) lives with the project; the embeddings

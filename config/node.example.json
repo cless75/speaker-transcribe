@@ -39,6 +39,9 @@
   "speaker_mode": "diarize",
   "timestamps": "both",
 
+  "_ktalk_note": "A Ktalk (Kontur.Talk) download is a media file + a transcript naming the speakers. When one is found next to the media, speakers are taken from it and diarization is skipped (ASR still runs). {stem} = media file name without extension; [] disables the lookup. See docs/speaker-recognition.md.",
+  "ktalk_sidecar_patterns": ["Транскрипция {stem}.txt"],
+
   "_cleanup_note": "keep the hub tidy. copy_asr_chunk_artifacts:false stops decoded chunk WAV/JSON from landing in outputs (set true to keep crash-recovery chunks). cleanup_intermediates:true prunes raw/merged dumps + the asr/ scratch dir after a successful run, keeping transcript + segments + run-meta.",
   "copy_asr_chunk_artifacts": false,
   "cleanup_intermediates": true,

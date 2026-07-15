@@ -54,6 +54,42 @@ needs voiceprints (`voiceprint_mode`).
 - **`enroll`** — build the project registry from new voices (the first bootstrap pass).
 - **`match`** — identify speakers in new sessions against the existing registry.
 
+## Speakers from a meeting export (no diarization)
+
+Some platforms hand you the speakers already — by name, which diarization cannot do
+on its own. When such an export is present the engine takes the turns from it and
+**skips the pyannote pass entirely**: ASR still runs (its text is better), only the
+speaker attribution comes from the export. No `HF_TOKEN` is needed in this path.
+
+| Export | How it is picked up | Flag (direct CLI) |
+|---|---|---|
+| **Ktalk** (Kontur.Talk) `.txt` | the watcher finds it next to the media file, by name | `--ktalk-txt` |
+| **Zoom** `.vtt` | not auto-detected — pass it by hand | `--zoom-vtt` |
+
+A Ktalk download is a media file plus `Транскрипция <media name>.txt`, tab-separated:
+
+```
+Транскрипция записи "Some meeting" 10 июля 2026 г
+00:00:00	Ivan Petrov	Hello everyone.
+00:00:03	Maria Ivanova	Hi.
+```
+
+Drop both files into a source folder and the watcher wires them together (log line:
+`ktalk transcript found (speakers from export, no diarization)`). If the export is
+named differently, override the lookup in `node.local.json` — `{stem}` is the media
+file name without its extension; `[]` disables the detection:
+
+```json
+"ktalk_sidecar_patterns": ["Транскрипция {stem}.txt"]
+```
+
+The export marks only where each utterance *starts*, so turn lengths are estimated
+from the text and trimmed by whatever utterance starts next — an interjection lands
+on its own speaker instead of swallowing the answer it interrupts. A malformed or
+unreadable export is not fatal: it falls back to normal diarization. Attribution is
+recorded as `speaker_source: ktalk_txt`, with parse details under
+`diarization.external` in `*-run-meta.json`.
+
 ## First-time workflow
 
 1. Set `speaker_mode: diarize`, `HF_TOKEN`, and `voiceprint_mode: enroll`.

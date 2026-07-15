@@ -267,6 +267,154 @@ def parse_zoom_vtt_turns(vtt_path: str) -> tuple[list[dict], dict]:
     }
 
 
+KTALK_HEADER_RE = re.compile(r'^Транскрипция записи\s+"(?P<title>.*)"\s*(?P<date>.*)$')
+KTALK_LINE_RE = re.compile(r"^(?P<h>\d{1,2}):(?P<m>\d{2}):(?P<s>\d{2})\t(?P<speaker>[^\t]+)\t(?P<text>.+)$")
+
+# A Ktalk export gives the START of each utterance but no end. Duration is estimated
+# from the text length: measured across real exports the median rate is 12-16 chars/sec,
+# so a deliberately low rate over-estimates rather than under-estimates. That is the safe
+# direction: an over-long turn is trimmed by whatever utterance starts next (see
+# _subtract_interval below), while an under-long one would leave ASR segments with no
+# speaker at all.
+KTALK_CHARS_PER_SEC = 10.0
+# A one-word interjection ("mhm", "right") is a couple of seconds of speech, but by
+# text length alone it estimates to ~1s — too short to out-overlap the long turn it
+# interrupts, so the ASR segment carrying it goes to the wrong speaker. Measured on a
+# sample export: 1.0s got 19/20 segments right, >=2.0s got 20/20 (at any chars/sec).
+# Over-reaching is harmless here — the next utterance trims it.
+KTALK_MIN_TURN_SEC = 3.0
+
+
+def _subtract_interval(pieces: list[tuple[float, float]], cut_start: float, cut_end: float) -> list[tuple[float, float]]:
+    """Remove [cut_start, cut_end] from a list of disjoint intervals."""
+    out: list[tuple[float, float]] = []
+    for start, end in pieces:
+        if cut_end <= start or cut_start >= end:
+            out.append((start, end))
+            continue
+        if cut_start > start:
+            out.append((start, min(cut_start, end)))
+        if cut_end < end:
+            out.append((max(cut_end, start), end))
+    return [(s, e) for s, e in out if e - s > 0.05]
+
+
+def parse_ktalk_txt_turns(txt_path: str) -> tuple[list[dict], dict]:
+    """Speaker turns from a Ktalk (Kontur.Talk) transcript export.
+
+    Format (UTF-8, tab-separated, one utterance per line, monotonic timecodes)::
+
+        Транскрипция записи "Some meeting" 10 июля 2026 г
+        00:00:00	Ivan Petrov	Hello everyone.
+        00:00:03	Maria Ivanova	Hi.
+
+    Ktalk names the speakers, which diarization cannot do on its own, so this
+    replaces the pyannote pass entirely (see resolve_speaker_turns).
+
+    Utterances interleave: a short "mhm" lands inside a long answer, and the export
+    records only where each one begins. So an estimated turn is trimmed by every
+    utterance that starts later — the later start wins its own window, and the
+    interrupted turn resumes after it. Without this a one-word interjection would
+    take the whole span up to the next utterance away from the person still talking
+    (~22% of utterances in the sample exports overrun the slot to their successor).
+    """
+    path = pathlib.Path(txt_path)
+    # utf-8-sig: tolerate a BOM if the file was round-tripped through a Windows editor.
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+
+    header: dict = {}
+    utterances: list[dict] = []
+    malformed = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        match = KTALK_LINE_RE.match(line)
+        if not match:
+            head = KTALK_HEADER_RE.match(line.strip())
+            if head and not header:
+                header = {"title": head.group("title"), "date": head.group("date").strip()}
+            else:
+                malformed += 1
+            continue
+        start = int(match.group("h")) * 3600 + int(match.group("m")) * 60 + int(match.group("s"))
+        speaker = match.group("speaker").strip()
+        text = match.group("text").strip()
+        if not speaker or not text:
+            malformed += 1
+            continue
+        utterances.append({"start": float(start), "speaker_name": speaker, "text": text})
+
+    if not utterances:
+        raise RuntimeError(f"ktalk_txt_has_no_utterances:{path}")
+
+    utterances.sort(key=lambda item: item["start"])
+    estimated = [
+        (
+            item["start"],
+            item["start"] + max(KTALK_MIN_TURN_SEC, len(item["text"]) / KTALK_CHARS_PER_SEC),
+        )
+        for item in utterances
+    ]
+
+    stable_order: list[str] = []
+    alias_map: dict[str, str] = {}
+    observations: dict[str, dict] = {}
+    turns: list[dict] = []
+    for index, item in enumerate(utterances):
+        start, end = estimated[index]
+        pieces = [(start, end)]
+        for other in range(index + 1, len(utterances)):
+            next_start, next_end = estimated[other]
+            if next_start >= end:
+                break
+            pieces = _subtract_interval(pieces, next_start, next_end)
+            if not pieces:
+                break
+        if not pieces:
+            continue
+
+        name = item["speaker_name"]
+        token = name.casefold()
+        if token not in alias_map:
+            stable_order.append(name)
+            alias_map[token] = f"Speaker {len(stable_order)}"
+            observations[alias_map[token]] = {
+                "speaker_name": name,
+                "raw_labels": [name],
+                "cue_count": 0,
+                "total_duration_sec": 0.0,
+            }
+        speaker_id = alias_map[token]
+        obs = observations[speaker_id]
+        obs["cue_count"] += 1
+        for piece_start, piece_end in pieces:
+            obs["total_duration_sec"] = round(float(obs["total_duration_sec"]) + (piece_end - piece_start), 3)
+            turns.append(
+                {
+                    "start": round(piece_start, 3),
+                    "end": round(piece_end, 3),
+                    "raw_label": name,
+                    "speaker_id": speaker_id,
+                    "speaker_name": name,
+                    "speaker_source": "ktalk_txt",
+                }
+            )
+
+    turns.sort(key=lambda turn: turn["start"])
+    return turns, {
+        "status": "ok",
+        "path": str(path.resolve()),
+        "title": header.get("title"),
+        "recorded_label": header.get("date"),
+        "cues_parsed": len(utterances),
+        "malformed_lines": malformed,
+        "turns_built": len(turns),
+        "speakers_detected": len(stable_order),
+        "chars_per_sec": KTALK_CHARS_PER_SEC,
+        "speaker_observations": observations,
+    }
+
+
 def ensure_work_root(work_root: str | None) -> pathlib.Path:
     root = pathlib.Path(work_root or tempfile.gettempdir())
     root.mkdir(parents=True, exist_ok=True)
@@ -2439,6 +2587,33 @@ def resolve_speaker_turns(audio_path: str, payload: dict, job_root: pathlib.Path
             zoom_meta["reason"] = "zoom_vtt_parse_failed"
             zoom_meta["error"] = str(exc)
             log(payload, f"phase=zoom_vtt fallback error={exc}")
+
+    # Ktalk export: named speakers already, so diarization would only re-derive
+    # anonymous labels for voices we can name. Parse failure falls through to
+    # diarization rather than losing speakers entirely.
+    ktalk_txt_path = str(payload.get("ktalk_txt_path") or "").strip()
+    if ktalk_txt_path:
+        try:
+            turns, parsed_meta = parse_ktalk_txt_turns(ktalk_txt_path)
+            diarization_meta = {
+                "enabled": True,
+                "status": "ok",
+                "reason": "speaker_turns_loaded_from_ktalk_txt",
+                "model": None,
+                "source": "ktalk_txt",
+                "speaker_turns": len(turns),
+                "speakers_detected": parsed_meta.get("speakers_detected", 0),
+                "external": parsed_meta,
+            }
+            log(
+                payload,
+                f"phase=ktalk_txt ok utterances={parsed_meta.get('cues_parsed')} "
+                f"turns={len(turns)} speakers={parsed_meta.get('speakers_detected')} "
+                f"(diarization skipped)",
+            )
+            return turns, diarization_meta, zoom_meta
+        except Exception as exc:
+            log(payload, f"phase=ktalk_txt fallback error={exc}")
 
     turns, diarization_meta = run_diarization(audio_path, payload, job_root)
     diarization_meta["source"] = "diarization"

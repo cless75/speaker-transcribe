@@ -138,6 +138,10 @@ def _build_payload(args: argparse.Namespace) -> dict:
         payload["zoom_vtt_path"] = str(
             pathlib.Path(args.zoom_vtt_path).expanduser().resolve()
         )
+    if args.ktalk_txt_path:
+        payload["ktalk_txt_path"] = str(
+            pathlib.Path(args.ktalk_txt_path).expanduser().resolve()
+        )
     if args.work_root:
         payload["work_root"] = args.work_root
     if args.output_base_name:
@@ -218,6 +222,13 @@ def main() -> int:
     parser.add_argument("--speaker-mode", dest="speaker_mode", default=None)
     parser.add_argument("--speaker-map", dest="speaker_map_path", default=None)
     parser.add_argument("--zoom-vtt", dest="zoom_vtt_path", default=None)
+    parser.add_argument(
+        "--ktalk-txt", dest="ktalk_txt_path", default=None,
+        help=(
+            "Ktalk transcript export (tab-separated 'HH:MM:SS<TAB>speaker<TAB>text'). "
+            "Speakers are taken from it by name and diarization is skipped."
+        ),
+    )
     parser.add_argument("--work-root", dest="work_root", default=None)
     parser.add_argument("--output-base-name", dest="output_base_name", default=None)
     parser.add_argument("--timestamps", default=None, choices=("hms", "vtt", "both", "none"))
