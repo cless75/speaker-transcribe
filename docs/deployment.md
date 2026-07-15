@@ -126,6 +126,29 @@ schtasks /delete /tn "speaker-transcribe-watch" /f            # remove it
 
 ### Monitoring — is the watcher alive?
 
+One command answers it — task state, log freshness, hub mount, token, queue:
+
+```powershell
+.\scripts\watch-health.ps1            # table + exit code: 0 = OK, 1 = WARN, 2 = FAIL
+.\scripts\watch-health.ps1 -Json      # machine-readable, for an alerting task
+```
+
+A stale log is the signal that matters: a live node appends to `watch.log` **every**
+sweep — including ticks it skips (outside `process_window_local` it still logs
+`skipping tick`). So "no writes for 3 intervals" means the timer stopped, not that
+there was nothing to do. Alert on a non-zero exit code by scheduling it:
+
+```powershell
+# alert if the node is degraded (runs hourly; wire the action to your notifier)
+$a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument `
+  "-NoProfile -ExecutionPolicy Bypass -File C:\work\speaker-transcribe\scripts\watch-health.ps1 -Json"
+Register-ScheduledTask -TaskName "speaker-transcribe-health" -Action $a `
+  -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+            -RepetitionInterval (New-TimeSpan -Hours 1))
+```
+
+The underlying checks, if you prefer them by hand:
+
 ```powershell
 # 1) task registered + last result (LastTaskResult 0 = ok; 267011 = never ran)
 Get-ScheduledTaskInfo -TaskName "speaker-transcribe-watch" |
@@ -246,4 +269,5 @@ Point several machines at the same hub and set `enable_multi_machine: true` with
 ---
 
 See also: [`README.md`](../README.md) · [`node-setup.html`](node-setup.html) ·
-`config/node.example.json` · `scripts/watch.ps1` · `scripts/install-watch-task.ps1`
+`config/node.example.json` · `scripts/watch.ps1` · `scripts/install-watch-task.ps1` ·
+`scripts/watch-health.ps1`
