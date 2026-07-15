@@ -68,6 +68,17 @@ if ($Remove) {
 }
 
 if (-not (Test-Path $watcher)) { throw "watcher not found: $watcher" }
+
+# Fail before doing any work: registering a task needs elevation, and the failure
+# it produces otherwise is a non-terminating CIM error that reads like a success.
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+  throw ("registering a scheduled task needs an elevated shell. Start PowerShell via " +
+         "'Run as administrator' and re-run this script, or double-click scripts\install-watch-task.cmd " +
+         "(it prompts for elevation). The watcher itself runs unprivileged.")
+}
+
 if (-not $Config)  { $Config  = Join-Path $repo "config\node.local.json" }
 if (-not $LogDir)  { $LogDir  = Join-Path $repo "logs" }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -100,9 +111,18 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhen
   -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 2) `
   -ExecutionTimeLimit ([TimeSpan]::Zero) -DontStopOnIdleEnd
 
+# -ErrorAction Stop: Register-ScheduledTask reports failure (e.g. Access Denied) as a
+# NON-terminating CIM error, which $ErrorActionPreference does not catch — without this
+# the script printed "Installed" over a task that was never created.
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
   -Principal $principal -Settings $settings `
-  -Description "Audio Inbox watcher node (every $IntervalMinutes min, logged-on session)" -Force | Out-Null
+  -Description "Audio Inbox watcher node (every $IntervalMinutes min, logged-on session)" `
+  -Force -ErrorAction Stop | Out-Null
+
+# Trust the registry, not the return: confirm the task is really there before saying so.
+if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+  throw "task did not register: $TaskName (no error raised, but it is not in the scheduler)"
+}
 
 Write-Host "Installed scheduled task: $TaskName" -ForegroundColor Green
 Write-Host "  repo     : $repo"
