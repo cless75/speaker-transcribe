@@ -36,6 +36,7 @@ param(
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONUNBUFFERED = "1"
+$env:PYTHONIOENCODING = "utf-8"      # keep Cyrillic in the log readable
 
 $repo    = Split-Path $PSScriptRoot -Parent
 $watcher = Join-Path $repo "src\audio_inbox_watch.py"
@@ -57,7 +58,17 @@ if ($ForceWindow)            { $watchArgs += "--force-window" }
 
 Write-Host "Watcher: $watcher" -ForegroundColor Yellow
 Write-Host "Config : $cfgPath" -ForegroundColor Yellow
-& $PythonBin $watcher @watchArgs
+
+# The watcher logs progress to STDERR. PowerShell wraps each native stderr line as an
+# ErrorRecord, so under $ErrorActionPreference = "Stop" the sweep aborts on its very
+# first log line — a scheduled run (stdout+stderr redirected to a file) then never gets
+# past this header, and the queue is left half-processed. Drop to Continue for the call,
+# merge stderr into stdout, and stringify so the lines land verbatim (no "python.exe :"
+# prefix, no NativeCommandError noise). $LASTEXITCODE is still the python exit code.
+$ErrorActionPreference = "Continue"
+& $PythonBin $watcher @watchArgs 2>&1 | ForEach-Object { $_.ToString() }
 $code = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+
 if ($code -ne 0) { Write-Warning "watcher exit code $code" }
 exit $code
