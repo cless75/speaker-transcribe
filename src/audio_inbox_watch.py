@@ -57,8 +57,8 @@ DEFAULT_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "config" / "no
 
 # Default watcher knobs — overridable from the node config.
 DEFAULT_SCAN_EXTENSIONS = [".m4a", ".mp3", ".wav", ".oga", ".mp4", ".mov", ".webm", ".m4v"]
-DEFAULT_SKIP_FOLDERS = ["_failed", "_archive", "sessions", "Audio Record", "Transcripts",
-                        "profiles", "Speakers", "recordings", "pipeline"]
+DEFAULT_SKIP_FOLDERS = ["_failed", "_processed", "_archive", "sessions", "Audio Record",
+                        "Transcripts", "profiles", "Speakers", "recordings", "pipeline"]
 DEFAULT_SKIP_FOLDER_PREFIXES = ["_", "."]
 DEFAULT_SKIP_FILENAME_SUFFIXES = [
     "-transcript.md", "-transcript.txt", "_original.txt",
@@ -857,6 +857,55 @@ def move_to_failed(audio: pathlib.Path, source_root: pathlib.Path, error_tail: s
         (failed_dir / f"{audio.name}.error.txt").write_text(error_tail or "", encoding="utf-8")
     except Exception:
         pass
+
+
+def _free_processed_name(dest_dir: pathlib.Path, audio: pathlib.Path) -> str:
+    """A filename for ``audio`` in ``dest_dir`` colliding with no existing audio or its
+    ``.state.json`` sidecar. Keeps the primary extension so the ``.state.json`` suffix
+    (which ``_write_project_index`` globs on) stays intact for a same-name re-drop."""
+    name = audio.name
+    if not (dest_dir / name).exists() and not (dest_dir / f"{name}.state.json").exists():
+        return name
+    n = 1
+    while True:
+        cand = f"{audio.stem}-dup{n}{audio.suffix}"
+        if not (dest_dir / cand).exists() and not (dest_dir / f"{cand}.state.json").exists():
+            return cand
+        n += 1
+
+
+def move_to_processed(audio: pathlib.Path, source_root: pathlib.Path, cfg: dict) -> bool:
+    """OPT-IN tidy: move a successfully-processed file (+ ALL sidecars) into
+    ``{source_root}/{processed_dir_name}/`` — a mirror of ``_failed/`` for success.
+
+    NON-FATAL by contract: ASR already succeeded and the transcript/state outputs are
+    already persisted under ``sessions/``, so a failed move is logged and swallowed and
+    must never fail the sweep. Nothing is deleted; the source stays fully recoverable."""
+    dir_name = cfg.get("processed_dir_name", "_processed")
+    dest_dir = source_root / dir_name
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log(f"move_to_processed mkdir failed (non-fatal) {audio.name}: {exc}")
+        return False
+    new_name = _free_processed_name(dest_dir, audio)
+    moved_any = False
+    for p in (audio, state_path(audio), marker_processed_asr(audio), claim_path(audio),
+              asr_log_path(audio)):
+        if p.exists():
+            # Rename the whole group consistently: swap the audio's basename for the
+            # collision-free one, preserving each sidecar's suffix.
+            dest = dest_dir / p.name.replace(audio.name, new_name, 1)
+            try:
+                shutil.move(str(p), str(dest))
+                moved_any = True
+            except FileNotFoundError:
+                pass  # a peer/other sweep already moved the group — benign
+            except Exception as exc:
+                log(f"move_to_processed {p.name} failed (non-fatal): {exc}")
+    if moved_any:
+        log(f"moved to {dir_name}/: {audio.name}")
+    return moved_any
 
 
 # Signatures of a cloud-mount / input-staging failure (not the file's fault). Such a
@@ -1819,6 +1868,50 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
 # ---------------------------------------------------------------------------
 
 
+def _sweep_processed_moves(cfg: dict, mapper: dict) -> None:
+    """OPT-IN end-of-sweep phase: relocate ``asr-done`` sources (+ sidecars) into
+    ``_processed/``. No-op unless ``on_asr_done == "move"``.
+
+    Runs as its own phase (not inline in the success branch) because the main loop's
+    actionable filter drops ``asr-done`` files, so an inline hook could neither honor the
+    age gate nor uniformly cover the reused/caught-up paths. Here every terminal
+    ``asr-done`` sidecar is visited via ``find_audio_files`` and moved uniformly, leaving
+    the hot path untouched. ``on_asr_done_after_days`` defers the move until the file is
+    that old (measured from ``finished_at``); 0 = move on this sweep."""
+    if cfg.get("on_asr_done", "leave") != "move":
+        return
+    after_days = float(cfg.get("on_asr_done_after_days", 0) or 0)
+    host = host_label_of(cfg)
+    now = time.time()
+    for audio, source_root, _source in find_audio_files(cfg):
+        sf = state_path(audio)
+        if not sf.exists():
+            continue
+        try:
+            st = json.loads(sf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if st.get("status") != "asr-done":
+            continue
+        # Move only our own completions (multi-node): the file we finished. A peer's
+        # asr-done on the shared hub is left for the peer to tidy.
+        if cfg.get("enable_multi_machine") and st.get("host") not in (host, None):
+            continue
+        if after_days > 0:
+            fin = st.get("finished_at")
+            try:
+                age_sec = ((dt.datetime.now() - dt.datetime.fromisoformat(fin)).total_seconds()
+                           if fin else (now - _safe_mtime(audio)))
+            except Exception:
+                age_sec = now - _safe_mtime(audio)
+            if age_sec < after_days * 86400:
+                continue
+        try:
+            move_to_processed(audio, source_root, cfg)
+        except Exception as exc:  # never let tidy-up break a sweep
+            log(f"move_to_processed error (non-fatal) {audio.name}: {exc}")
+
+
 def run_once(cfg: dict, config_path: pathlib.Path, *,
              catch_up_only: bool = False,
              time_budget_minutes: int | None = None,
@@ -1971,6 +2064,9 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                     f"Fix the ASR env (transcribe_python/venv/deps), then re-run. Detail: {exc}")
                 break
             processed += 1
+        # OPT-IN tidy: relocate asr-done sources into _processed/ (runs before the index
+        # refresh so the index is written from the sidecars in their final location).
+        _sweep_processed_moves(cfg, mapper)
         # Refresh per-project session index (processed vs pending) for the hub.
         if cfg.get("write_session_index", True) and cfg.get("hub_root"):
             try:
