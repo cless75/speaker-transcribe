@@ -3965,15 +3965,29 @@ def main() -> None:
         if payload.get("speaker_mode") == "diarize":
             try:
                 log(payload, "phase=speaker_turns start")
+                _t_spk = time.time()
                 turns, diarization_meta, zoom_vtt_meta = resolve_speaker_turns(audio_path, payload, job_root)
                 alignment_meta = assign_speakers_to_segments(collected, turns, speaker_map)
+                _spk_elapsed = round(time.time() - _t_spk, 1)
                 diarization_meta["speaker_turns"] = len(turns)
+                diarization_meta["elapsed_sec"] = _spk_elapsed
+                _src = diarization_meta.get("source") or "diarization"
+                _assigned = alignment_meta.get("assigned_segments", 0)
+                _total_seg = _assigned + alignment_meta.get("unassigned_segments", 0)
+                # Highlighted, greppable line: where the speakers came from (pyannote vs an
+                # external transcript), how many, and how long it took — the signal a user
+                # needs to confirm diarization actually ran on their project/hub.
+                log(payload,
+                    f"phase=speaker_turns done | ✓ speakers resolved: source={_src} "
+                    f"speakers={diarization_meta.get('speakers_detected', 0)} turns={len(turns)} "
+                    f"segments_labeled={_assigned}/{_total_seg} elapsed={_spk_elapsed}s")
                 speaker_turns_meta = {
                     "enabled": True,
                     "status": "ok",
-                    "source": diarization_meta.get("source") or "diarization",
+                    "source": _src,
                     "speaker_turns": len(turns),
                     "speakers_detected": diarization_meta.get("speakers_detected", 0),
+                    "elapsed_sec": _spk_elapsed,
                     "reason": diarization_meta.get("reason"),
                 }
             except Exception as exc:

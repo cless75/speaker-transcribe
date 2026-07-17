@@ -1577,14 +1577,70 @@ def _write_project_index(hub_root: pathlib.Path, pid: str, cfg: dict) -> None:
         log(f"project index write failed for {pid}: {exc}")
 
 
+def _parse_worker_result(stdout: str) -> dict | None:
+    """The worker prints its final result as one JSON object on stdout. Return the last
+    line that parses as a dict carrying ``status`` (its summary), or None."""
+    result = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{") or '"status"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and "status" in obj:
+            result = obj
+    return result
+
+
+def _fmt_dur(sec: float) -> str:
+    sec = float(sec or 0)
+    return f"{sec:.0f}s" if sec < 60 else f"{sec / 60:.1f}m"
+
+
+def _log_result_summary(audio: pathlib.Path, pid: str | None, proc_sec: float,
+                        meta: dict | None, transcript: pathlib.Path | None) -> None:
+    """Highlighted, greppable end-of-file block: what was processed and how efficiently,
+    with diarization made explicit (source + speaker count + its share of the time)."""
+    meta = meta or {}
+    audio_sec = float(meta.get("duration_sec") or 0)
+    diar = meta.get("diarization") or {}
+    align = meta.get("alignment") or {}
+    assigned = int(align.get("assigned_segments") or 0)
+    total_seg = assigned + int(align.get("unassigned_segments") or 0)
+    log("=" * 60)
+    log(f"DONE: {audio.name}  (pid={pid})")
+    rt = f"  ({proc_sec / audio_sec:.1f}x realtime)" if audio_sec > 0 else ""
+    log(f"  audio {_fmt_dur(audio_sec)} -> processed {_fmt_dur(proc_sec)}{rt}")
+    if not diar.get("enabled"):
+        log(f"  speakers: off (no diarization) | segments {total_seg}")
+    else:
+        src = diar.get("source") or "diarization"
+        diar_sec = diar.get("elapsed_sec")
+        share = f" | diarization {diar_sec}s" if diar_sec is not None else ""
+        note = " (from transcript, no pyannote)" if src in ("ktalk_txt", "zoom_vtt") else ""
+        status = diar.get("status")
+        if status == "fallback":
+            log(f"  speakers: DIARIZATION FAILED -> ASR only | {diar.get('reason') or diar.get('error')}")
+        else:
+            log(f"  speakers: {diar.get('speakers_detected') or 0} via {src}{note} | "
+                f"segments {assigned}/{total_seg} labeled{share}")
+    if transcript:
+        log(f"  transcript: {transcript.name}")
+    log("=" * 60)
+
+
 def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             source_root: pathlib.Path, output_dir: pathlib.Path,
             config_path: pathlib.Path,
-            execution_mode: str | None = None) -> tuple[bool, str, pathlib.Path | None]:
-    """Invoke media_transcribe_cli for one file. Returns (ok, error_tail, transcript).
+            execution_mode: str | None = None) -> tuple[bool, str, pathlib.Path | None, dict | None]:
+    """Invoke media_transcribe_cli for one file. Returns (ok, error_tail, transcript, meta).
 
-    ``execution_mode`` (e.g. ``speaker_pass``) is forwarded to the worker to reuse
-    existing ASR (``*-raw.json``) and run only diarization/voiceprints — no whisper.
+    ``meta`` is the worker's parsed result JSON (audio duration, diarization, alignment),
+    or None if it could not be parsed. ``execution_mode`` (e.g. ``speaker_pass``) is
+    forwarded to the worker to reuse existing ASR (``*-raw.json``) and run only
+    diarization/voiceprints — no whisper.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     python = _clean_path_value(node_field(cfg, "transcribe_python", None)) or sys.executable
@@ -1672,6 +1728,7 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     full_stdout = "".join(stdout_lines)
     full_stderr = "".join(stderr_lines)
     stderr_tail = "\n".join(full_stderr.splitlines()[-30:])
+    result_meta = _parse_worker_result(full_stdout)
     _write_asr_log(audio, cmd, proc.returncode, full_stdout, full_stderr)
     # Success criterion = a transcript was produced. output_dir is the session's
     # own transcripts dir, so ANY top-level *-transcript.md in it is THIS file's
@@ -1683,11 +1740,11 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
         if proc.returncode != 0:
             log(f"exit={proc.returncode} but transcript present — treating as success "
                 f"(non-fatal/atexit crash; artifacts on disk)")
-        return True, stderr_tail, transcript
+        return True, stderr_tail, transcript, result_meta
     # No transcript produced -> genuine failure.
     if proc.returncode != 0 and stdout_json_ok:
         log(f"exit={proc.returncode}, stdout_json ok, but no transcript in {output_dir} — failing")
-    return False, stderr_tail, None
+    return False, stderr_tail, None, result_meta
 
 
 # ---------------------------------------------------------------------------
@@ -1781,13 +1838,19 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     state["host"] = host_label
     atomic_write_json(state_file, state)
 
-    log(f"asr start: {audio.name} session={state.get('session_id')} "
-        f"speaker_mode={cfg.get('speaker_mode', 'diarize')}")
+    try:
+        size_mb = f"{audio.stat().st_size / 1e6:.0f}MB"
+    except OSError:
+        size_mb = "?MB"
+    # File-info line at pickup. For long files the worker then streams a per-chunk ETA
+    # ("eta_wall_local~HH:MM:SS") so the finish time of the current file is visible live.
+    log(f"▶ processing: {audio.name} | pid={pid} | {size_mb} | "
+        f"speaker_mode={cfg.get('speaker_mode', 'diarize')} | session={state.get('session_id')}")
     t0 = time.time()
     try:
         with _ClaimHeartbeat(audio, cfg):
-            ok, err_tail, transcript = run_asr(audio, cfg, pid, source_root, transcript_dir,
-                                               config_path, execution_mode=exec_mode)
+            ok, err_tail, transcript, result_meta = run_asr(
+                audio, cfg, pid, source_root, transcript_dir, config_path, execution_mode=exec_mode)
     except AsrEnvironmentError as exc:
         # Roll the file back to queued without counting an attempt or quarantining
         # it; re-raise so the sweep aborts (every file would hit the same wall).
@@ -1827,7 +1890,7 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
             _cleanup_intermediates(transcript_dir, cfg)
         except Exception as exc:
             log(f"cleanup_intermediates failed: {exc}")
-        log(f"ASR ok: {audio.name} ({duration/60:.1f}m)")
+        _log_result_summary(audio, pid, duration, result_meta, transcript)
         return
 
     # failure -> classify. A cloud-mount / input-staging failure (macOS fcopyfile
