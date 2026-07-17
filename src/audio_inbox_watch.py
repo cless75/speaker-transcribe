@@ -741,8 +741,20 @@ def apply_bundle_metadata(candidates: list[tuple[pathlib.Path, pathlib.Path, dic
                 continue
             primary_tup = next(t for t in members if t[0] == primary)
             src_root = primary_tup[1]
-            log(f"bundle in {directory.name}/[{ts_key}]: primary={primary.name} "
-                f"siblings={len(siblings)} (id={bundle_id})")
+            # Announce the bundle only when the primary is still pending. A finished
+            # bundle gets re-grouped every sweep; re-logging it each time is noise that
+            # makes an idle sweep look busy. Siblings are still (idempotently) stamped.
+            _psf = state_path(primary)
+            _primary_done = False
+            if _psf.exists():
+                try:
+                    _primary_done = (json.loads(_psf.read_text(encoding="utf-8")).get("status")
+                                     in ("asr-done", "failed"))
+                except Exception:
+                    _primary_done = False
+            if not _primary_done:
+                log(f"bundle in {directory.name}/[{ts_key}]: primary={primary.name} "
+                    f"siblings={len(siblings)} (id={bundle_id})")
             pid, _ = route_pid_for_audio(primary, src_root, primary_tup[2], cfg, mapper)
             for sib in siblings:
                 stamp_bundle_sibling(sib, bundle_id, primary, pid, host_label)
