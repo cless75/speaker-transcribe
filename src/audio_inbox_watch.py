@@ -967,7 +967,13 @@ def _pid_alive(pid) -> bool:
 
 
 def acquire_watcher_lock() -> pathlib.Path | None:
-    """Guard concurrent invocations on THIS machine (not cross-machine claim)."""
+    """Guard concurrent invocations on THIS machine (not cross-machine claim).
+
+    Exclusive per host: a sweep proceeds only if it holds this lock, and it can hold it
+    only when the previous owner is gone (dead PID / 6h-stale / no lock). That guarantee
+    is what lets ``inprogress_recoverable`` reclaim this host's own stranded in-progress
+    files at once — while this sweep runs, no other live sweep of ours can be working
+    them (a concurrent sweep would find our live PID here and exit without scanning)."""
     lock_dir = pathlib.Path(tempfile.gettempdir()) / "audio-inbox"
     lock_dir.mkdir(exist_ok=True)
     lock = lock_dir / f"watcher-{socket.gethostname()}.lock"
@@ -1062,19 +1068,43 @@ def claim_is_dead(audio: pathlib.Path, cfg: dict) -> bool:
     return is_claim_expired(claim, utcnow(), int(cfg.get("claim_lease_minutes", 30)))
 
 
-def inprogress_recoverable(audio: pathlib.Path, state: dict, cfg: dict) -> bool:
-    """Whether an ``in-progress`` file was orphaned by a dead node and may be re-queued.
+def _owned_by_this_host(state: dict, cfg: dict) -> bool:
+    """True if THIS host stamped the in-progress state (``state['host']`` == our
+    ``host_label``, written at pickup, line ~1702).
 
-    Multi-machine: authoritative signal is an expired claim lease (owner stopped
-    heartbeating). Single-machine: fall back to wall-clock staleness, matching
-    ``reset_stuck`` — a crashed same-host run leaves no live heartbeat either.
+    A missing host stamp (legacy sidecar) is treated as ours only on a single-machine
+    node — there, only this host could have produced it. On a multi-machine node a
+    stamp-less file could belong to a peer, so we do NOT assume ownership and let the
+    claim-lease check decide instead."""
+    h = state.get("host")
+    if h:
+        return h == host_label_of(cfg)
+    return not cfg.get("enable_multi_machine")
+
+
+def inprogress_recoverable(audio: pathlib.Path, state: dict, cfg: dict) -> bool:
+    """Whether an ``in-progress`` file may be re-queued this sweep.
+
+    Self-blocked -> auto-correct: an in-progress file stamped with OUR ``host`` is
+    stranded from an earlier run of ours. This sweep holds the exclusive host lock (it
+    would not be here otherwise — see ``acquire_watcher_lock``), so no live sweep of
+    ours can be working the file: a concurrent sweep finds our live PID on the lock and
+    exits without scanning, so a genuinely long-running local ASR is never seen here and
+    never reclaimed. Therefore an own-host in-progress file is always safe to reclaim NOW
+    — no need to wait out the claim lease / stuck window.
+
+    Blocked by someone else: fall back to the peer-liveness signals. Multi-machine —
+    an expired claim lease (the owning node stopped heartbeating). Single-machine —
+    wall-clock staleness, matching ``reset_stuck``.
 
     Why this exists: ``reset_stuck`` and the claim-preempt both live inside
     ``process_one_file``, but the queue admitted only ``queued``/no-state files, so a
-    hard node death (crash / power loss / host unreachable mid-ASR) left the file
+    hard node death (crash / power loss / window close mid-ASR) left the file
     ``in-progress`` forever — no node ever reached the recovery paths. This gate lets
     the orphan back into the queue.
     """
+    if _owned_by_this_host(state, cfg):
+        return True
     if cfg.get("enable_multi_machine"):
         return claim_is_dead(audio, cfg)
     started = state.get("started_at")
@@ -1906,12 +1936,16 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                             # stuck forever regardless of lease expiry. Re-queue it here;
                             # the subsequent try_claim_file preempts the dead owner's
                             # stale claim.
+                            prev_host = s.get("host")
+                            mine = prev_host == host_label_of(cfg) or (
+                                not prev_host and not cfg.get("enable_multi_machine"))
+                            who = "self" if mine else f"dead peer {prev_host}"
                             s["status"] = "queued"
-                            s["last_error"] = "orphaned in-progress reclaimed (owner died)"
+                            s["last_error"] = f"in-progress reclaimed ({who})"
                             try:
                                 atomic_write_json(sf, s)
-                                log(f"reclaim orphaned in-progress: {audio.name} "
-                                    f"(prev host={s.get('host')})")
+                                log(f"reclaim in-progress: {audio.name} — blocked by {who}; "
+                                    f"re-queued for reprocessing")
                                 actionable.append((audio, root, source))
                             except OSError as exc:
                                 log(f"reclaim write failed (skip this sweep) {audio.name}: {exc}")
