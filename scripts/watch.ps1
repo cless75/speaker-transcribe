@@ -56,6 +56,10 @@ if ($MaxFiles -gt 0)         { $watchArgs += @("--max-files", "$MaxFiles") }
 if ($TimeBudgetMinutes -gt 0){ $watchArgs += @("--time-budget-minutes", "$TimeBudgetMinutes") }
 if ($ForceWindow)            { $watchArgs += "--force-window" }
 
+# Rule off the start of every sweep so runs are easy to tell apart in the shared log
+# (the scheduled task appends each sweep to the same file, back to back).
+Write-Host ("=" * 78)
+Write-Host ("[{0}] sweep start  (host={1})" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $env:COMPUTERNAME)
 Write-Host "Watcher: $watcher" -ForegroundColor Yellow
 Write-Host "Config : $cfgPath" -ForegroundColor Yellow
 
