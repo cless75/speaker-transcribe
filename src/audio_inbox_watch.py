@@ -2042,6 +2042,12 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
         start_time = time.time()
         budget_sec = (time_budget_minutes * 60) if time_budget_minutes else None
         processed = 0
+        # Process each file at most once per sweep. A transient defer or a retry rolls the
+        # file back to `queued`; without this guard the re-scan re-picks it immediately, so
+        # a persistently-failing input (corrupt / still-syncing) loops forever within one
+        # sweep and never lets the tick end. Deferring it to the next tick is exactly the
+        # intent ("scheduler will retry next tick").
+        attempted_this_sweep: set[str] = set()
         while True:
             if stop_flag.exists():
                 log("graceful shutdown via .audio-inbox-stop")
@@ -2063,6 +2069,8 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
             for audio, root, source in files:
                 if not host_can_process(cfg):
                     continue
+                if str(audio) in attempted_this_sweep:
+                    continue  # already handled this sweep — defer any re-queue to next tick
                 sf = state_path(audio)
                 # The per-candidate state/claim reads below are cloud syscalls that can
                 # wedge indefinitely on a dataless sidecar with no Errno of their own
@@ -2112,6 +2120,7 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 log("queue empty; nothing more to process; exiting cleanly")
                 break
             audio, root, source = actionable[0]
+            attempted_this_sweep.add(str(audio))
             log(f"queue rebuilt: {len(actionable)} actionable; processing newest: {audio.name}")
             try:
                 with _cloud_watchdog(int(cfg.get("cloud_op_timeout_seconds", 120)),
