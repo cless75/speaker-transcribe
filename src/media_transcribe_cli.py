@@ -142,6 +142,10 @@ def _build_payload(args: argparse.Namespace) -> dict:
         payload["ktalk_txt_path"] = str(
             pathlib.Path(args.ktalk_txt_path).expanduser().resolve()
         )
+    if args.enroll_name:
+        # The enroll path (media_transcribe voiceprint phase) names the dominant speaker
+        # from payload["voiceprint_enroll_name"] — wire the CLI flag to that field.
+        payload["voiceprint_enroll_name"] = args.enroll_name
     if args.work_root:
         payload["work_root"] = args.work_root
     if args.output_base_name:
@@ -243,6 +247,12 @@ def main() -> int:
     )
     parser.add_argument("--voiceprint-mode", dest="voiceprint_mode", default=None,
                         help="off | match | enroll")
+    parser.add_argument(
+        "--enroll-name", dest="enroll_name", default=None,
+        help="Enroll the voice(s) in this file under this canonical name. For a curated "
+             "single-speaker sample (bootstrap a project registry). Use with "
+             "--voiceprint-mode enroll.",
+    )
     parser.add_argument(
         "--worker", default=None,
         help="Path to media_transcribe.py (defaults to the file alongside this script).",

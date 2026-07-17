@@ -2221,15 +2221,14 @@ def generate_speaker_clips(
             clip_entry["profile_id"] = voice_hash
             clip_entry["profile_link_status"] = "linked"
             if storage_mode in {"profile", "both"} and voiceprint_store is not None:
-                # Auto-enroll-from-VTT: when speaker_source is "zoom_vtt" and speaker_name
-                # is a real person name (not the speaker_id placeholder), pass canonical
-                # identity into profile creation. This closes the loop where VTT supplies
-                # the truth-source name yet ensure_profile_entry left canonical_name=None.
-                vtt_sources = {"zoom_vtt", "zoom_vtt_remap"}
-                is_vtt_source = str(speaker_source) in vtt_sources
+                # Auto-enroll with a real identity whenever the speaker is NAMED — by a
+                # Zoom VTT, a Ktalk export, a manual speaker-map, or --enroll-name (a
+                # single-speaker sample). pyannote's own labels are "Speaker N" == the
+                # speaker_id, so has_real_name stays False for anonymous diarization and
+                # only genuinely-named speakers are enrolled by name.
                 has_real_name = bool(speaker_name) and str(speaker_name) != str(speaker_id)
                 enroll_meta = None
-                if is_vtt_source and has_real_name:
+                if has_real_name:
                     name_str = str(speaker_name).strip()
                     enroll_meta = {
                         "canonical_name": name_str,
@@ -2247,7 +2246,7 @@ def generate_speaker_clips(
                         "source_file": source_file,
                         "speaker_id": speaker_id,
                         "speaker_source": speaker_source,
-                        "mode": "auto_enroll_from_vtt" if (is_vtt_source and has_real_name) else "auto_clip",
+                        "mode": "auto_enroll_named" if has_real_name else "auto_clip",
                     },
                     extractor=clip_extractor,
                 )
