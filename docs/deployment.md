@@ -64,7 +64,17 @@ Edit `config/node.local.json` — the fields that matter most:
 | `hub_root` | your mounted hub path (check the drive letter / mount point) |
 | `sources[].root` + how to scan | see source modes below |
 | `enable_multi_machine` + `sources[].claim` | `true` when several nodes share one hub |
+| `on_asr_done` | `leave` (default) or `move` — tidy processed sources, see below |
 | `secrets.hf_token` | `env:HF_TOKEN` (set the variable, see §6) |
+
+**Inbox cleanup (`on_asr_done`)** — by default a transcribed recording stays in the
+inbox next to its sidecars forever. Set `"on_asr_done": "move"` to relocate the source
+audio **and all its sidecars** into a scanner-skipped `{source_root}/_processed/` once
+it's `asr-done` (a mirror of `_failed/`). Nothing is deleted, transcripts under
+`sessions/` are untouched, and the session still shows in `_sessions-index.md`.
+`"on_asr_done_after_days"` adds a safety delay measured from completion (fractional =
+hours, e.g. `0.25` = 6 h; `0` = same sweep) so a source lingers long enough to review
+before it's tidied.
 
 **Source modes** — a source is either a plain folder or an auto-discovering hub:
 
@@ -113,6 +123,12 @@ timer — overlap is safe (a host-local lock + per-file claim).
 
 Or double-click `scripts\install-watch-task.cmd` (it sets ExecutionPolicy Bypass
 and prompts for elevation). Logs go to `<repo>\logs\watch.log`.
+
+The task **self-updates by default**: each sweep first runs a best-effort
+`git pull --ff-only`, so the node tracks the engine without manual pulls (a network or
+divergence failure is logged and never fails the sweep). `IgnoreNew` means the pull only
+lands between sweeps, never mid-ASR. Pass `-NoAutoUpdate` to `install-watch-task.ps1` to
+opt out, or `watch.ps1 -Once -Pull` to update a manual sweep.
 
 The installer registers a task named **`speaker-transcribe-watch`** that runs
 `watch.ps1 -Once` at logon and repeats every N minutes. To inspect / run / remove
