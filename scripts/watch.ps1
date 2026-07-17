@@ -51,6 +51,23 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $repo    = Split-Path $PSScriptRoot -Parent
 $watcher = Join-Path $repo "src\audio_inbox_watch.py"
 
+# Engine version = the semver in ./VERSION plus the exact commit, e.g. "v1.0.0+g9cfbff3".
+# The semver is bumped on releases; the commit hash always reflects the running code, so a
+# self-update shows up even between version bumps. Guarded so a missing VERSION / no-git
+# checkout never breaks a sweep.
+function Get-EngineVersion {
+  $ver = "0.0.0"
+  try {
+    $vf = Join-Path $repo "VERSION"
+    if (Test-Path $vf) { $ver = ((Get-Content $vf -Raw) -replace '\s','') }
+  } catch {}
+  try {
+    $hash = (git -C $repo rev-parse --short HEAD 2>$null)
+    if ($hash) { return "v$ver+g$hash" }
+  } catch {}
+  return "v$ver"
+}
+
 if (-not (Test-Path $PythonBin)) { throw "venv python not found: $PythonBin (create venv per docs/node-setup.html)" }
 if (-not (Test-Path $watcher))   { throw "watcher not found: $watcher" }
 
@@ -69,7 +86,7 @@ if ($ForceWindow)            { $watchArgs += "--force-window" }
 # Rule off the start of every sweep so runs are easy to tell apart in the shared log
 # (the scheduled task appends each sweep to the same file, back to back).
 Write-Host ("=" * 78)
-Write-Host ("[{0}] sweep start  (host={1})" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $env:COMPUTERNAME)
+Write-Host ("[{0}] sweep start  (host={1}, engine {2})" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $env:COMPUTERNAME, (Get-EngineVersion))
 Write-Host "Watcher: $watcher" -ForegroundColor Yellow
 Write-Host "Config : $cfgPath" -ForegroundColor Yellow
 
@@ -87,12 +104,12 @@ $ErrorActionPreference = "Continue"
 # previous sweep is still running, so a pull never lands mid-ASR.
 if ($Pull) {
   try {
-    $before = (git -C $repo rev-parse --short HEAD 2>$null)
+    $vBefore = Get-EngineVersion
     git -C $repo pull --ff-only 2>&1 | ForEach-Object { $_.ToString() }
-    $after = (git -C $repo rev-parse --short HEAD 2>$null)
-    if ($before -ne $after) { Write-Host "git pull: $before -> $after" }
-    else                    { Write-Host "git pull: up to date ($after)" }
-  } catch { Write-Host "git pull skipped (non-fatal): $($_.Exception.Message)" }
+    $vAfter = Get-EngineVersion
+    if ($vBefore -ne $vAfter) { Write-Host "engine updated: $vBefore -> $vAfter" }
+    else                      { Write-Host "engine up to date: $vAfter" }
+  } catch { Write-Host "engine self-update skipped (non-fatal): $($_.Exception.Message)" }
 }
 
 # Merge stderr into stdout and stringify so lines land verbatim (no "python.exe :" prefix,
