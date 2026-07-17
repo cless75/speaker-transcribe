@@ -49,6 +49,7 @@ param(
   [string]$Config          = "",
   [string]$PythonBin       = "",
   [string]$LogDir          = "",
+  [switch]$NoAutoUpdate,                 # by default the task self-updates (git pull) each sweep
   [switch]$Remove
 )
 
@@ -90,7 +91,10 @@ if (-not (Test-Path $Config)) {
 }
 
 # Build the watch.ps1 invocation (forward -Config and optional -PythonBin), append all streams to the log.
+# -Pull makes each sweep self-update (best-effort git pull --ff-only first); IgnoreNew (below)
+# means a new instance can't start mid-sweep, so the pull only ever lands between sweeps.
 $inner = "& '$watcher' -Once -Config '$Config'"
+if (-not $NoAutoUpdate) { $inner += " -Pull" }
 if ($PythonBin) { $inner += " -PythonBin '$PythonBin'" }
 $inner += " *>> '$logFile'"
 $argument = "-NoProfile -ExecutionPolicy Bypass -Command `"$inner`""
