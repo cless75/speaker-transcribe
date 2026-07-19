@@ -2087,6 +2087,133 @@ def sync_profile_to_project_registry(profile: dict, registry_dir: pathlib.Path, 
     }
 
 
+def sync_profile_to_global_registry(
+    profile: dict, global_dir: pathlib.Path, project_id: str | None = None
+) -> dict:
+    """Write the FULL v3 profile (WITH embeddings) to the shared hub registry.
+
+    Unlike the project projection card (project_profile_card_from_voiceprint, which
+    strips vectors), the global registry keeps the canonical embeddings so any node can
+    read them. Layout: {global_dir}/profiles/{voice_hash}.json (the profile) plus
+    {global_dir}/registry.json (a per-voice_hash index for pull-on-claim). Open, not
+    encrypted (MVP); kept out of git via .gitignore (**/_voiceprints/).
+
+    In this phase the write is a plain overwrite by the enrolling node — no merge-union
+    across concurrent nodes yet (that is phase 3).
+    """
+    voice_hash = str(profile.get("voice_hash") or "").strip()
+    if not voice_hash:
+        raise RuntimeError("global_registry_sync_requires_voice_hash")
+    now = dt.datetime.now(dt.UTC).isoformat()
+    profiles_dir = global_dir / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+
+    record = {
+        "schema_version": "voiceprint-global-v1",
+        "voice_hash": voice_hash,
+        "person_id": profile.get("person_id"),
+        "canonical_name": profile.get("canonical_name"),
+        "display_name": profile.get("display_name"),
+        "contact_ref": profile.get("contact_ref"),
+        "contact_name": profile.get("contact_name"),
+        "speaker_profile_id": profile.get("speaker_profile_id") or voice_hash,
+        "embeddings": [item for item in (profile.get("embeddings") or []) if isinstance(item, dict)],
+        "clip_history": [item for item in (profile.get("clip_history") or []) if isinstance(item, dict)],
+        "origin_project_id": profile.get("origin_project_id") or project_id,
+        "created_at": profile.get("created_at"),
+        "updated_at": now,
+    }
+    profile_path = profiles_dir / f"{sanitize_token(voice_hash)}.json"
+    write_text_atomic(profile_path, json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    registry_path = global_dir / "registry.json"
+    registry = load_json_file(
+        registry_path,
+        {"schema_version": "voiceprint-registry-v1", "persons": [], "updated_at": None},
+    )
+    entries = registry.get("persons")
+    if not isinstance(entries, list):
+        entries = []
+    summary = {
+        "voice_hash": voice_hash,
+        "person_id": record["person_id"],
+        "canonical_name": record["canonical_name"],
+        "profile_path": str(profile_path),
+        "origin_project_id": record["origin_project_id"],
+        "embedding_count": len(record["embeddings"]),
+        "updated_at": now,
+    }
+    replaced = False
+    for idx, item in enumerate(entries):
+        if isinstance(item, dict) and str(item.get("voice_hash") or "").strip() == voice_hash:
+            entries[idx] = summary
+            replaced = True
+            break
+    if not replaced:
+        entries.append(summary)
+    registry["persons"] = sorted(entries, key=lambda item: str(item.get("voice_hash") or ""))
+    registry["updated_at"] = now
+    write_text_atomic(registry_path, json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"voice_hash": voice_hash, "profile_path": str(profile_path), "registry_path": str(registry_path)}
+
+
+def sync_project_members(
+    person_id: str | None,
+    canonical_name: str | None,
+    voice_hash: str,
+    registry_dir: pathlib.Path,
+    project_id: str | None = None,
+) -> dict:
+    """Upsert a project member (person_id → voice_hashes + link to the global profile).
+
+    members.json is the per-project roster used to bound matching to project participants
+    (phase 2). Stored alongside the projection (index.json/profiles/) in registry_dir.
+    voice_hashes is append-only (union); canonical_name is not overwritten once set.
+    """
+    voice_hash = str(voice_hash or "").strip()
+    person_id = str(person_id or "").strip() or f"person_unnamed_{voice_hash[:12]}"
+    now = dt.datetime.now(dt.UTC).isoformat()
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    members_path = registry_dir / "members.json"
+    doc = load_json_file(
+        members_path,
+        {"schema_version": "members-v1", "project_id": project_id, "members": [], "updated_at": None},
+    )
+    if not doc.get("project_id") and project_id:
+        doc["project_id"] = project_id
+    members = doc.get("members")
+    if not isinstance(members, list):
+        members = []
+    global_link = f"_voiceprints/profiles/{voice_hash}.json" if voice_hash else None
+    existing = None
+    for item in members:
+        if isinstance(item, dict) and str(item.get("person_id") or "").strip() == person_id:
+            existing = item
+            break
+    if existing is None:
+        existing = {
+            "person_id": person_id,
+            "canonical_name": canonical_name,
+            "voice_hashes": [],
+            "global_link": global_link,
+            "created_at": now,
+        }
+        members.append(existing)
+    hashes = [h for h in existing.get("voice_hashes", []) if isinstance(h, str)]
+    if voice_hash and voice_hash not in hashes:
+        hashes.append(voice_hash)
+    existing["voice_hashes"] = hashes
+    if not existing.get("canonical_name") and canonical_name:
+        existing["canonical_name"] = canonical_name
+    if global_link:
+        existing["global_link"] = global_link
+    existing["updated_at"] = now
+    doc["members"] = sorted(members, key=lambda item: str(item.get("person_id") or ""))
+    doc["updated_at"] = now
+    write_text_atomic(members_path, json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"person_id": person_id, "members_path": str(members_path), "voice_hash": voice_hash}
+
+
 def maybe_update_profile_clip(
     profile: dict,
     *,
@@ -3587,6 +3714,7 @@ def normalize_payload(payload: dict) -> dict:
         "speaker_map_path", "zoom_vtt_path",
         "session_artifact_dir", "project_speaker_registry_path",
         "profile_store_path", "machine_local_voiceprint_store_path",
+        "global_registry_dir",
         "original_input_path",
     }
 
@@ -3647,6 +3775,12 @@ def main() -> None:
     else:
         derived_registry = resolve_project_speaker_registry_dir(payload)
         payload["project_speaker_registry_path"] = str(derived_registry) if derived_registry else None
+    if payload.get("global_registry_dir"):
+        payload["global_registry_dir"] = str(
+            pathlib.Path(str(payload["global_registry_dir"]).strip()).expanduser().resolve()
+        )
+    else:
+        payload["global_registry_dir"] = None
     if payload.get("zoom_vtt_path"):
         payload["zoom_vtt_path"] = str(pathlib.Path(str(payload["zoom_vtt_path"]).strip()).expanduser().resolve())
     payload["generate_speaker_clips"] = bool(payload.get("generate_speaker_clips", payload.get("speaker_mode") == "diarize"))
@@ -4023,6 +4157,11 @@ def main() -> None:
             "profiles_updated": 0,
             "profiles": [],
         }
+        global_registry_meta = {
+            "path": payload.get("global_registry_dir"),
+            "status": "disabled" if not payload.get("global_registry_dir") else "pending",
+            "profiles_written": 0,
+        }
         machine_local_store_meta = {
             "path": payload.get("machine_local_voiceprint_store_path") or payload.get("profile_store_path"),
             "status": "disabled" if not (payload.get("machine_local_voiceprint_store_path") or payload.get("profile_store_path")) else "pending",
@@ -4287,22 +4426,43 @@ def main() -> None:
                     voice_hash = str((match or {}).get("voice_hash") or "").strip()
                     if voice_hash:
                         candidate_hashes.add(voice_hash)
+                project_id_val = str(payload.get("project_id") or "").strip() or None
+                global_dir_str = str(payload.get("global_registry_dir") or "").strip()
+                global_dir = pathlib.Path(global_dir_str) if global_dir_str else None
                 synced_profiles = []
+                global_written = 0
                 for voice_hash in sorted(candidate_hashes):
                     profile = ensure_profile_entry(voiceprint_store, voice_hash)
                     synced_profiles.append(
                         sync_profile_to_project_registry(
                             profile,
                             registry_dir,
-                            project_id=str(payload.get("project_id") or "").strip() or None,
+                            project_id=project_id_val,
                         )
                     )
+                    if global_dir is not None:
+                        # Full profile (with embeddings) → shared hub; roster link → project.
+                        sync_profile_to_global_registry(profile, global_dir, project_id=project_id_val)
+                        sync_project_members(
+                            profile.get("person_id"),
+                            profile.get("canonical_name"),
+                            voice_hash,
+                            registry_dir,
+                            project_id=project_id_val,
+                        )
+                        global_written += 1
                 project_registry_meta["status"] = "updated" if synced_profiles else "not_needed"
                 project_registry_meta["profiles_updated"] = len(synced_profiles)
                 project_registry_meta["profiles"] = synced_profiles
+                if global_dir is not None:
+                    global_registry_meta["status"] = "updated" if global_written else "not_needed"
+                    global_registry_meta["profiles_written"] = global_written
             except Exception as exc:
                 project_registry_meta["status"] = "error"
                 project_registry_meta["error"] = str(exc)
+                if payload.get("global_registry_dir"):
+                    global_registry_meta["status"] = "error"
+                    global_registry_meta["error"] = str(exc)
                 warnings.append(f"project_registry_sync_failed: {exc}")
         elif registry_dir_str:
             project_registry_meta["status"] = "not_needed"
@@ -4360,6 +4520,7 @@ def main() -> None:
                 "updated_profiles": len({item.get("voice_hash") for item in profile_updates if item.get("voice_hash")}),
             },
             "project_registry": project_registry_meta,
+            "global_registry": global_registry_meta,
             "machine_local_store": machine_local_store_meta,
             "speaker_clips": speaker_clips,
             "speaker_review": {},

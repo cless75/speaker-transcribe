@@ -160,6 +160,10 @@ def _build_payload(args: argparse.Namespace) -> dict:
         payload["machine_local_voiceprint_store_path"] = str(
             pathlib.Path(args.machine_local_voiceprint_store_path).expanduser().resolve()
         )
+    if args.global_registry_dir:
+        payload["global_registry_dir"] = str(
+            pathlib.Path(args.global_registry_dir).expanduser().resolve()
+        )
     if args.voiceprint_mode:
         payload["voiceprint_mode"] = args.voiceprint_mode
 
@@ -244,6 +248,12 @@ def main() -> int:
     parser.add_argument(
         "--voiceprint-store", dest="machine_local_voiceprint_store_path", default=None,
         help="Node-local voiceprint store file (embeddings) used for match/enroll. Keep off the shared hub.",
+    )
+    parser.add_argument(
+        "--global-registry", dest="global_registry_dir", default=None,
+        help="Shared canonical embeddings registry on the hub (e.g. {hub_root}/_voiceprints). "
+             "On enroll, the full v3 profile (with embeddings) is written here so other nodes "
+             "can read it. Private data — kept off git via .gitignore, not encrypted (MVP).",
     )
     parser.add_argument("--voiceprint-mode", dest="voiceprint_mode", default=None,
                         help="off | match | enroll")

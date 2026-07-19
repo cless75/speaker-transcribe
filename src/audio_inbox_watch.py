@@ -1703,6 +1703,9 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
             except OSError:
                 pass
             cmd += ["--voiceprint-store", str(store_dir / "voiceprints.json")]
+        gr_tpl = vp.get("global_registry")
+        if gr_tpl:
+            cmd += ["--global-registry", resolve_template(gr_tpl, vctx)]
         cmd += ["--voiceprint-mode", vmode]
 
     log(f"ASR start: {audio.name} (pid={pid}, output={output_dir})")
