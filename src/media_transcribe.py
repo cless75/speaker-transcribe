@@ -2214,6 +2214,124 @@ def sync_project_members(
     return {"person_id": person_id, "members_path": str(members_path), "voice_hash": voice_hash}
 
 
+def _embedding_signature(embedding: dict) -> str:
+    """Content signature of an embedding for merge-union dedup (idempotent pulls)."""
+    vector = embedding.get("vector") if isinstance(embedding, dict) else None
+    if not isinstance(vector, list) or not vector:
+        return ""
+    payload = json.dumps([round(float(x), 6) for x in vector], separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def sync_hub_to_local_cache(
+    store: dict, project_registry_dir: pathlib.Path, global_registry_dir: pathlib.Path
+) -> dict:
+    """Pull canonical profiles from the shared hub into the node-local store (in-memory).
+
+    The reverse of sync_profile_to_global_registry: reads the project roster
+    ({project_registry_dir}/members.json), loads each participant's canonical profile
+    from {global_registry_dir}/profiles/{voice_hash}.json, and merges it into `store`
+    (schema v3) by voice_hash — union of embeddings (dedup by content signature so
+    repeated pulls are idempotent). Matching stays bounded to project participants
+    because the local store is per-project ({cache_root}/{pid}/voiceprints.json).
+
+    Manual local edits win: an existing non-empty canonical_name is never overwritten.
+    Mutates `store` in place; the caller persists it. Returns a meta summary.
+    """
+    members_path = project_registry_dir / "members.json"
+    doc = load_json_file(members_path, {"members": []})
+    members = doc.get("members") if isinstance(doc.get("members"), list) else []
+    profiles_dir = global_registry_dir / "profiles"
+    now = dt.datetime.now(dt.UTC).isoformat()
+    persons_pulled = 0
+    embeddings_merged = 0
+    missing = 0
+
+    for member in members:
+        if not isinstance(member, dict):
+            continue
+        for voice_hash in member.get("voice_hashes") or []:
+            voice_hash = str(voice_hash or "").strip()
+            if not voice_hash:
+                continue
+            record_path = profiles_dir / f"{sanitize_token(voice_hash)}.json"
+            if not record_path.exists():
+                missing += 1
+                continue
+            record = load_json_file(record_path, {})
+            if not record:
+                missing += 1
+                continue
+            incoming = [e for e in (record.get("embeddings") or []) if isinstance(e, dict) and e.get("vector")]
+
+            found = _find_person_by_voice_hash(store, voice_hash)
+            if found is not None:
+                person, profile = found
+            else:
+                person = None
+                person_id = str(record.get("person_id") or "").strip()
+                if person_id:
+                    for candidate in store.get("persons", []):
+                        if str(candidate.get("person_id") or "").strip() == person_id:
+                            person = candidate
+                            break
+                new_profile = {
+                    "voice_hash": voice_hash,
+                    "speaker_profile_id": record.get("speaker_profile_id") or voice_hash,
+                    "embeddings": [],
+                    "best_clip_path": None,
+                    "best_clip_source_file": None,
+                    "best_clip_score": None,
+                    "best_clip_updated_at": None,
+                    "clip_history": [c for c in (record.get("clip_history") or []) if isinstance(c, dict)],
+                    "context_label": None,
+                    "created_at": record.get("created_at") or now,
+                    "updated_at": now,
+                }
+                if person is None:
+                    person = {
+                        "person_id": person_id or f"person_unnamed_{voice_hash[:12]}",
+                        "canonical_name": record.get("canonical_name"),
+                        "display_name": record.get("display_name"),
+                        "contact_ref": record.get("contact_ref"),
+                        "contact_name": record.get("contact_name"),
+                        "profiles": [],
+                        "voiceprints": [],
+                        "observed_aliases": [],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                    store.setdefault("persons", []).append(person)
+                    persons_pulled += 1
+                person.setdefault("profiles", []).append(new_profile)
+                profile = new_profile
+                if voice_hash not in person.setdefault("voiceprints", []):
+                    person["voiceprints"].append(voice_hash)
+
+            # Fill identity only where locally empty (manual edits win).
+            for key in ("canonical_name", "display_name", "contact_ref", "contact_name"):
+                if not person.get(key) and record.get(key):
+                    person[key] = record[key]
+
+            # Union embeddings by content signature (idempotent across repeated pulls).
+            existing_sigs = {_embedding_signature(e) for e in profile.get("embeddings", [])}
+            for emb in incoming:
+                sig = _embedding_signature(emb)
+                if sig and sig not in existing_sigs:
+                    profile.setdefault("embeddings", []).append(emb)
+                    existing_sigs.add(sig)
+                    embeddings_merged += 1
+            profile["updated_at"] = now
+
+    status = "updated" if (persons_pulled or embeddings_merged) else "not_needed"
+    return {
+        "status": status,
+        "persons_pulled": persons_pulled,
+        "embeddings_merged": embeddings_merged,
+        "records_missing": missing,
+    }
+
+
 def maybe_update_profile_clip(
     profile: dict,
     *,
@@ -4221,6 +4339,27 @@ def main() -> None:
                     try:
                         store = load_voiceprint_store(str(store_path))
                         voiceprint_store = store
+                        # Pull-on-claim: merge shared-hub canonical profiles into the
+                        # node-local store before match/enroll, so a voice enrolled on
+                        # another node is recognized here (voiceprint-in-Hub, 801-o1 ph2).
+                        gr_dir = str(payload.get("global_registry_dir") or "").strip()
+                        proj_dir = str(payload.get("project_speaker_registry_path") or "").strip()
+                        if gr_dir and proj_dir:
+                            try:
+                                pull_meta = sync_hub_to_local_cache(
+                                    store, pathlib.Path(proj_dir), pathlib.Path(gr_dir)
+                                )
+                                voiceprint_meta["hub_pull"] = pull_meta
+                                log(
+                                    payload,
+                                    "phase=voiceprint hub_pull "
+                                    f"persons={pull_meta.get('persons_pulled')} "
+                                    f"embeddings={pull_meta.get('embeddings_merged')} "
+                                    f"missing={pull_meta.get('records_missing')}",
+                                )
+                            except Exception as exc:
+                                voiceprint_meta["hub_pull"] = {"status": "error", "error": str(exc)}
+                                warnings.append(f"hub_pull_failed: {exc}")
                         if payload.get("voiceprint_mode") == "enroll":
                             speaker_totals: dict[str, float] = defaultdict(float)
                             for turn in turns:
