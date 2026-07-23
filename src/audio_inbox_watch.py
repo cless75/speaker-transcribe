@@ -583,6 +583,54 @@ def ktalk_sidecar_for(audio: pathlib.Path, cfg: dict) -> pathlib.Path | None:
     return None
 
 
+# A Zoom export ships a WebVTT transcript whose cues already carry participant
+# display names, so when one is present the worker takes speakers from it and skips
+# pyannote entirely (media_transcribe.resolve_speaker_turns, source="zoom_vtt").
+# Zoom does NOT name the VTT after the video it belongs to — the export writes
+# ``…_Recording.transcript.vtt`` next to ``…_Recording_avo_640x360.mp4`` — so an
+# exact-stem match is not enough; fall back to the timestamp token that groups one
+# export (the same token detect_bundle uses).
+ZOOM_VTT_PATTERNS = ["{stem}.transcript.vtt", "{stem}.vtt"]
+
+
+def zoom_vtt_for(audio: pathlib.Path, cfg: dict) -> pathlib.Path | None:
+    """The Zoom VTT transcript belonging to ``audio``, if the export included one.
+
+    Exact stem first, then the shared Zoom timestamp token. Our own ASR output
+    (``*-segments.vtt``) is never a candidate — it carries anonymous labels and
+    would defeat the point. Disable with ``cfg.zoom_vtt_autodetect: false``.
+    """
+    if not cfg.get("zoom_vtt_autodetect", True):
+        return None
+    patterns = cfg.get("zoom_vtt_patterns")
+    if patterns is None:
+        patterns = ZOOM_VTT_PATTERNS
+    for pattern in patterns:
+        try:
+            candidate = audio.parent / str(pattern).format(stem=audio.stem)
+            if candidate.is_file():
+                return candidate
+        except (OSError, KeyError, IndexError):
+            continue
+
+    match = BUNDLE_TS_PATTERN.search(audio.name)
+    if not match:
+        return None
+    token = match.group(1)
+    skip_suffixes = cfg.get("skip_filename_suffixes", DEFAULT_SKIP_FILENAME_SUFFIXES)
+    try:
+        siblings = sorted(audio.parent.glob("*.vtt"))
+    except OSError:
+        return None
+    for candidate in siblings:
+        if is_output_artifact(candidate.name, skip_suffixes):
+            continue
+        sibling_match = BUNDLE_TS_PATTERN.search(candidate.name)
+        if sibling_match and sibling_match.group(1) == token:
+            return candidate
+    return None
+
+
 def source_for_audio(audio: pathlib.Path, cfg: dict) -> tuple[pathlib.Path, dict] | None:
     """Find which configured source root is an ancestor of ``audio``."""
     for root, source in resolved_sources(cfg):
@@ -1675,9 +1723,14 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     if execution_mode:
         cmd += ["--execution-mode", execution_mode]
 
-    # A Ktalk download brings its own named speakers -> hand them to the worker and
-    # let it skip diarization. Only meaningful when speakers were wanted at all.
+    # A Zoom or Ktalk download brings its own named speakers -> hand them to the worker
+    # and let it skip diarization. Only meaningful when speakers were wanted at all.
+    # The worker prefers zoom_vtt over ktalk_txt when both are handed over.
     if cfg.get("speaker_mode", "diarize") == "diarize":
+        zoom_vtt = zoom_vtt_for(audio, cfg)
+        if zoom_vtt:
+            cmd += ["--zoom-vtt", str(zoom_vtt)]
+            log(f"zoom VTT found (named speakers from export, no pyannote): {zoom_vtt.name}")
         ktalk_txt = ktalk_sidecar_for(audio, cfg)
         if ktalk_txt:
             cmd += ["--ktalk-txt", str(ktalk_txt)]
