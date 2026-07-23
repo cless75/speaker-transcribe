@@ -53,6 +53,11 @@ import threading
 import time
 import unicodedata
 
+try:
+    import node_status  # optional: publishes a human-readable node page to the hub
+except Exception:  # pragma: no cover - the watcher must run without it
+    node_status = None
+
 DEFAULT_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "config" / "node.local.json"
 
 # Default watcher knobs — overridable from the node config.
@@ -1378,6 +1383,67 @@ class _ClaimHeartbeat:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Node status page (optional): publish what this node is doing to the shared hub
+# so a dead or busy node is visible from any other machine. Never fatal.
+# ---------------------------------------------------------------------------
+
+
+def _status_dir(cfg: dict) -> pathlib.Path | None:
+    if node_status is None or not cfg.get("status_page", True):
+        return None
+    hub = cfg.get("hub_root")
+    if not hub:
+        return None
+    return node_status.status_dir_for(resolve_template(hub, base_placeholder_ctx(cfg)))
+
+
+def status_event(cfg: dict, event: dict) -> None:
+    """Record one event in this node's history log (best-effort)."""
+    if node_status is None:
+        return
+    try:
+        node_status.append_event(_status_dir(cfg), host_label_of(cfg), event)
+    except Exception:
+        pass
+
+
+def publish_status(cfg: dict, phase: str, *, current: dict | None = None,
+                   queue: dict | None = None, note: str | None = None) -> None:
+    """Refresh this node's page on the hub (best-effort)."""
+    if node_status is None:
+        return
+    try:
+        sd = _status_dir(cfg)
+        if sd is None:
+            return
+        host = host_label_of(cfg)
+        snapshot = node_status.build_snapshot(
+            host=host, phase=phase, cfg=cfg, current=current, queue=queue,
+            events=node_status.read_history(sd, host), note=note)
+        node_status.publish(sd, snapshot)
+    except Exception:
+        pass
+
+
+def _queue_snapshot(candidates: list[tuple[pathlib.Path, pathlib.Path, dict]],
+                    cfg: dict, mapper: dict) -> dict:
+    """Compact view of what is still waiting, for the status page."""
+    items, total = [], 0
+    for audio, root, source in candidates:
+        try:
+            size = audio.stat().st_size
+        except OSError:
+            size = 0
+        total += size
+        pid, _ = route_pid_for_audio(audio, root, source, cfg, mapper)
+        items.append({
+            "name": audio.name, "pid": pid, "size": size,
+            "mtime": dt.datetime.fromtimestamp(_safe_mtime(audio)).isoformat(timespec="seconds"),
+        })
+    return {"count": len(items), "bytes": total, "items": items}
+
+
 def retire_claim(audio: pathlib.Path, cfg: dict) -> None:
     """Mark claim_phase=done after asr-done (tidy signal; lease already covers it)."""
     if not cfg.get("enable_multi_machine"):
@@ -1914,6 +1980,17 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     # ("eta_wall_local~HH:MM:SS") so the finish time of the current file is visible live.
     log(f"▶ processing: {audio.name} | pid={pid} | {size_mb} | "
         f"speaker_mode={cfg.get('speaker_mode', 'diarize')} | session={state.get('session_id')}")
+    try:
+        _size_bytes = audio.stat().st_size
+    except OSError:
+        _size_bytes = 0
+    _current = {"name": audio.name, "pid": pid, "size": _size_bytes,
+                "started_at": state["started_at"], "session_id": state.get("session_id"),
+                "speaker_source": "zoom VTT" if zoom_vtt_for(audio, cfg) else
+                                  cfg.get("speaker_mode", "diarize")}
+    status_event(cfg, {"type": "file_start", "file": audio.name, "pid": pid,
+                       "size": _size_bytes})
+    publish_status(cfg, "running", current=_current)
     t0 = time.time()
     try:
         with _ClaimHeartbeat(audio, cfg):
@@ -1959,6 +2036,17 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
         except Exception as exc:
             log(f"cleanup_intermediates failed: {exc}")
         _log_result_summary(audio, pid, duration, result_meta, transcript)
+        _meta = result_meta or {}
+        _slides = _meta.get("slides") if isinstance(_meta.get("slides"), dict) else {}
+        status_event(cfg, {
+            "type": "file_done", "file": audio.name, "pid": pid,
+            "media_sec": float(_meta.get("duration_sec") or 0),
+            "proc_sec": round(duration, 1),
+            "frames": len(_slides.get("slides") or []),
+            "speaker_source": ((_meta.get("diarization") or {}).get("source")),
+            "session_id": state.get("session_id"),
+        })
+        publish_status(cfg, "running", note=f"завершён {audio.name}")
         return
 
     # failure -> classify. A cloud-mount / input-staging failure (macOS fcopyfile
@@ -2077,6 +2165,15 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
     mapper = load_mapper(cfg)
     host_label = host_label_of(cfg)
     stop_flag = existing_roots[0] / ".audio-inbox-stop"
+    # Cache the hub path so a later run that dies before parsing its config (the
+    # 2026-07-23 malformed-JSON case) can still publish a crash page.
+    if node_status is not None and cfg.get("hub_root"):
+        node_status.remember_hub(
+            config_path, resolve_template(cfg["hub_root"], base_placeholder_ctx(cfg)),
+            host=host_label)
+    status_event(cfg, {"type": "sweep_start"})
+    publish_status(cfg, "starting")
+    last_queue: dict = {}
     try:
         if catch_up_only:
             files = find_audio_files(cfg)
@@ -2190,6 +2287,7 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
             audio, root, source = actionable[0]
             attempted_this_sweep.add(str(audio))
             log(f"queue rebuilt: {len(actionable)} actionable; processing newest: {audio.name}")
+            last_queue = _queue_snapshot(actionable[1:], cfg, mapper)
             try:
                 with _cloud_watchdog(int(cfg.get("cloud_op_timeout_seconds", 120)),
                                      f"pickup {audio.name}"):
@@ -2223,6 +2321,9 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 log(f"session index refresh failed: {exc}")
 
         log(f"run_once done: processed={processed} in {(time.time()-start_time)/60:.1f}m")
+        status_event(cfg, {"type": "sweep_end", "processed": processed,
+                           "elapsed_sec": round(time.time() - start_time, 1)})
+        publish_status(cfg, "idle", queue=last_queue)
     finally:
         release_watcher_lock(lock)
 
@@ -2250,14 +2351,41 @@ def main() -> int:
             "Copy config/node.example.json -> config/node.local.json and fill in your paths.\n"
         )
         return 2
-    cfg = load_config(cfg_path)
+    # A node that dies here dies silently: a malformed config takes the watcher down
+    # before it learns where the hub is, so from every other machine the queue just
+    # looks quiet. Report the failure to the hub using the cached hub path/host from
+    # the last good start, then fail as before.
+    try:
+        cfg = load_config(cfg_path)
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        sys.stderr.write(f"config unreadable: {cfg_path}\n{detail}\n")
+        if node_status is not None:
+            published = node_status.publish_crash(
+                cfg_path, reason="конфиг не читается", detail=detail)
+            if published:
+                sys.stderr.write(f"status published to {published}\n")
+        return 2
     cfg["_config_dir"] = str(cfg_path.parent)
 
-    run_once(cfg, cfg_path,
-             catch_up_only=args.catch_up_only,
-             time_budget_minutes=args.time_budget_minutes,
-             max_files=args.max_files,
-             force_window=args.force_window)
+    try:
+        run_once(cfg, cfg_path,
+                 catch_up_only=args.catch_up_only,
+                 time_budget_minutes=args.time_budget_minutes,
+                 max_files=args.max_files,
+                 force_window=args.force_window)
+    except KeyboardInterrupt:
+        status_event(cfg, {"type": "sweep_error", "reason": "прерван вручную"})
+        publish_status(cfg, "idle", note="прерван вручную")
+        raise
+    except Exception as exc:
+        # Same reasoning as the config guard above: an unhandled failure must leave
+        # a trace on the hub, not only in a local log nobody is watching.
+        detail = f"{type(exc).__name__}: {exc}"
+        status_event(cfg, {"type": "sweep_error", "reason": "сбой прогона",
+                           "detail": detail})
+        publish_status(cfg, "crashed", note=detail)
+        raise
     return 0
 
 
