@@ -41,7 +41,10 @@ if (-not (Test-Path $PythonBin)) { throw "venv python not found: $PythonBin (cre
 if (-not (Test-Path $cli))       { throw "CLI not found: $cli" }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-$exts = @("*.m4a","*.mp4","*.wav","*.mp3","*.mov","*.mkv")
+# Keep in sync with audio_inbox_watch.DEFAULT_SCAN_EXTENSIONS: this manual runner was
+# missing .webm (Telemost/Meet exports) and .m4v/.oga, so those files were silently
+# skipped in batch mode while the watcher picked them up fine.
+$exts = @("*.m4a","*.mp4","*.wav","*.mp3","*.oga","*.mov","*.mkv","*.webm","*.m4v","*.avi")
 
 function Invoke-One([string]$file) {
   Write-Host ">> $file" -ForegroundColor Cyan

@@ -17,12 +17,24 @@ credentials*.json
 *.mov
 *.wav
 *.mp3
+*.webm
+*.mkv
+*.m4v
+*.avi
+*.oga
 *-transcript.md
 *-transcript.txt
 *-segments.*
 *-raw.json
 *-run-meta.json
 *-asr-*.json
+
+# ─── Slide frames — captured screenshots + OCR text are content, not code ──
+**/frames/
+*-slides.json
+
+# ─── Run logs ─────────────────────────────────────────────
+logs/
 
 # ─── Python / virtualenv ──────────────────────────────────
 __pycache__/
