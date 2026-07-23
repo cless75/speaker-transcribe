@@ -29,6 +29,11 @@ try:
 except Exception:  # pragma: no cover - optional dependency in runtime
     torch = None
 
+try:
+    import slide_frames  # opt-in video slide-frame capture + local OCR stage
+except Exception:  # pragma: no cover - module lives alongside this script
+    slide_frames = None
+
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".mpga", ".mpeg"}
 VOICEPRINT_SCHEMA_VERSION = "v3"
@@ -1327,6 +1332,60 @@ def build_display_blocks(segments: list[dict]) -> list[dict]:
             }
         )
     return blocks
+
+
+def build_interleaved_transcript_items(segments: list[dict], slide_list: list[dict]) -> list[tuple]:
+    """Like :func:`build_display_blocks`, but interleaves slide markers by timecode.
+
+    Consecutive same-speaker segments still merge into one block, EXCEPT a slide
+    change forces a block break so the slide marker lands at the right moment even
+    inside a single-speaker monologue (otherwise all slides would clump at the next
+    speaker change — or at the very end for single-speaker lectures).
+
+    Returns a flat list of ``("slide", slide_dict)`` / ``("block", block_dict)``
+    items in reading order.
+    """
+    slides = sorted(slide_list, key=lambda s: float(s.get("time_sec") or 0.0))
+    si, n = 0, len(slides)
+    items: list[tuple] = []
+    current: dict | None = None
+    for segment in segments:
+        text = (segment.get("text") or "").strip()
+        if not text:
+            continue
+        seg_start = float(segment.get("start") or 0.0)
+        # Flush the current block and emit any slides that start at/before this segment.
+        while si < n and float(slides[si].get("time_sec") or 0.0) <= seg_start:
+            if current is not None:
+                items.append(("block", current))
+                current = None
+            items.append(("slide", slides[si]))
+            si += 1
+        speaker_label = segment.get("speaker_name") or segment.get("speaker_id") or segment.get("speaker")
+        speaker_source = segment.get("speaker_source", "unknown")
+        if (
+            current is not None
+            and current["speaker_label"] == speaker_label
+            and current["speaker_source"] == speaker_source
+        ):
+            current["end"] = segment["end"]
+            current["texts"].append(text)
+        else:
+            if current is not None:
+                items.append(("block", current))
+            current = {
+                "start": segment["start"],
+                "end": segment["end"],
+                "speaker_label": speaker_label,
+                "speaker_source": speaker_source,
+                "texts": [text],
+            }
+    if current is not None:
+        items.append(("block", current))
+    while si < n:
+        items.append(("slide", slides[si]))
+        si += 1
+    return items
 
 
 def extract_turn_embeddings(
@@ -3439,17 +3498,41 @@ def write_outputs(payload: dict, result: dict) -> dict:
         ]
     )
 
+    # Opt-in slide frames: interleave slide screenshots + OCR text by timecode.
+    slides_meta = result.get("slides") if isinstance(result.get("slides"), dict) else None
+    slide_list: list[dict] = []
+    frames_dir_name = "frames"
+    if (
+        slide_frames is not None
+        and slides_meta
+        and slides_meta.get("status") == "ok"
+        and slides_meta.get("embed_in_transcript", True)
+    ):
+        slide_list = [s for s in (slides_meta.get("slides") or []) if isinstance(s, dict)]
+        slide_list.sort(key=lambda s: float(s.get("time_sec") or 0.0))
+        frames_dir_name = slides_meta.get("frames_dir") or "frames"
+
+    def _write_block_line(f_md, block) -> None:
+        speaker_label = block["speaker_label"]
+        source_suffix = f" [{block['speaker_source']}]" if speaker_label else ""
+        speaker_prefix = f"{speaker_label}{source_suffix}: " if speaker_label else ""
+        block_text = " ".join(block["texts"]).strip()
+        f_md.write(f"[{timestamp_hms(block['start'])}] {speaker_prefix}{block_text}".strip() + "\n")
+
     if "md" in want:
         md_tmp = md_path.with_name(md_path.name + ".tmp")
         try:
             with md_tmp.open("w", encoding="utf-8") as f_md:
                 f_md.write(frontmatter)
-                for block in build_display_blocks(segments):
-                    speaker_label = block["speaker_label"]
-                    source_suffix = f" [{block['speaker_source']}]" if speaker_label else ""
-                    speaker_prefix = f"{speaker_label}{source_suffix}: " if speaker_label else ""
-                    block_text = " ".join(block["texts"]).strip()
-                    f_md.write(f"[{timestamp_hms(block['start'])}] {speaker_prefix}{block_text}".strip() + "\n")
+                if slide_list:
+                    for kind, obj in build_interleaved_transcript_items(segments, slide_list):
+                        if kind == "slide":
+                            f_md.write(slide_frames.build_slide_markdown(obj, frames_dir_name))
+                        else:
+                            _write_block_line(f_md, obj)
+                else:
+                    for block in build_display_blocks(segments):
+                        _write_block_line(f_md, block)
             os.replace(md_tmp, md_path)
         except Exception:
             md_tmp.unlink(missing_ok=True)
@@ -4668,6 +4751,21 @@ def main() -> None:
         }
         result["speaker_review"] = build_speaker_review(result)
         log(payload, "phase=build_result done")
+        # Opt-in: capture slide screenshots at key moments + local OCR, embed into transcript.
+        if slide_frames is not None:
+            try:
+                log(payload, "phase=slide_frames start")
+                result["slides"] = slide_frames.run_stage(
+                    payload,
+                    ffmpeg_bin=payload.get("ffmpeg_bin") or "ffmpeg",
+                    warnings=warnings,
+                    log_fn=lambda m: log(payload, m),
+                    duration_sec=result.get("duration_sec"),
+                )
+                log(payload, f"phase=slide_frames done status={result['slides'].get('status')}")
+            except Exception as exc:
+                warnings.append(f"slide_frames_stage_failed: {exc}")
+                result["slides"] = {"enabled": True, "status": "error", "reason": str(exc)}
         log(payload, "phase=write_outputs start")
         result["outputs"] = write_outputs(payload, result)
         log(

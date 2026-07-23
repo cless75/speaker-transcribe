@@ -167,6 +167,22 @@ def _build_payload(args: argparse.Namespace) -> dict:
     if args.voiceprint_mode:
         payload["voiceprint_mode"] = args.voiceprint_mode
 
+    # Slide frames (opt-in): screenshots at key moments + local OCR of slide text.
+    if args.slide_frames and args.slide_frames != "off":
+        video_frames = dict(payload.get("video_frames") or {})
+        video_frames["mode"] = args.slide_frames
+        if args.scene_threshold is not None:
+            video_frames["scene_threshold"] = args.scene_threshold
+        if args.slide_interval_sec is not None:
+            video_frames["interval_sec"] = args.slide_interval_sec
+        if args.slide_ocr is not None:
+            video_frames["ocr"] = args.slide_ocr == "on"
+        if args.slide_ocr_engine:
+            video_frames["ocr_engine"] = args.slide_ocr_engine
+        if args.slide_no_embed:
+            video_frames["embed_in_transcript"] = False
+        payload["video_frames"] = video_frames
+
     identification = dict(payload.get("identification") or {})
     if args.project_id:
         identification["project_id"] = args.project_id
@@ -262,6 +278,33 @@ def main() -> int:
         help="Enroll the voice(s) in this file under this canonical name. For a curated "
              "single-speaker sample (bootstrap a project registry). Use with "
              "--voiceprint-mode enroll.",
+    )
+    parser.add_argument(
+        "--slide-frames", dest="slide_frames", default=None,
+        choices=("slide-change", "interval", "off"),
+        help="Capture slide screenshots at key moments (video only). "
+             "'slide-change' = ffmpeg scene detection; 'interval' = every --slide-interval-sec.",
+    )
+    parser.add_argument(
+        "--scene-threshold", dest="scene_threshold", type=float, default=None,
+        help="Scene-change sensitivity 0..1 for --slide-frames slide-change (default 0.4).",
+    )
+    parser.add_argument(
+        "--slide-interval-sec", dest="slide_interval_sec", type=float, default=None,
+        help="Interval seconds for --slide-frames interval (default 60).",
+    )
+    parser.add_argument(
+        "--slide-ocr", dest="slide_ocr", default=None, choices=("on", "off"),
+        help="Run local OCR over captured slides (default on).",
+    )
+    parser.add_argument(
+        "--slide-ocr-engine", dest="slide_ocr_engine", default=None,
+        choices=("rapidocr",),
+        help="Local OCR engine for slide text (default rapidocr).",
+    )
+    parser.add_argument(
+        "--slide-no-embed", dest="slide_no_embed", action="store_true",
+        help="Do not embed slides into the transcript .md (still writes frames/ + slides.json).",
     )
     parser.add_argument(
         "--worker", default=None,

@@ -23,3 +23,10 @@ psutil
 # nvidia-cudnn-cu12
 
 # ffmpeg must be available on PATH (system install), not a pip package.
+
+# --- Optional: slide-frame OCR (video_frames stage) ---
+# Local OCR of slide screenshots captured at key moments (CPU, nothing leaves
+# the machine). Only needed when running with video_frames + ocr enabled; the
+# stage degrades gracefully (frames captured without text) if absent.
+#   pip install rapidocr-onnxruntime
+# rapidocr-onnxruntime
