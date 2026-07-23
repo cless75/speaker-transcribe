@@ -486,15 +486,27 @@ def extract_audio_if_needed(payload: dict, warnings: list[str], job_root: pathli
     raise RuntimeError(f"Unsupported media extension: {suffix}")
 
 
-def stderr_log_line(message: str) -> None:
-    """Строка в stderr с локальным временем (не UTC); для chunk worker без payload."""
+# Verbose per-segment / per-phase mechanics are demoted to DEBUG so a `tail` of the
+# log reads as a clean pulse (milestones + a periodic "still alive" heartbeat) instead
+# of a wall of iterator internals. Turn the detail back on with ASR_LOG_DEBUG=1.
+_LOG_DEBUG = os.environ.get("ASR_LOG_DEBUG", "").strip().lower() not in ("", "0", "false", "no")
+
+
+def stderr_log_line(message: str, level: str = "info") -> None:
+    """Строка в stderr с локальным временем (не UTC); для chunk worker без payload.
+
+    ``level="debug"`` печатается только при ASR_LOG_DEBUG=1 — так по умолчанию в
+    логе остаются вехи и «бит» прогресса, а внутренняя механика скрыта.
+    """
+    if level == "debug" and not _LOG_DEBUG:
+        return
     ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[media-transcription] {ts} | {message}", file=sys.stderr, flush=True)
 
 
-def log(payload: dict, message: str) -> None:
+def log(payload: dict, message: str, level: str = "info") -> None:
     if payload.get("enable_processing_logs", True):
-        stderr_log_line(message)
+        stderr_log_line(message, level=level)
 
 
 def format_chunk_eta_suffix(
@@ -2988,34 +3000,38 @@ def resolve_speaker_turns(audio_path: str, payload: dict, job_root: pathlib.Path
 
 def transcribe_chunk_worker(job: dict, model: WhisperModel | None = None) -> dict:
     reuse = model is not None
+    # Show device once (first chunk) at INFO so a tail confirms cpu vs cuda; the
+    # per-chunk repeats add nothing and drop to debug.
     stderr_log_line(
         f"chunk worker start: index={job['chunk_index']} device={job['runtime_device']} "
         f"compute={job['runtime_compute_type']} reuse_model={reuse}",
+        level="info" if job["chunk_index"] == 0 else "debug",
     )
     own_model = model is None
     if own_model:
-        stderr_log_line(f"chunk model init begin: index={job['chunk_index']} path={job['model_path']}")
+        stderr_log_line(f"chunk model init begin: index={job['chunk_index']} path={job['model_path']}", level="debug")
         model = create_whisper_model(job)
-        stderr_log_line(f"chunk model init done: index={job['chunk_index']}")
+        stderr_log_line(f"chunk model init done: index={job['chunk_index']}", level="debug")
     else:
-        stderr_log_line(f"chunk model reuse skip init: index={job['chunk_index']}")
-    stderr_log_line(f"chunk transcribe begin: index={job['chunk_index']} audio={job['audio_path']}")
+        stderr_log_line(f"chunk model reuse skip init: index={job['chunk_index']}", level="debug")
+    stderr_log_line(f"chunk transcribe begin: index={job['chunk_index']} audio={job['audio_path']}", level="debug")
     segments, info = model.transcribe(job["audio_path"], **job["kwargs"])
-    stderr_log_line(f"chunk transcribe done: index={job['chunk_index']}")
+    stderr_log_line(f"chunk transcribe done: index={job['chunk_index']}", level="debug")
     collected = []
-    stderr_log_line(f"chunk segment iteration begin: index={job['chunk_index']}")
-    stderr_log_line(f"chunk segment iterator create: index={job['chunk_index']}")
+    stderr_log_line(f"chunk segment iteration begin: index={job['chunk_index']}", level="debug")
+    stderr_log_line(f"chunk segment iterator create: index={job['chunk_index']}", level="debug")
     segments_iter = iter(segments)
-    stderr_log_line(f"chunk segment first next begin: index={job['chunk_index']}")
+    stderr_log_line(f"chunk segment first next begin: index={job['chunk_index']}", level="debug")
     first_item = None
     try:
         first_item = next(segments_iter)
         stderr_log_line(
             f"chunk segment first next ok: index={job['chunk_index']} "
             f"start={float(first_item.start):.3f} end={float(first_item.end):.3f}",
+            level="debug",
         )
     except StopIteration:
-        stderr_log_line(f"chunk segment first next empty: index={job['chunk_index']}")
+        stderr_log_line(f"chunk segment first next empty: index={job['chunk_index']}", level="debug")
 
     def segment_chain():
         if first_item is not None:
@@ -3025,14 +3041,17 @@ def transcribe_chunk_worker(job: dict, model: WhisperModel | None = None) -> dic
     stderr_log_line(
         f"chunk segment pull loop begin: index={job['chunk_index']} "
         f"(lazy; раньше list(iterator) давал долгую тишину в логе)",
+        level="debug",
     )
     t_pull0 = time.monotonic()
     for idx, item in enumerate(segment_chain()):
         if idx > 0 and (idx + 1) % SEGMENT_ITER_PROGRESS_EVERY == 0:
             elapsed = time.monotonic() - t_pull0
+            # The "бит" — a compact heartbeat kept at INFO so a tail shows the job is
+            # alive and advancing (which chunk, segments so far, elapsed, position in
+            # audio) without the per-iterator noise around it.
             stderr_log_line(
-                f"chunk segment pull progress: index={job['chunk_index']} "
-                f"pulled={idx + 1} wall_sec={elapsed:.1f} last_end={float(item.end):.1f}s",
+                f"  ·· chunk {job['chunk_index'] + 1}: {idx + 1} сегм · {elapsed:.0f}s · @{float(item.end):.0f}s",
             )
         text = (item.text or "").strip()
         if not text:
@@ -3054,7 +3073,7 @@ def transcribe_chunk_worker(job: dict, model: WhisperModel | None = None) -> dic
                 "chunk_index": job["chunk_index"],
             }
         )
-    stderr_log_line(f"chunk segment iteration done: index={job['chunk_index']} kept={len(collected)}")
+    stderr_log_line(f"chunk segment iteration done: index={job['chunk_index']} kept={len(collected)}", level="debug")
     return {
         "chunk_index": job["chunk_index"],
         "language": getattr(info, "language", None),
