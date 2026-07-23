@@ -1663,6 +1663,23 @@ def pick_speaker_clip_intervals(turns: list[dict], target_sec: float, min_turn_s
     return best, "concat_best_fragments"
 
 
+# ffmpeg keyframe-safe seek. Input-seek alone (``-ss`` before ``-i``) lands on the
+# nearest packet, which on VP8/VP9 (WebM from Meet/Telemost) is usually NOT a
+# keyframe — the decoder then hits partial frames and dies with "Invalid data found"
+# (exit 69). Two-stage seek fixes it: a coarse ``-ss`` before ``-i`` jumps to a
+# keyframe just ahead of the target (fast), then a fine ``-ss`` after ``-i`` decodes
+# forward to the exact instant (accurate). Correct for every container, required for
+# WebM. Coarse margin is bounded so we never rewind past the file start.
+_SEEK_COARSE_MARGIN_SEC = 10.0
+
+
+def _seek_input_args(start_sec: float) -> tuple[list[str], float]:
+    """Return (pre-``-i`` args, residual offset to apply after ``-i``)."""
+    start = max(0.0, float(start_sec))
+    coarse = max(0.0, start - _SEEK_COARSE_MARGIN_SEC)
+    return (["-ss", f"{coarse:.3f}"] if coarse > 0 else [], start - coarse)
+
+
 def export_speaker_video_clip(
     input_path: str,
     clip_path: pathlib.Path,
@@ -1678,16 +1695,18 @@ def export_speaker_video_clip(
     if len(intervals) == 1:
         item = intervals[0]
         duration = max(0.05, float(item["end"]) - float(item["start"]))
+        pre_ss, fine = _seek_input_args(float(item["start"]))
         subprocess.run(
             [
                 ffmpeg_bin,
                 "-y",
-                "-ss",
-                f"{float(item['start']):.3f}",
-                "-t",
-                f"{duration:.3f}",
+                *pre_ss,
                 "-i",
                 input_path,
+                "-ss",
+                f"{fine:.3f}",
+                "-t",
+                f"{duration:.3f}",
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -1713,16 +1732,18 @@ def export_speaker_video_clip(
     for idx, item in enumerate(intervals):
         duration = max(0.05, float(item["end"]) - float(item["start"]))
         part_path = concat_root / f"{clip_path.stem}_part_{idx:03d}.mp4"
+        pre_ss, fine = _seek_input_args(float(item["start"]))
         subprocess.run(
             [
                 ffmpeg_bin,
                 "-y",
-                "-ss",
-                f"{float(item['start']):.3f}",
-                "-t",
-                f"{duration:.3f}",
+                *pre_ss,
                 "-i",
                 input_path,
+                "-ss",
+                f"{fine:.3f}",
+                "-t",
+                f"{duration:.3f}",
                 "-c:v",
                 "libx264",
                 "-preset",

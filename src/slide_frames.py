@@ -123,12 +123,27 @@ def interval_timestamps(duration_sec: float, interval_sec: float) -> list[float]
     return out or [0.0]
 
 
+_SEEK_COARSE_MARGIN_SEC = 10.0
+
+
 def capture_frame(video_path: str, time_sec: float, out_png: pathlib.Path, ffmpeg_bin: str) -> bool:
-    """Capture a single frame at ``time_sec`` (fast input-seek). Returns success."""
+    """Capture a single frame at ``time_sec``. Returns success.
+
+    Two-stage seek: a coarse ``-ss`` before ``-i`` jumps to a keyframe just ahead
+    of the target (fast), then a fine ``-ss`` after ``-i`` decodes forward to the
+    exact instant. Plain input-seek lands on the nearest packet, which on VP8/VP9
+    (WebM from Meet/Telemost) is usually not a keyframe — the decoder then hits
+    partial frames and fails with "Invalid data found", which is why slide capture
+    was silently failing on every WebM recording.
+    """
     out_png.parent.mkdir(parents=True, exist_ok=True)
+    start = max(0.0, float(time_sec))
+    coarse = max(0.0, start - _SEEK_COARSE_MARGIN_SEC)
+    pre_ss = ["-ss", f"{coarse:.3f}"] if coarse > 0 else []
+    fine = start - coarse
     cmd = [
         ffmpeg_bin, "-hide_banner", "-nostdin", "-y",
-        "-ss", f"{max(0.0, float(time_sec)):.3f}", "-i", video_path,
+        *pre_ss, "-i", video_path, "-ss", f"{fine:.3f}",
         "-frames:v", "1", "-q:v", "2", str(out_png),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
