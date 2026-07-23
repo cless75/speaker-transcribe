@@ -2650,7 +2650,44 @@ def normalize_speaker_map(payload: dict) -> dict[str, str]:
     return mapping
 
 
-def build_diarization_pipeline(payload: dict):
+def _place_pipeline_on_device(pipeline, payload: dict) -> tuple[object, dict]:
+    """Move a pyannote pipeline onto the requested device. Returns (pipeline, meta).
+
+    The engine previously ignored ``diarization_device`` entirely — pyannote always
+    ran on CPU no matter the config. This honours it: ``cuda``/``gpu`` moves the
+    pipeline to the GPU, but only if torch actually has CUDA. If CUDA was asked for
+    and is unavailable (torch built CPU-only, or no card), it stays on CPU and says
+    so in meta rather than crashing — a slow run beats a failed one.
+    """
+    runtime = payload.get("runtime") or {}
+    want = str(runtime.get("diarization_device")
+               or payload.get("diarization_device") or "").strip().lower()
+    if want in ("cuda", "gpu"):
+        try:
+            import torch as _t
+            if not _t.cuda.is_available():
+                return pipeline, {"device": "cpu", "requested": "cuda",
+                                  "reason": "cuda_unavailable (torch built without CUDA or no GPU)"}
+            pipeline.to(_t.device("cuda"))
+            return pipeline, {"device": "cuda", "requested": "cuda", "reason": "ok"}
+        except Exception as exc:  # noqa: BLE001
+            return pipeline, {"device": "cpu", "requested": "cuda",
+                              "reason": f"move_to_cuda_failed: {exc}"}
+    return pipeline, {"device": "cpu", "requested": want or "cpu", "reason": "configured_cpu"}
+
+
+def build_diarization_pipeline(payload: dict) -> tuple[object, dict]:
+    """Load the pyannote pipeline and place it on the configured device.
+
+    Returns ``(pipeline, device_meta)``. ``device_meta`` records where diarization
+    actually ran (cpu/cuda) and why — surfaced into the diarization result so a
+    silent CPU fallback is visible, not guessed from wall-clock speed.
+    """
+    pipeline = _load_diarization_pipeline(payload)
+    return _place_pipeline_on_device(pipeline, payload)
+
+
+def _load_diarization_pipeline(payload: dict):
     # PyTorch 2.6+ defaults torch.load(weights_only=True); pyannote 3.4 checkpoints
     # ship objects (TorchVersion etc.) that aren't on the safe-globals allowlist.
     # Pyannote models are gated/trusted HF artifacts → patch to legacy default.
@@ -2777,7 +2814,9 @@ def run_diarization(audio_path: str, payload: dict, job_root: pathlib.Path) -> t
     # хотя при подаче {"waveform", "sample_rate"} декод файла через torchcodec не используется.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.audio.core.io")
-        pipeline = build_diarization_pipeline(payload)
+        pipeline, device_meta = build_diarization_pipeline(payload)
+        log(payload, f"phase=diarization device={device_meta.get('device')} "
+                     f"(requested={device_meta.get('requested')}; {device_meta.get('reason')})")
         diarization = pipeline(diarization_input, **kwargs)
     annotation = diarization
     if not hasattr(annotation, "itertracks") and hasattr(diarization, "speaker_diarization"):
@@ -2814,6 +2853,9 @@ def run_diarization(audio_path: str, payload: dict, job_root: pathlib.Path) -> t
         "raw_labels": stable_order,
         "input_mode": input_mode,
         "warning": input_warning,
+        "device": device_meta.get("device"),
+        "device_requested": device_meta.get("requested"),
+        "device_reason": device_meta.get("reason"),
     }
 
 
