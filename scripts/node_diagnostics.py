@@ -60,9 +60,13 @@ def local_ip() -> str:
 
 
 def run_in_venv(venv: str, code: str) -> str:
+    # Force UTF-8 in the child so Cyrillic prints don't come back as cp1251 mojibake
+    # (a venv Python without PYTHONUTF8 defaults to the OEM code page on Windows).
+    import os
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     try:
-        out = subprocess.run([venv, "-c", code], capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", timeout=180)
+        out = subprocess.run([venv, "-X", "utf8", "-c", code], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=180, env=env)
         return (out.stdout or "") + (out.stderr or "")
     except Exception as exc:  # noqa: BLE001
         return f"  (не удалось запустить venv: {exc})\n"
