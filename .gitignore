@@ -53,3 +53,6 @@ models/
 Thumbs.db
 .idea/
 .vscode/
+
+# Node diagnostics reports (written to Hub, but guard against stray local copies)
+801-diag-*.txt
