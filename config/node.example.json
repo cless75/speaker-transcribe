@@ -43,8 +43,8 @@
   "_ktalk_note": "A Ktalk (Kontur.Talk) download is a media file + a transcript naming the speakers. When one is found next to the media, speakers are taken from it and diarization is skipped (ASR still runs). {stem} = media file name without extension; [] disables the lookup. See docs/speaker-recognition.md.",
   "ktalk_sidecar_patterns": ["Транскрипция {stem}.txt"],
 
-  "_cleanup_note": "keep the hub tidy. copy_asr_chunk_artifacts:false stops decoded chunk WAV/JSON from landing in outputs (set true to keep crash-recovery chunks). cleanup_intermediates:true prunes raw/merged dumps + the asr/ scratch dir after a successful run, keeping transcript + segments + run-meta.",
-  "copy_asr_chunk_artifacts": false,
+  "_cleanup_note": "keep the hub tidy. copy_asr_chunk_artifacts:true is the standard mode — it persists per-chunk WAV/JSON so an interrupted long run can resume the finished chunks instead of re-ASR from scratch. It is free on disk because cleanup_intermediates:true prunes those chunks (+ raw/merged dumps + the asr/ scratch dir) after a SUCCESSFUL run; the chunks survive only when a run failed, which is exactly when recovery/resume needs them. Set copy_asr_chunk_artifacts:false only to disable crash-recovery entirely.",
+  "copy_asr_chunk_artifacts": true,
   "cleanup_intermediates": true,
 
   "_source_disposition_note": "OPT-IN inbox cleanup for the SOURCE recordings (transcripts/outputs are never touched). on_asr_done: 'leave' (default) keeps the source + sidecars in place, as today. 'move' relocates the source audio and ALL its sidecars (.state.json, .processed-asr, .claim.json, .asr-log.txt) into a scanner-skipped {source_root}/{processed_dir_name}/ AFTER success — a mirror of _failed/. Nothing is deleted; the session still shows in _sessions-index.md. on_asr_done_after_days is a safety delay: move only once the file is that many days past finished_at (fractional = hours, e.g. 0.25 = 6h; 0 = same sweep).",

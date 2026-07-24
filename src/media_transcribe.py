@@ -3380,6 +3380,48 @@ def try_recover_from_asr_chunks(
     return merged, lang
 
 
+def select_resumable_chunks(
+    output_dir: pathlib.Path,
+    base_name: str,
+    jobs: list[dict],
+    current_fp: dict,
+    warnings: list[str],
+) -> tuple[list[dict], list[dict], list[int]]:
+    """Частичный resume: переиспользовать уже персистнутые чанки с совпадающим отпечатком.
+
+    В отличие от ``try_recover_from_asr_chunks`` (требует ПОЛНЫЙ набор), работает по-чанково:
+    оборванный прогон мог оставить лишь часть чанков. Для каждого job ищем
+    ``{base_name}-asr-chunk-{idx:03d}.json``; если файл есть, парсится, его ``asr_fingerprint``
+    совпадает с ``current_fp`` и ``segments`` — список, то чанк переиспользуется (его сегменты
+    уже с абсолютными таймингами, как в ``try_recover_from_asr_chunks``). Иначе job остаётся
+    на пере-ASR. Возвращает ``(reused_segments, remaining_jobs, reused_indices)``.
+    """
+    reused_segments: list[dict] = []
+    remaining_jobs: list[dict] = []
+    reused_indices: list[int] = []
+    for job in jobs:
+        idx = int(job["chunk_index"])
+        cpath = output_dir / f"{base_name}-asr-chunk-{idx:03d}.json"
+        if not cpath.is_file():
+            remaining_jobs.append(job)
+            continue
+        try:
+            doc = json.loads(cpath.read_text(encoding="utf-8"))
+        except Exception:
+            remaining_jobs.append(job)
+            continue
+        stored_fp = doc.get("asr_fingerprint")
+        segs = doc.get("segments")
+        if not fingerprint_matches(stored_fp, current_fp) or not isinstance(segs, list):
+            if stored_fp is not None and not fingerprint_matches(stored_fp, current_fp):
+                warnings.append(f"asr_chunk_resume_skipped_fingerprint_mismatch:chunk={idx}")
+            remaining_jobs.append(job)
+            continue
+        reused_segments.extend(segs)
+        reused_indices.append(idx)
+    return reused_segments, remaining_jobs, reused_indices
+
+
 def write_asr_merged_checkpoint(
     payload: dict,
     segments: list[dict],
@@ -4146,13 +4188,16 @@ def main() -> None:
             recovered = False
             force_fresh = bool(payload.get("force_fresh_asr", False))
             auto_recover = bool(payload.get("auto_recover_asr", True))
+            # Отпечаток и число чанков считаем один раз: recovery-проверки, частичный resume
+            # и запись новых чанков должны сравнивать/писать один и тот же fp.
+            fp = build_asr_recovery_fingerprint(payload, audio_path)
+            payload["_asr_fingerprint_cache"] = fp
+            exp_n = expected_chunk_count_for_audio(audio_path, payload, warnings)
             if (
                 payload["execution_mode"] in ("full", "asr_only")
                 and auto_recover
                 and not force_fresh
             ):
-                fp = build_asr_recovery_fingerprint(payload, audio_path)
-                exp_n = expected_chunk_count_for_audio(audio_path, payload, warnings)
                 msegs, mlang = try_recover_from_asr_merged(output_dir, base_name, fp, payload, warnings)
                 if msegs is not None:
                     collected = msegs
@@ -4173,7 +4218,6 @@ def main() -> None:
                         write_asr_merged_checkpoint(payload, collected, clang, audio_path, warnings)
             if not recovered:
                 chunks = split_audio_into_chunks(audio_path, payload, warnings, job_root)
-                payload["_asr_fingerprint_cache"] = build_asr_recovery_fingerprint(payload, audio_path)
             else:
                 chunks = []
             log(
@@ -4207,6 +4251,20 @@ def main() -> None:
                 }
                 for chunk in chunks
             ]
+            # Частичный resume: оборванный прогон мог оставить персистнутые чанки с совпадающим
+            # отпечатком — переиспользуем их и ASR'им только недостающие (в отличие от полной
+            # recovery выше, которая требует весь набор чанков разом).
+            if jobs and not force_fresh and auto_recover:
+                reused_segs, jobs, reused_idx = select_resumable_chunks(
+                    output_dir, base_name, jobs, fp, warnings
+                )
+                if reused_idx:
+                    collected.extend(reused_segs)
+                    log(
+                        payload,
+                        f"phase=asr_chunk_resume reused={len(reused_idx)} "
+                        f"remaining={len(jobs)} indices={sorted(reused_idx)}",
+                    )
             queue_size = len(jobs)
             log(payload, f"queue created: {queue_size} chunk jobs, max_parallel={max_parallel}, cpu_threads={cpu_threads}")
             chunk_phase_t0 = time.monotonic()
