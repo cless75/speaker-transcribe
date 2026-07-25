@@ -32,8 +32,8 @@
   },
 
   "hub_root": "<GOOGLE_DRIVE>/Hub",
-  "_voiceprint_mode_note": "off = diarization only (SPEAKER_00/01…); enroll = build the project registry from new voices (first bootstrap pass); match = identify speakers against the existing registry. Requires speaker_mode: diarize + HF token.",
-  "voiceprint_mode": "off",
+  "_voiceprint_mode_note": "off = diarization only (SPEAKER_00/01…); enroll = enroll ONLY the dominant speaker per file (bootstrap, no matching); match = identify speakers against the existing registry, no new enrolls; match_enroll = RECOMMENDED — match every speaker against the registry, enroll the unmatched ones as new profiles (recognize known, remember new; one profile per person). Requires speaker_mode: diarize + HF token.",
+  "voiceprint_mode": "match_enroll",
 
   "_asr_knobs": "forwarded to media_transcribe_cli",
   "quality_preset": "medium",

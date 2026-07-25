@@ -4525,10 +4525,17 @@ def main() -> None:
             "profiles_updated": 0,
         }
 
+        # Режимы voiceprint. match_enroll = «узнавай знакомых, запоминай новых»:
+        # матчит всех спикеров против стора, несовпавших энроллит как новых.
+        _vp_mode = payload.get("voiceprint_mode", "off")
+        vp_match = _vp_mode in {"match", "match_enroll"}
+        vp_enroll = _vp_mode in {"enroll", "match_enroll"}
+        vp_active = _vp_mode in {"match", "enroll", "match_enroll"}
+
         voiceprint_meta = {
-            "enabled": payload.get("voiceprint_mode") in {"match", "enroll"},
-            "mode": payload.get("voiceprint_mode", "off"),
-            "status": "disabled" if payload.get("voiceprint_mode", "off") == "off" else "pending",
+            "enabled": vp_active,
+            "mode": _vp_mode,
+            "status": "disabled" if _vp_mode == "off" else "pending",
             "threshold": payload.get("voiceprint_threshold"),
             "store_path": payload.get("machine_local_voiceprint_store_path") or payload.get("profile_store_path"),
             "matches": {},
@@ -4536,7 +4543,7 @@ def main() -> None:
             "reason": None,
         }
         voiceprint_store = None
-        if payload.get("voiceprint_mode") in {"match", "enroll"}:
+        if vp_active:
             if not turns:
                 voiceprint_meta["status"] = "fallback"
                 voiceprint_meta["reason"] = "voiceprint_requires_speaker_turns"
@@ -4599,7 +4606,40 @@ def main() -> None:
                             except Exception as exc:
                                 voiceprint_meta["hub_pull"] = {"status": "error", "error": str(exc)}
                                 warnings.append(f"hub_pull_failed: {exc}")
-                        if payload.get("voiceprint_mode") == "enroll":
+                        matches: dict = {}
+                        enrolled_by_speaker: dict[str, dict] = {}
+                        # 1) Матчинг против известных профилей (match / match_enroll).
+                        if vp_match:
+                            matches = match_voiceprint_profiles(store, speaker_embeddings, threshold, extractor=extractor_version)
+                            voiceprint_meta["matches"] = matches
+
+                        # Имя для энролла из VTT-наблюдения спикера (или payload-флага для top-1 enroll).
+                        vtt_observations = (
+                            zoom_vtt_meta.get("speaker_observations", {})
+                            if isinstance(zoom_vtt_meta, dict) else {}
+                        )
+                        payload_enroll_name = (str(payload.get("voiceprint_enroll_name") or "").strip() or None)
+                        payload_contact_ref = (str(payload.get("voiceprint_contact_ref") or "").strip() or None)
+                        payload_contact_name = (str(payload.get("voiceprint_contact_name") or "").strip() or None)
+
+                        def _enroll_meta_for(speaker_id: str, allow_payload_name: bool) -> tuple[dict | None, str]:
+                            obs = vtt_observations.get(speaker_id) or {}
+                            vtt_name = (obs.get("speaker_name") or "").strip() or None if isinstance(obs, dict) else None
+                            chosen = vtt_name or (payload_enroll_name if allow_payload_name else None)
+                            if not chosen:
+                                return None, "none"
+                            meta = {
+                                "canonical_name": chosen,
+                                "display_name": chosen.split()[0] if chosen else None,
+                                "contact_ref": payload_contact_ref or f"[[{chosen}]]",
+                                "contact_name": payload_contact_name or chosen,
+                            }
+                            return meta, ("zoom_vtt" if vtt_name else "payload")
+
+                        # 2) Энролл. enroll = только доминирующий спикер (без изменений);
+                        #    match_enroll = каждый НЕ совпавший спикер (узнавай знакомых, запоминай новых).
+                        enrolled_list: list[dict] = []
+                        if _vp_mode == "enroll":
                             speaker_totals: dict[str, float] = defaultdict(float)
                             for turn in turns:
                                 speaker_totals[turn["speaker_id"]] += max(
@@ -4607,55 +4647,48 @@ def main() -> None:
                                 )
                             if not speaker_totals:
                                 raise RuntimeError("no speaker turns available for enroll")
-                            target_speaker = max(speaker_totals.items(), key=lambda item: item[1])[0]
-                            # Build enroll_meta from VTT speaker_observations or payload
-                            # voiceprint_enroll_name (CLI flag). VTT-name takes precedence
-                            # when both are present; closes Bug 1 in 258-23.
-                            vtt_observations = (
-                                zoom_vtt_meta.get("speaker_observations", {})
-                                if isinstance(zoom_vtt_meta, dict) else {}
-                            )
-                            vtt_name = None
-                            obs_for_speaker = vtt_observations.get(target_speaker) or {}
-                            if isinstance(obs_for_speaker, dict):
-                                vtt_name = (obs_for_speaker.get("speaker_name") or "").strip() or None
-                            payload_enroll_name = (str(payload.get("voiceprint_enroll_name") or "").strip() or None)
-                            payload_contact_ref = (str(payload.get("voiceprint_contact_ref") or "").strip() or None)
-                            payload_contact_name = (str(payload.get("voiceprint_contact_name") or "").strip() or None)
-                            chosen_name = vtt_name or payload_enroll_name
-                            enroll_meta_for_target = None
-                            if chosen_name:
-                                enroll_meta_for_target = {
-                                    "canonical_name": chosen_name,
-                                    "display_name": chosen_name.split()[0] if chosen_name else None,
-                                    "contact_ref": payload_contact_ref or f"[[{chosen_name}]]",
-                                    "contact_name": payload_contact_name or chosen_name,
-                                }
+                            enroll_ids = [max(speaker_totals.items(), key=lambda item: item[1])[0]]
+                            allow_payload = True
+                        elif _vp_mode == "match_enroll":
+                            enroll_ids = [
+                                sid for sid in speaker_embeddings
+                                if not (matches.get(sid) or {}).get("matched")
+                            ]
+                            allow_payload = False  # одного имени на несколько новых спикеров не хватит
+                        else:
+                            enroll_ids = []
+                            allow_payload = False
+
+                        for sid in enroll_ids:
+                            emeta, name_source = _enroll_meta_for(sid, allow_payload_name=allow_payload)
                             enrolled = enroll_voiceprint_profile(
                                 store=store,
-                                speaker_id=target_speaker,
+                                speaker_id=sid,
                                 speaker_vectors=speaker_embeddings,
                                 sample_meta={
                                     "source_file": payload.get("input_path"),
-                                    "speaker_id": target_speaker,
-                                    "mode": "enroll",
-                                    "name_source": "zoom_vtt" if vtt_name else ("payload" if payload_enroll_name else "none"),
+                                    "speaker_id": sid,
+                                    "mode": _vp_mode,
+                                    "name_source": name_source,
                                 },
-                                enroll_meta=enroll_meta_for_target,
+                                enroll_meta=emeta,
                             )
+                            enrolled_list.append(enrolled)
+                            enrolled_by_speaker[sid] = enrolled
+
+                        if enrolled_list:
                             save_voiceprint_store_atomic(str(store_path), store)
-                            voiceprint_meta["enrolled"] = enrolled
-                            voiceprint_meta["status"] = "ok"
-                            voiceprint_meta["reason"] = "enrolled"
-                        else:
-                            matches = match_voiceprint_profiles(store, speaker_embeddings, threshold, extractor=extractor_version)
-                            voiceprint_meta["matches"] = matches
-                            voiceprint_meta["status"] = "ok"
-                            voiceprint_meta["reason"] = "matched"
+                            voiceprint_meta["enrolled_list"] = enrolled_list
+                            voiceprint_meta["enrolled"] = enrolled_list[0]  # обратная совместимость
+                        voiceprint_meta["status"] = "ok"
+                        voiceprint_meta["reason"] = (
+                            "matched_enrolled" if _vp_mode == "match_enroll"
+                            else ("enrolled" if _vp_mode == "enroll" else "matched")
+                        )
                     finally:
                         release_lock(lock_path)
 
-                    if payload.get("voiceprint_mode") == "match":
+                    if vp_match:
                         for segment in collected:
                             if segment.get("speaker_source") == "manual_map":
                                 continue
@@ -4671,32 +4704,38 @@ def main() -> None:
                                     segment["speaker_source"] = "voiceprint_contact"
                                 else:
                                     segment["speaker_source"] = "voiceprint_hash"
+                            else:
+                                # match_enroll: несовпавший спикер только что заведён — ставим его хэш,
+                                # чтобы рекуррентный голос был стабильно идентифицирован уже с этой записи.
+                                enrolled = enrolled_by_speaker.get(speaker_id)
+                                if enrolled and enrolled.get("voice_hash"):
+                                    segment["voice_hash"] = enrolled.get("voice_hash")
+                                    segment["speaker_source"] = "voiceprint_hash"
 
                     observed_names = zoom_vtt_meta.get("speaker_observations", {}) if isinstance(zoom_vtt_meta, dict) else {}
                     observed_at = dt.datetime.now(dt.UTC).isoformat()
                     if voiceprint_store is not None and observed_names:
                         matched_profiles: dict[str, dict] = {}
-                        if payload.get("voiceprint_mode") == "match":
+                        # Профили под VTT-алиасы — из совпадений (match/match_enroll) И из энроллов
+                        # (enroll/match_enroll); mode-agnostic, покрывает все три режима.
+                        if vp_match:
                             for match in voiceprint_meta.get("matches", {}).values():
                                 voice_hash = str(match.get("voice_hash") or "").strip()
-                                if not voice_hash:
-                                    continue
+                                if voice_hash:
+                                    matched_profiles[voice_hash] = ensure_profile_entry(voiceprint_store, voice_hash)
+                        for enrolled in enrolled_by_speaker.values():
+                            voice_hash = str(enrolled.get("voice_hash") or "").strip()
+                            if voice_hash:
                                 matched_profiles[voice_hash] = ensure_profile_entry(voiceprint_store, voice_hash)
-                        elif payload.get("voiceprint_mode") == "enroll":
-                            enrolled_hash = str((voiceprint_meta.get("enrolled") or {}).get("voice_hash") or "").strip()
-                            if enrolled_hash:
-                                matched_profiles[enrolled_hash] = ensure_profile_entry(voiceprint_store, enrolled_hash)
 
                         for speaker_id, observation in observed_names.items():
-                            voice_hash = None
-                            if payload.get("voiceprint_mode") == "match":
+                            voice_hash = str(
+                                ((voiceprint_meta.get("matches") or {}).get(speaker_id) or {}).get("voice_hash") or ""
+                            ).strip()
+                            if not voice_hash:
                                 voice_hash = str(
-                                    ((voiceprint_meta.get("matches") or {}).get(speaker_id) or {}).get("voice_hash") or ""
+                                    (enrolled_by_speaker.get(speaker_id) or {}).get("voice_hash") or ""
                                 ).strip()
-                            elif payload.get("voiceprint_mode") == "enroll":
-                                enrolled = voiceprint_meta.get("enrolled") or {}
-                                if str(enrolled.get("speaker_id") or "").strip() == str(speaker_id):
-                                    voice_hash = str(enrolled.get("voice_hash") or "").strip()
                             if not voice_hash or voice_hash not in matched_profiles:
                                 continue
                             profile = matched_profiles[voice_hash]
@@ -4849,7 +4888,7 @@ def main() -> None:
             voiceprint_store is not None
             and payload.get("profile_store_path")
             and machine_local_store_meta["status"] == "pending"
-            and (profile_updates or payload.get("voiceprint_mode") == "match")
+            and (profile_updates or vp_match)
         ):
             save_voiceprint_store_atomic(str(payload["profile_store_path"]), voiceprint_store)
             machine_local_store_meta["status"] = "updated"
