@@ -3721,9 +3721,9 @@ def write_outputs(payload: dict, result: dict) -> dict:
             raw_json_text = json.dumps(result, ensure_ascii=False, indent=2)
 
     raw_bytes = len(raw_json_text.encode("utf-8"))
-    log(payload, f"write_outputs: raw.json utf8_bytes={raw_bytes} path={raw_path}")
+    log(payload, f"write_outputs: raw.json utf8_bytes={raw_bytes} path={raw_path}", level="debug")
     write_text_atomic(raw_path, raw_json_text, encoding="utf-8")
-    log(payload, f"write_outputs: raw.json committed ok path={raw_path}")
+    log(payload, f"write_outputs: raw.json committed ok path={raw_path}", level="debug")
 
     run_meta = {
         "source_file": result["source_file"],
@@ -3757,13 +3757,13 @@ def write_outputs(payload: dict, result: dict) -> dict:
         "segments_ref": (raw_body.get("segments_ref") if raw_body else None),
         "identification": payload.get("identification", {}),
     }
-    log(payload, f"write_outputs: writing run-meta.json path={run_meta_path}")
+    log(payload, f"write_outputs: writing run-meta.json path={run_meta_path}", level="debug")
     if compact:
         run_meta_text = json.dumps(run_meta, ensure_ascii=False, separators=(",", ":"))
     else:
         run_meta_text = json.dumps(run_meta, ensure_ascii=False, indent=2)
     write_text_atomic(run_meta_path, run_meta_text, encoding="utf-8")
-    log(payload, "write_outputs: done")
+    log(payload, "phase=write_outputs done")
 
     structured_outputs: dict[str, str | None] = {}
     asr_dir = session_artifact_dir / "asr"
@@ -4144,7 +4144,7 @@ def main() -> None:
     output_dir_lock_root = pathlib.Path(payload["output_dir"]).resolve()
 
     try:
-        log(payload, f"job work dir: {job_root}")
+        log(payload, f"job work dir: {job_root}", level="debug")
         acquire_output_dir_lock(output_dir_lock_root, payload["execution_mode"], warnings)
         stage_ascii_input(payload, warnings, job_root)
         audio_path = extract_audio_if_needed(payload, warnings, job_root)
@@ -4282,10 +4282,10 @@ def main() -> None:
                             f"chunk begin {position}/{queue_size}: index={job['chunk_index']} audio={job['audio_path']}",
                         )
                         if shared_model is None:
-                            log(payload, "sequential mode: loading single WhisperModel for all chunks (avoids repeated CUDA init)")
-                            log(payload, "sequential shared model init begin")
+                            log(payload, "sequential mode: loading single WhisperModel for all chunks (avoids repeated CUDA init)", level="debug")
+                            log(payload, "sequential shared model init begin", level="debug")
                             shared_model = create_whisper_model(job)
-                            log(payload, "sequential shared model init done")
+                            log(payload, "sequential shared model init done", level="debug")
                         try:
                             result = transcribe_chunk_worker(job, model=shared_model)
                         except Exception as exc:
@@ -4314,17 +4314,18 @@ def main() -> None:
                     # through diarization+alignment (~30s, ~1.5GB), reclaimed at process exit.
                     # No gc.collect() / torch.cuda.empty_cache() — same SIGSEGV path.
                     # См. memory/feedback_media_transcribe_known_bugs_2026_05_17.md
-                    log(payload, "phase=sequential_whisper_release begin")
+                    log(payload, "phase=sequential_whisper_release begin", level="debug")
                     if shared_model is not None:
                         _WHISPER_MODEL_KEEPALIVE.append(shared_model)
                         log(
                             payload,
                             f"phase=sequential_whisper_release model_kept_alive "
                             f"(keepalive_count={len(_WHISPER_MODEL_KEEPALIVE)}) — VRAM released at process exit",
+                            level="debug",
                         )
                     shared_model = None
-                    log(payload, "phase=sequential_whisper_release model_dereferenced")
-                    log(payload, "phase=sequential_whisper_release end")
+                    log(payload, "phase=sequential_whisper_release model_dereferenced", level="debug")
+                    log(payload, "phase=sequential_whisper_release end", level="debug")
             elif queue_size > 0:
                 executor = ThreadPoolExecutor(max_workers=max_parallel)
                 try:
@@ -4381,12 +4382,12 @@ def main() -> None:
                 # (same crash path as `del shared_model` — see _WHISPER_MODEL_KEEPALIVE docstring).
                 # Pyannote diarization that follows can allocate VRAM alongside the kept-alive
                 # WhisperModel; RTX 3050 8GB has plenty of room (Whisper-medium ~1.5GB + pyannote ~2GB).
-                log(payload, "phase=gpu_cache_skip after asr (bug-1 avoidance: process-exit VRAM reclaim)")
+                log(payload, "phase=gpu_cache_skip after asr (bug-1 avoidance: process-exit VRAM reclaim)", level="debug")
 
-        log(payload, f"phase=after_chunk_loop start collected_segments={len(collected)} detected_languages={len(detected_languages)}")
-        log(payload, "phase=sort_collected begin")
+        log(payload, f"phase=after_chunk_loop start collected_segments={len(collected)} detected_languages={len(detected_languages)}", level="debug")
+        log(payload, "phase=sort_collected begin", level="debug")
         collected.sort(key=lambda item: (item["start"], item["end"]))
-        log(payload, "phase=sort_collected done")
+        log(payload, "phase=sort_collected done", level="debug")
         if payload.get("execution_mode") == "speaker_pass":
             log(
                 payload,
@@ -4842,7 +4843,7 @@ def main() -> None:
         if machine_local_store_meta["status"] == "pending":
             machine_local_store_meta["status"] = "not_needed"
 
-        log(payload, "phase=build_result begin")
+        log(payload, "phase=build_result begin", level="debug")
         duration = round(collected[-1]["end"], 3) if collected else 0.0
         result = {
             "status": "ok",
@@ -4890,7 +4891,7 @@ def main() -> None:
             "segments": collected,
         }
         result["speaker_review"] = build_speaker_review(result)
-        log(payload, "phase=build_result done")
+        log(payload, "phase=build_result done", level="debug")
         # Opt-in: capture slide screenshots at key moments + local OCR, embed into transcript.
         if slide_frames is not None:
             try:

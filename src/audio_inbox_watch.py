@@ -91,7 +91,16 @@ BUNDLE_TS_PATTERN = re.compile(r"(?:GMT)?(\d{8}[-_]\d{6})")
 # ---------------------------------------------------------------------------
 
 
-def log(msg: str) -> None:
+# level="debug" печатается только при ASR_LOG_DEBUG=1 — тот же рубильник, что у движка
+# (media_transcribe._LOG_DEBUG); subprocess наследует env, так что один флаг делает tail
+# чистым в обоих потоках (watcher + tee'нутый движок в общем логе узла).
+_LOG_DEBUG = os.environ.get("ASR_LOG_DEBUG", "").strip().lower() not in ("", "0", "false", "no")
+
+
+def log(msg: str, level: str = "info") -> None:
+    if level == "debug" and not _LOG_DEBUG:
+        return
+    # Формат строки НЕ менять: log_critical._TS парсит ведущий [{ts}] для атрибуции времени.
     ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sys.stderr.write(f"[{ts}] {msg}\n")
     sys.stderr.flush()
@@ -807,7 +816,7 @@ def apply_bundle_metadata(candidates: list[tuple[pathlib.Path, pathlib.Path, dic
                     _primary_done = False
             if not _primary_done:
                 log(f"bundle in {directory.name}/[{ts_key}]: primary={primary.name} "
-                    f"siblings={len(siblings)} (id={bundle_id})")
+                    f"siblings={len(siblings)} (id={bundle_id})", level="debug")
             pid, _ = route_pid_for_audio(primary, src_root, primary_tup[2], cfg, mapper)
             for sib in siblings:
                 stamp_bundle_sibling(sib, bundle_id, primary, pid, host_label)
@@ -1034,7 +1043,8 @@ def wait_for_cpu_available(cfg: dict) -> tuple[bool, str]:
             return True, f"cpu-check skipped mid-wait after {waited/60:.1f}m"
         if current < threshold:
             return True, f"cpu={current:.0f}% available after {waited/60:.1f}m"
-        log(f"cpu still busy: {current:.0f}% (waited {waited/60:.1f}m / {max_wait_sec/60:.0f}m)")
+        log(f"cpu still busy: {current:.0f}% (waited {waited/60:.1f}m / {max_wait_sec/60:.0f}m)",
+            level="debug")
     return False, f"cpu busy >{max_wait_sec/60:.0f}m, deferred"
 
 
@@ -1105,7 +1115,8 @@ def acquire_watcher_lock() -> pathlib.Path | None:
                 started = dt.datetime.fromisoformat(data.get("started_at", ""))
                 age_min = (dt.datetime.now() - started).total_seconds() / 60
                 if age_min < 360:
-                    log(f"watcher lock present, age {age_min:.1f}m (pid={pid}); skipping")
+                    log(f"watcher lock present, age {age_min:.1f}m (pid={pid}); skipping",
+                        level="debug")
                     return None
                 log(f"watcher lock stale ({age_min:.1f}m); taking over")
         except Exception:
@@ -1364,7 +1375,7 @@ class _ClaimHeartbeat:
         try:
             atomic_write_json(cp, data)
         except Exception as exc:
-            log(f"heartbeat write failed (non-critical): {exc}")
+            log(f"heartbeat write failed (non-critical): {exc}", level="debug")
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval):
@@ -1461,7 +1472,7 @@ def retire_claim(audio: pathlib.Path, cfg: dict) -> None:
             data["claim"] = claim
             atomic_write_json(cp, data)
     except Exception as exc:
-        log(f"retire claim failed (non-critical): {exc}")
+        log(f"retire claim failed (non-critical): {exc}", level="debug")
 
 
 # ---------------------------------------------------------------------------
