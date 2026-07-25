@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import tempfile
@@ -66,7 +67,7 @@ def main() -> int:
         checks.append(("сессия rec-700 в кандидате", c and "rec-700.m4a" in c["sessions"]))
 
         # set имя
-        rc = vpi.cmd_set(_ns(store=store_path, registry=None, global_dir=None, project=None,
+        rc = vpi.cmd_set(_ns(config=None, store=store_path, registry=None, project=None,
                              voice_hash=vh, name="Дмитрий", display=None, contact=None,
                              contact_name=None, force=False))
         checks.append(("set вернул 0", rc == 0))
@@ -83,6 +84,47 @@ def main() -> int:
         m = match_voiceprint_profiles(store, {"X": V}, 0.55, extractor=EXTRACTOR).get("X", {})
         checks.append(("голос узнаётся с именем", m.get("matched") is True
                        and m.get("canonical_name") == "Дмитрий"))
+
+    # --- config-резолв стора + emit JSON в каталог проекта ---
+    with tempfile.TemporaryDirectory() as td2:
+        root = pathlib.Path(td2)
+        hub = root / "Hub"
+        cache = root / "cache"
+        pid = "700"
+        (cache / pid).mkdir(parents=True)
+        (hub / pid).mkdir(parents=True)
+        cfg = {
+            "node": {"host_label": "TEST-HOST", "cache_root": str(cache)},
+            "hub_root": str(hub),
+            "voiceprint_mode": "match_enroll",
+            "outputs": {"voiceprints": {
+                "local_cache": "{cache_root}/{pid}",
+                "project_projection": "{hub_root}/{pid}",
+                "candidates_out": "project",
+            }},
+        }
+        cfg_path = root / "node.local.json"
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+
+        st_path = str(cache / pid / "voiceprints.json")
+        store = load_voiceprint_store(st_path)
+        enroll_voiceprint_profile(
+            store=store, speaker_id="S9", speaker_vectors={"S9": V},
+            sample_meta={"extractor": EXTRACTOR, "source_file": "rec-cfg.m4a", "speaker_id": "S9"},
+            enroll_meta=None)
+        save_voiceprint_store_atomic(st_path, store)
+
+        rc = vpi.cmd_list(_ns(config=str(cfg_path), project=pid, all=False,
+                              store=None, registry=None, out=None, json=False))
+        checks.append(("cmd_list по конфигу вернул 0", rc == 0))
+        emitted = hub / pid / "_voiceprint-candidates-TEST-HOST.json"
+        checks.append(("JSON кандидатов положен в каталог проекта", emitted.is_file()))
+        if emitted.is_file():
+            body = json.loads(emitted.read_text(encoding="utf-8"))
+            checks.append(("в JSON есть кандидат из стора", body.get("count") == 1
+                           and body["candidates"][0]["sessions"] == ["rec-cfg.m4a"]))
+            checks.append(("project/host в JSON", body.get("project") == pid
+                           and body.get("host") == "TEST-HOST"))
 
     ok = True
     for name, passed in checks:

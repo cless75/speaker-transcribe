@@ -23,10 +23,12 @@
     "transcript_dir": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/transcripts",
     "state_dir": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}/pipeline",
     "_voiceprints_note": "project_projection = where the per-project speaker registry (index.json + profiles/ name cards WITHOUT vectors + members.json) lives; set to {hub_root}/{pid} to keep it at the project root. local_cache = node-local dir for the embeddings store (voiceprints.json), kept OFF the shared hub. global_registry = SHARED canonical embeddings store on the hub ({hub_root}/_voiceprints/profiles/{voice_hash}.json + registry.json), so an enroll on one node is readable by others; open (not encrypted) and kept out of git via .gitignore. Omit global_registry to keep embeddings node-local only. All active only when voiceprint_mode != off (see below).",
+    "_candidates_out_note": "voiceprint_identity.py list-candidates кладёт JSON анонимных профилей-кандидатов (для навыка voiceprint-identity-matching) сюда: project = {hub_root}/{pid}/_voiceprint-candidates-{host}.json (рядом с реестром проекта, видно в Obsidian; по умолчанию); meta = {hub_root}/_meta/801-voiceprint-candidates-{host}.json (рядом с диагностикой узла); root = {hub_root}/_voiceprint-candidates-{host}.json; либо явный путь-шаблон с {hub_root}/{pid}/{host}. {host} в имени, чтобы узлы не затирали друг друга.",
     "voiceprints": {
       "project_projection": "{hub_root}/{pid}",
       "local_cache": "{cache_root}/{pid}",
-      "global_registry": "{hub_root}/_voiceprints"
+      "global_registry": "{hub_root}/_voiceprints",
+      "candidates_out": "project"
     },
     "session_card": { "adapter": "none", "target": "{hub_root}/{pid}/sessions/{YYYY-MM}/{sid}" }
   },
