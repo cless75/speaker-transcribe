@@ -4149,6 +4149,21 @@ def main() -> None:
         stage_ascii_input(payload, warnings, job_root)
         audio_path = extract_audio_if_needed(payload, warnings, job_root)
         runtime = payload.get("runtime", {})
+        # Стартовая веха: эффективный конфиг прогона одной строкой (видно в дефолтном логе).
+        # "device=cpu compute=int8" сознательно оставлено читаемым — log_critical помечает CPU-режим.
+        log(
+            payload,
+            "phase=config "
+            f"device={runtime.get('device', 'cpu')} compute={runtime.get('compute_type', 'int8')} "
+            f"diar_device={runtime.get('diarization_device') or payload.get('diarization_device') or 'default'} "
+            f"speaker_mode={payload.get('speaker_mode', 'off')} "
+            f"voiceprint_mode={payload.get('voiceprint_mode', 'off')} "
+            f"vp_threshold={payload.get('voiceprint_threshold', '-')} "
+            f"model={payload.get('selected_model') or payload.get('requested_model') or payload.get('model') or 'medium'} "
+            f"exec_mode={payload.get('execution_mode')} "
+            f"chunk_min={payload.get('chunk_minutes', 20)} "
+            f"video_frames={payload.get('video_frames') or ('slides' if payload.get('slides_enabled') else 'off')}",
+        )
         if payload["execution_mode"] == "merge_asr_chunks":
             output_dir_m = pathlib.Path(payload["output_dir"])
             base_name_m = str(payload.get("output_base_name") or pathlib.Path(payload["input_path"]).stem)
