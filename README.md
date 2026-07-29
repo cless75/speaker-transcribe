@@ -30,6 +30,45 @@ GitHub shows the `.html` file as source, not a rendered page. To read it as a pa
 
 > The setup guide is currently in Russian; an English version is planned.
 
+## Install with an AI agent (Claude Code / Codex)
+
+Open the repo in a coding agent (Claude Code, Codex, or Cursor) and paste the prompt
+below. The agent uses **[`docs/deployment.md`](docs/deployment.md)** as the source of
+truth and sets the node up interactively — it **asks you** for the machine-specific
+values (hub path, node name, Hugging Face token) instead of guessing, and verifies the
+GPU before finishing.
+
+```text
+You are setting up a speaker-transcribe ASR + speaker-diarization node on THIS machine.
+Treat docs/deployment.md as the source of truth; read it first. Never copy a venv from
+another machine (the base-interpreter path is baked in). Work step by step and STOP to
+ask me before anything destructive.
+
+1. Check prerequisites and report gaps: OS, NVIDIA GPU + CUDA 12.8, Python 3.11, ffmpeg,
+   RAM. Do not proceed past a missing hard requirement without telling me.
+2. Create a LOCAL venv and install requirements.txt, with torch + torchaudio from the
+   CUDA index (cu128). On Windows you may use: scripts/update-node.ps1 -CudaTorch.
+3. Copy config/node.example.json -> config/node.local.json and
+   config/mapper.example.json -> config/mapper.local.json. ASK me for: hub_root (the
+   shared Hub path), host_label (a unique node name), cache_root, and the Hugging Face
+   token (gated pyannote; exported as HF_TOKEN). Set runtime.device=cuda,
+   runtime.diarization_device=cuda, voiceprint_mode=match_enroll.
+4. Run diagnostics (scripts/node_diagnostics.py, or update-node.ps1) and show me:
+   torch.cuda True + GPU name, faster-whisper CUDA OK, speechbrain + torchaudio present,
+   ffmpeg found, config valid, git commit.
+5. Smoke-test one short audio file (docs/deployment.md section 4) and show the transcript
+   with speaker labels.
+6. Register the watcher to run continuously (Windows: scripts/install-watch-task.ps1 from
+   an ELEVATED shell; macOS: launchd; Linux: cron — see deployment.md section 5). Confirm
+   it is registered and alive.
+
+Finish with a short pass/fail checklist of every step.
+```
+
+**Codex / Cursor:** the same prompt applies — approve the venv creation, dependency
+install, and diagnostics commands when the agent asks. On Codex, run it from the repo
+root so it can read `docs/deployment.md` and the `scripts/` and `config/` folders.
+
 ## Requirements (short)
 
 - Windows 10/11 (Linux/macOS paths differ), NVIDIA GPU with CUDA 12.8, 16 GB+ RAM
