@@ -232,6 +232,26 @@ def collect_env_refs(cfg: dict | None) -> list[str]:
     return found
 
 
+def collect_file_secrets(cfg: dict | None) -> list[str]:
+    """Все ссылки вида 'file:путь' в конфиге — секреты, лежащие файлом (обычно в Hub)."""
+    found: list[str] = []
+
+    def walk(v: object) -> None:
+        if isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, str) and v.startswith("file:"):
+            spec = v[5:].strip()
+            if spec and spec not in found:
+                found.append(spec)
+
+    walk(cfg or {})
+    return found
+
+
 def add_dir_to_path(dir_to_add: str, machine: bool) -> str:
     """Добавить каталог в PATH (User по умолч.; Machine нужен admin). Идемпотентно. Windows."""
     if sys.platform != "win32":
@@ -515,8 +535,26 @@ def main() -> int:
         elif not on_path:
             emit("    -> добавить в PATH: node_diagnostics.py --fix-path            (для текущего юзера)")
             emit("                        node_diagnostics.py --fix-path --machine  (для всех, admin)")
+    # Секрет может лежать файлом (обычно в Hub) — тогда переменная окружения на узле
+    # не нужна вовсе: вотчер читает файл и кладёт значение в окружение подпроцесса.
+    file_secrets = collect_file_secrets(cfg) if cfg is not None else []
+    for spec in file_secrets:
+        resolved = spec.replace("{hub_root}", str(cfg.get("hub_root") or "")) if cfg else spec
+        p = pathlib.Path(resolved).expanduser()
+        try:
+            size = len(p.read_text(encoding="utf-8-sig").strip()) if p.is_file() else 0
+        except Exception:  # noqa: BLE001
+            size = -1
+        if size > 0:
+            state = f"ок ({size} симв.)"
+        elif size == 0:
+            state = "ПУСТ или НЕ НАЙДЕН — значение не применится"
+        else:
+            state = "НЕ ЧИТАЕТСЯ (права?)"
+        emit(f"  секрет из файла      : {resolved}  ->  {state}")
+
     refs = collect_env_refs(cfg) if cfg is not None else []
-    if not refs:
+    if not refs and not file_secrets:
         emit("  env-переменные       : в конфиге нет ссылок env:VAR")
     missing = False
     for name in refs:

@@ -93,6 +93,35 @@ function Get-EnvRefs($node, $acc) {
 }
 $envNames = New-Object System.Collections.Generic.List[string]
 if ($cfg) { Get-EnvRefs $cfg $envNames }
+
+# Секрет может лежать файлом (обычно в Hub) — тогда переменной окружения на узле нет
+# и быть не должно. Проверяем читаемость источника, не показывая содержимое.
+function Get-FileSecrets($node, $acc) {
+    if ($null -eq $node) { return }
+    if ($node -is [string]) {
+        if ($node -like "file:*") { $acc.Add($node.Substring(5)) | Out-Null }
+    } elseif ($node -is [System.Collections.IEnumerable] -and -not ($node -is [string])) {
+        foreach ($item in $node) { Get-FileSecrets $item $acc }
+    } elseif ($node -is [psobject]) {
+        foreach ($p in $node.PSObject.Properties) { Get-FileSecrets $p.Value $acc }
+    }
+}
+$fileSecrets = New-Object System.Collections.Generic.List[string]
+if ($cfg) { Get-FileSecrets $cfg $fileSecrets }
+if ($fileSecrets.Count -gt 0) {
+    Probe "secrets from files (content never printed)" {
+        foreach ($spec in ($fileSecrets | Select-Object -Unique)) {
+            $p = $spec.Replace("{hub_root}", [string]$hubRoot)
+            if (-not (Test-Path $p)) { "{0} : NOT FOUND" -f $p; continue }
+            try {
+                $len = (Get-Content $p -Raw -ErrorAction Stop).Trim().Length
+                "{0} : {1}" -f $p, $(if ($len -gt 0) { "ok ($len chars)" } else { "EMPTY" })
+            } catch {
+                "{0} : UNREADABLE ({1})" -f $p, $_.Exception.Message
+            }
+        }
+    }
+}
 Probe "env vars referenced by the config (values never printed)" {
     if ($envNames.Count -eq 0) { "config references no env:VAR" }
     foreach ($name in ($envNames | Select-Object -Unique)) {

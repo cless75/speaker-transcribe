@@ -189,6 +189,65 @@ def load_config(path: pathlib.Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+# Ключ конфига -> переменная окружения, которую ждёт движок (media_transcribe
+# читает HF_TOKEN, затем HUGGINGFACE_TOKEN / HUGGING_FACE_HUB_TOKEN).
+SECRET_ENV_NAMES = {"hf_token": "HF_TOKEN"}
+
+
+def apply_config_secrets(cfg: dict) -> None:
+    """Разложить секреты из блока ``secrets`` в окружение процесса.
+
+    Поле описывает ИСТОЧНИК значения, а не значение:
+
+        "env:HF_TOKEN"                     — переменная окружения (как было раньше)
+        "file:{hub_root}/_meta/.hf-token"  — файл; в Hub это один источник на все узлы,
+                                             так что токен не надо заводить на каждой машине
+
+    Движок запускается подпроцессом и наследует ``os.environ``, поэтому достаточно
+    положить значение сюда. Значения секретов НЕ логируются — только источник.
+    Отсутствие/нечитаемость источника не роняет прогон: если переменная уже есть в
+    окружении, она и останется в силе (диаризация просто отработает как прежде).
+    """
+    secrets = cfg.get("secrets") or {}
+    if not isinstance(secrets, dict):
+        return
+    ctx = {"hub_root": str(cfg.get("hub_root") or ""),
+           "config_dir": str(cfg.get("_config_dir") or "")}
+    for key, spec in secrets.items():
+        if not isinstance(spec, str) or not spec.strip():
+            continue
+        env_name = SECRET_ENV_NAMES.get(key, key.upper())
+        spec = spec.strip()
+        if spec.startswith("env:"):
+            src_name = spec[4:].strip()
+            val = os.environ.get(src_name)
+            # Конфиг может указывать на переменную с другим именем, чем ждёт движок.
+            if val and not os.environ.get(env_name):
+                os.environ[env_name] = val
+                log(f"secret {key}: взят из env:{src_name}", level="debug")
+            elif not val:
+                log(f"secret {key}: env:{src_name} не задана — диаризация может не стартовать")
+            continue
+        if spec.startswith("file:"):
+            raw = resolve_template(spec[5:].strip(), ctx)
+            path = pathlib.Path(raw).expanduser()
+            try:
+                val = path.read_text(encoding="utf-8-sig").strip()
+            except Exception as exc:  # noqa: BLE001
+                have = "есть" if os.environ.get(env_name) else "нет"
+                log(f"secret {key}: не удалось прочитать {path} ({type(exc).__name__}); "
+                    f"переменная {env_name} в окружении: {have}")
+                continue
+            if not val:
+                log(f"secret {key}: файл {path} пуст — значение не применено")
+                continue
+            os.environ[env_name] = val
+            log(f"secret {key}: подтянут из {path} -> {env_name}", level="debug")
+            continue
+        log(f"secret {key}: непонятный источник '{spec.split(':', 1)[0]}:' "
+            "(ожидается env:ИМЯ или file:путь) — пропуск")
+
+
 # ---------------------------------------------------------------------------
 # Config helpers: placeholders, node fields, watcher knobs
 # ---------------------------------------------------------------------------
@@ -2378,6 +2437,7 @@ def main() -> int:
                 sys.stderr.write(f"status published to {published}\n")
         return 2
     cfg["_config_dir"] = str(cfg_path.parent)
+    apply_config_secrets(cfg)
 
     try:
         run_once(cfg, cfg_path,
