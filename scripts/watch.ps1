@@ -51,6 +51,20 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $repo    = Split-Path $PSScriptRoot -Parent
 $watcher = Join-Path $repo "src\audio_inbox_watch.py"
 
+# Гарантируем папку логов: если её нет, редирект задачи ( *>> logs\watch.log ) не создаёт
+# родительский каталог и лог не появляется вовсе. Плюс — пишем ранние фатальные ошибки
+# (venv/конфиг не найден, запуск под другим юзером = Error 103) ПРЯМО в watch.log, чтобы
+# они не терялись, даже если редирект задачи не сработал.
+$logDir  = Join-Path $repo "logs"
+if (-not (Test-Path $logDir)) { try { New-Item -ItemType Directory -Force -Path $logDir | Out-Null } catch {} }
+$selfLog = Join-Path $logDir "watch.log"
+function Write-Fatal($msg) {
+  $line = "[{0}] FATAL: {1}  (user={2}, PythonBin={3})" -f `
+    (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg, $env:USERNAME, $PythonBin
+  try { Add-Content -Path $selfLog -Value $line -Encoding UTF8 } catch {}
+  Write-Host $line -ForegroundColor Red
+}
+
 # Engine version = the semver in ./VERSION plus the exact commit, e.g. "v1.0.0+g9cfbff3".
 # The semver is bumped on releases; the commit hash always reflects the running code, so a
 # self-update shows up even between version bumps. Guarded so a missing VERSION / no-git
@@ -68,13 +82,19 @@ function Get-EngineVersion {
   return "v$ver"
 }
 
-if (-not (Test-Path $PythonBin)) { throw "venv python not found: $PythonBin (create venv per docs/node-setup.html)" }
-if (-not (Test-Path $watcher))   { throw "watcher not found: $watcher" }
+# Пре-флайт: каждая ошибка пишется в watch.log (Write-Fatal) и даёт distinctive exit 103,
+# чтобы «тихий» сбой задачи (напр. запуск под другим юзером без venv/PATH) был виден в логе.
+if (-not (Test-Path $PythonBin)) {
+  Write-Fatal "venv python не найден: $PythonBin — venv не создан или задача под другим юзером (create venv per docs/node-setup.html)"
+  exit 103
+}
+if (-not (Test-Path $watcher)) { Write-Fatal "watcher не найден: $watcher (нужен git pull)"; exit 103 }
 
 $cfgPath = $Config
 if (-not [System.IO.Path]::IsPathRooted($cfgPath)) { $cfgPath = Join-Path $repo $Config }
 if (-not (Test-Path $cfgPath)) {
-  throw "config not found: $cfgPath  (copy config\node.example.json -> config\node.local.json and fill in your paths)"
+  Write-Fatal "config не найден: $cfgPath (скопируй config\node.example.json -> config\node.local.json)"
+  exit 103
 }
 
 $watchArgs = @("--config", $cfgPath, "--once")
@@ -86,7 +106,7 @@ if ($ForceWindow)            { $watchArgs += "--force-window" }
 # Rule off the start of every sweep so runs are easy to tell apart in the shared log
 # (the scheduled task appends each sweep to the same file, back to back).
 Write-Host ("=" * 78)
-Write-Host ("[{0}] sweep start  (host={1}, engine {2})" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $env:COMPUTERNAME, (Get-EngineVersion))
+Write-Host ("[{0}] sweep start  (host={1}, user={2}, engine {3})" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $env:COMPUTERNAME, $env:USERNAME, (Get-EngineVersion))
 Write-Host "Watcher: $watcher" -ForegroundColor Yellow
 Write-Host "Config : $cfgPath" -ForegroundColor Yellow
 

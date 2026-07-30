@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import pathlib
 import platform
 import shutil
@@ -120,6 +121,56 @@ def maybe_pause(auto: bool) -> None:
             sys.stdin.read(1)
     except Exception:
         pass
+
+
+def query_watch_task() -> str:
+    """Состояние scheduled task вотчера (Windows). Стабильные поля через PowerShell."""
+    if sys.platform != "win32":
+        return "(не Windows — проверь launchd/cron вручную)"
+    ps = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "foreach($n in 'speaker-transcribe-watch','MS-Audio-Inbox-Watch'){"
+        "$t=Get-ScheduledTask -TaskName $n;"
+        "if($t){$i=Get-ScheduledTaskInfo -TaskName $n;"
+        "Write-Output ('{0}|{1}|{2}|{3}' -f $n,$t.State,$i.LastRunTime,$i.LastTaskResult);break}}"
+    )
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, text=True, timeout=25)
+        out = (r.stdout or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        return f"(ошибка запроса: {exc})"
+    if not out:
+        return "НЕ НАЙДЕНА (ни speaker-transcribe-watch, ни MS-Audio-Inbox-Watch) — зарегистрировать install-watch-task.ps1 (admin)"
+    parts = out.split("|")
+    name = parts[0] if len(parts) > 0 else "?"
+    state = parts[1] if len(parts) > 1 else "?"
+    last = parts[2] if len(parts) > 2 else "?"
+    res = parts[3] if len(parts) > 3 else "?"
+    hint = ""
+    if str(res).strip() in ("267011", "267009"):
+        hint = " (267011=ни разу не запускалась / 267009=выполняется)"
+    return f"'{name}' — {state}, посл.запуск {last}, результат {res}{hint}"
+
+
+def collect_env_refs(cfg: dict | None) -> list[str]:
+    """Все ссылки вида 'env:VARNAME' в конфиге (рекурсивно) — их проверяем в окружении."""
+    found: list[str] = []
+
+    def walk(v: object) -> None:
+        if isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, str) and v.startswith("env:"):
+            name = v[4:].strip()
+            if name and name not in found:
+                found.append(name)
+
+    walk(cfg or {})
+    return found
 
 
 def main() -> int:
@@ -287,8 +338,91 @@ def main() -> int:
     else:
         emit(f"  (не git-репозиторий: {repo})")
 
+    # -----------------------------------------------------------------------
+    emit("\n[7] Вотчер / источники / расписание (почему может быть тихо)")
+    emit(f"  scheduled task : {query_watch_task()}")
+
+    if cfg is not None:
+        node = cfg.get("node") or {}
+        hub_root = cfg.get("hub_root")
+        if hub_root:
+            hp = pathlib.Path(str(hub_root)).expanduser()
+            emit(f"  hub_root       : {hub_root}  ->  " +
+                 ("смонтирован" if hp.exists() else "НЕ НАЙДЕН (Google Drive не смонтирован?)"))
+        else:
+            emit("  hub_root       : не задан в конфиге")
+        cache_root = node.get("cache_root")
+        if cache_root:
+            cp = pathlib.Path(str(cache_root)).expanduser()
+            emit(f"  cache_root     : {cache_root}  ->  " + ("ок" if cp.exists() else "НЕ НАЙДЕН"))
+        win = str(cfg.get("process_window_local") or "").strip()
+        if win:
+            emit(f"  process_window : {win}  (ВНЕ окна вотчер молча выходит — обойти: watch.ps1 -ForceWindow)")
+        else:
+            emit("  process_window : не задано (работает круглосуточно)")
+        if cfg.get("respect_cpu_load", False):
+            emit(f"  cpu gate       : ON, порог {cfg.get('cpu_threshold_percent', 70)}% (выше — откладывает прогон)")
+        else:
+            emit("  cpu gate       : off")
+        for s in (cfg.get("sources") or []):
+            if not isinstance(s, dict):
+                continue
+            root_tpl = str(s.get("root") or "")
+            root = root_tpl.replace("{hub_root}", str(hub_root or ""))
+            rp = pathlib.Path(root).expanduser()
+            kind = s.get("discover") or s.get("route") or ""
+            emit(f"  source         : {root_tpl}  ->  " +
+                 ("ок" if rp.exists() else "НЕ НАЙДЕН") + (f" ({kind})" if kind else ""))
+    else:
+        emit("  (конфиг не прочитан — проверки Hub/окна/источников пропущены)")
+
+    log_path = repo / "logs" / "watch.log"
+    if log_path.is_file():
+        st = log_path.stat()
+        age_min = (dt.datetime.now().timestamp() - st.st_mtime) / 60
+        emit(f"  watch.log      : есть, {st.st_size} байт, обновлён {age_min:.0f} мин назад")
+    else:
+        emit(f"  watch.log      : НЕТ ({log_path}) — задача ещё не запускалась")
+    emit("  Напоминание: watch.log пишет только scheduled task; ручной watch.ps1 -Once печатает в консоль.")
+
+    # -----------------------------------------------------------------------
+    emit("\n[8] Среда и переменные (Error 103: python не найден в PATH)")
+    try:
+        import getpass
+        cur_user = getpass.getuser()
+    except Exception:  # noqa: BLE001
+        cur_user = os.environ.get("USERNAME") or os.environ.get("USER") or "?"
+    emit(f"  текущий пользователь : {cur_user}")
+    pth = shutil.which("python") or shutil.which("python3")
+    emit("  python в PATH        : " +
+         (pth or "НЕ НАЙДЕН — bare python не резолвится (это Error 103; задача под другим юзером?)"))
+    if venv:
+        vp = pathlib.Path(str(venv)).expanduser()
+        emit(f"  transcribe_python    : {venv}  ->  " +
+             ("ок" if vp.exists() else "НЕ НАЙДЕН (venv отсутствует или другой путь)"))
+    else:
+        emit("  transcribe_python    : не задан — вотчер возьмёт bare 'python' из PATH (уязвимо к Error 103)")
+    refs = collect_env_refs(cfg) if cfg is not None else []
+    if not refs:
+        emit("  env-переменные       : в конфиге нет ссылок env:VAR")
+    missing = False
+    for name in refs:
+        val = os.environ.get(name)
+        if val:
+            emit(f"  env:{name:15}: установлен (…{val[-4:]})")
+        else:
+            missing = True
+            emit(f"  env:{name:15}: НЕ УСТАНОВЛЕН в этой сессии")
+    if missing:
+        emit("    -> ставить на уровне МАШИНЫ (чтобы работало под любым юзером и после ребута), напр.:")
+        for name in refs:
+            if not os.environ.get(name):
+                emit(f'       [Environment]::SetEnvironmentVariable("{name}","<значение>","Machine")')
+    emit("  Подсказка: задача с триггером AtLogon наследует PATH/env ТОГО юзера, что залогинен.")
+
     emit("\n" + LINE)
-    emit(" Строки [2] и [3] отвечают на 'использует ли GPU' и 'пишет ли voiceprint'.")
+    emit(" [2]/[3] — GPU и voiceprint; [7] — почему вотчер молчит (задача/Hub/окно/источники/лог);")
+    emit(" [8] — среда (пользователь/python-в-PATH/venv/env-переменные, Error 103).")
     emit(LINE)
 
     written = write_report(hub_meta, host_label)
