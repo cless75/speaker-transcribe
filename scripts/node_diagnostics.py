@@ -6,7 +6,8 @@ voiceprint enroll. Ничего не меняет — только читает 
 Главное: результат НЕ ТОЛЬКО печатается в консоль, но и ПИШЕТСЯ ФАЙЛОМ прямо в
 _meta Hub, помеченный идентификатором машины — чтобы не ловить вывод в терминале.
 
-    {hub_root}/_meta/801-diag-{HOST}.txt
+    {hub_root}/_meta/801-diag-{HOST}.txt                    — последний прогон
+    {hub_root}/_meta/801-diag-{HOST}-{YYYY-MM-DD-HHMM}.txt  — история (10 последних)
 
 Живёт в репозитории (scripts/) и доставляется на узлы по git pull. Запуск на узле
 (любым Python; он сам найдёт venv узла из node.local.json):
@@ -73,13 +74,31 @@ def run_in_venv(venv: str, code: str) -> str:
         return f"  (не удалось запустить venv: {exc})\n"
 
 
-def write_report(dest_dir: pathlib.Path, host_tag: str) -> pathlib.Path | None:
-    """Пишет накопленный отчёт в {dest_dir}/801-diag-{host_tag}.txt (перезапись)."""
+REPORT_KEEP = 10  # сколько штампованных прогонов хранить на узел
+
+
+def write_report(dest_dir: pathlib.Path, host_tag: str, stamp: str) -> pathlib.Path | None:
+    """Пишет отчёт двумя файлами в {dest_dir}:
+
+    801-diag-{host}.txt                 — «последний» (стабильное имя, перезапись)
+    801-diag-{host}-{YYYY-MM-DD-HHMM}.txt — штамп прогона (история, не затирается)
+
+    Штампованных копий держим REPORT_KEEP последних — чтобы _meta не зарастал.
+    """
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in host_tag) or "node"
+        body = "\n".join(_BUF) + "\n"
         path = dest_dir / f"801-diag-{safe}.txt"
-        path.write_text("\n".join(_BUF) + "\n", encoding="utf-8")
+        path.write_text(body, encoding="utf-8")
+        try:
+            (dest_dir / f"801-diag-{safe}-{stamp}.txt").write_text(body, encoding="utf-8")
+            history = sorted(dest_dir.glob(f"801-diag-{safe}-*.txt"))
+            for old in history[:-REPORT_KEEP]:
+                old.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            # История — удобство, а не гарантия: «последний» уже записан.
+            print(f"  (не удалось записать штампованную копию отчёта: {exc})")
         return path
     except Exception as exc:  # noqa: BLE001
         print(f"  (не удалось записать отчёт в {dest_dir}: {exc})")
@@ -213,7 +232,9 @@ def main() -> int:
 
     cfg_path = pathlib.Path(args.repo) / "config" / "node.local.json"
     hostname = socket.gethostname()
-    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    started = dt.datetime.now()
+    now = started.strftime("%Y-%m-%d %H:%M:%S")
+    stamp = started.strftime("%Y-%m-%d-%H%M")  # штамп для имени файла отчёта
 
     emit(LINE)
     emit(" 801 ДИАГНОСТИКА УЗЛА")
@@ -480,10 +501,10 @@ def main() -> int:
     emit(" [8] — среда (пользователь/python-в-PATH/venv/env-переменные, Error 103).")
     emit(LINE)
 
-    written = write_report(hub_meta, host_label)
+    written = write_report(hub_meta, host_label, stamp)
     if written:
         # печатается ПОСЛЕ записи, поэтому в файле этой строки нет — и хорошо
-        print(f"\n>>> отчёт записан: {written}")
+        print(f"\n>>> отчёт записан: {written}  (+ копия со штампом {stamp})")
         print(">>> он лежит в _meta Hub — можно прочитать с любой машины / из чата")
     maybe_pause(args.auto)
     return 0
