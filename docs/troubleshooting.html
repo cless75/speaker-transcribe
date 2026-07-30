@@ -115,10 +115,11 @@
       <a href="#case-venv">1 · venv не запускается (103)</a>
       <a href="#case-drive">2 · сменилась буква диска</a>
       <a href="#case-owner">3 · задача есть, узел молчит</a>
-      <a href="#case-autostart">4 · запуск не задачей</a>
-      <a href="#case-token">5 · токен и диаризация</a>
-      <a href="#case-gpu">6 · CUDA не используется</a>
-      <a href="#case-console">7 · окно закрылось</a>
+      <a href="#case-cleanup">4 · чистка чужих задач</a>
+      <a href="#case-autostart">5 · запуск не задачей</a>
+      <a href="#case-token">6 · токен и диаризация</a>
+      <a href="#case-gpu">7 · CUDA не используется</a>
+      <a href="#case-console">8 · окно закрылось</a>
       <div class="grp">Куда дальше</div>
       <a href="node-setup.html">← Развёртывание узла</a>
       <a href="hf-token.html">Токен Hugging Face</a>
@@ -163,11 +164,12 @@
         <tr><td><code>No Python at '"C:\...\python.exe'</code>, выход <code>103</code></td><td>venv есть, но базовый Python недоступен — <a class="inl" href="#case-venv">разбор 1</a></td></tr>
         <tr><td>После <code>-SyncConfig</code> узел перестал видеть Hub</td><td>копия конфига в Hub отстала от машины — <a class="inl" href="#case-drive">разбор 2</a></td></tr>
         <tr><td>Задача зарегистрирована, но транскриптов нет</td><td>владелец задачи ≠ узловой юзер — <a class="inl" href="#case-owner">разбор 3</a></td></tr>
-        <tr><td>Окно PowerShell стартует само, а <code>watch.log</code> не растёт</td><td>запуск идёт не задачей, а из автозагрузки — <a class="inl" href="#case-autostart">разбор 4</a></td></tr>
-        <tr><td>Диаризация падает на загрузке модели</td><td>не принят gated-доступ pyannote или не виден токен — <a class="inl" href="#case-token">разбор 5</a></td></tr>
-        <tr><td><code>torch.cuda.is_available() == False</code></td><td>CPU-сборка torch вместо cu128, либо драйвер/eGPU не виден — <a class="inl" href="#case-gpu">разбор 6</a></td></tr>
+        <tr><td>Окно PowerShell стартует само, а <code>watch.log</code> не растёт</td><td>запуск идёт не задачей, а из автозагрузки — <a class="inl" href="#case-autostart">разбор 5</a></td></tr>
+        <tr><td>Диагностика пишет «задача не найдена», хотя она есть</td><td>задача принадлежит другому юзеру и не видна — <a class="inl" href="#case-cleanup">разбор 4</a></td></tr>
+        <tr><td>Диаризация падает на загрузке модели</td><td>не принят gated-доступ pyannote или не виден токен — <a class="inl" href="#case-token">разбор 6</a></td></tr>
+        <tr><td><code>torch.cuda.is_available() == False</code></td><td>CPU-сборка torch вместо cu128, либо драйвер/eGPU не виден — <a class="inl" href="#case-gpu">разбор 7</a></td></tr>
         <tr><td>«Could not load cudnn…»</td><td>нет cuDNN 9: поставить <code>nvidia-cudnn-cu12</code> в venv или системный cuDNN в PATH</td></tr>
-        <tr><td>Ошибку в консоли не успели прочитать</td><td>вывод надо писать файлом — <a class="inl" href="#case-console">разбор 7</a></td></tr>
+        <tr><td>Ошибку в консоли не успели прочитать</td><td>вывод надо писать файлом — <a class="inl" href="#case-console">разбор 8</a></td></tr>
         <tr><td><code>UnicodeEncodeError</code> в выводе</td><td>не задан <code>PYTHONUTF8=1</code> (cp1251 не кодирует юникод)</td></tr>
         <tr><td><code>ffmpeg not found</code></td><td>ffmpeg не в PATH — нужен для видео и нарезки клипов</td></tr>
         <tr><td>Процесс рапортует <code>exit 9</code></td><td>ложный teardown CUDA; проверять по наличию <code>transcript.md</code></td></tr>
@@ -241,8 +243,55 @@
         перепроверьте из admin-шелла — иначе получите дубль.</div>
     </section>
 
+    <section id="case-cleanup">
+      <h2><span class="n">4</span>Задача принадлежит другому пользователю: как найти и вычистить</h2>
+      <p><b>Симптом:</b> диагностика уверенно пишет «НЕ НАЙДЕНА», хотя задача точно была —
+        или, наоборот, после повторной регистрации узел начал вести себя странно: файлы то
+        обрабатываются дважды, то залипают в очереди.</p>
+      <p><b>Причина:</b> список задач Windows <b>урезается правами</b>. Задача, зарегистрированная
+        другим пользователем, не видна из-под текущего аккаунта и не удаляется им — а значит,
+        «не найдено» под обычным юзером не означает «не существует». Зарегистрировав вторую
+        задачу «взамен пропавшей», вы получаете два вотчера, конкурирующих за одну очередь.</p>
+
+      <h3>Шаг 1 · Увидеть все задачи вотчера (нужен admin-шелл)</h3>
+      <p>Ищем и по имени, и по действию — задача могла быть заведена руками под произвольным
+        именем или лежать в другой папке планировщика:</p>
+      <pre><code><span class="k">Get-ScheduledTask</span> | <span class="k">Where-Object</span> {
+  ($_.TaskName -match <span class="s">'watch|transcribe|audio'</span>) -or
+  ((($_.Actions | <span class="k">ForEach-Object</span> { <span class="s">"$($_.Execute) $($_.Arguments)"</span> }) -match <span class="s">'watch\.ps1|audio_inbox_watch'</span>))
+} | <span class="k">Select-Object</span> TaskPath, TaskName, State, @{n=<span class="s">'User'</span>;e={$_.Principal.UserId}}</code></pre>
+      <p>В выдаче важны три поля: <code>TaskPath</code> (папка планировщика — задача может лежать
+        не в корне), <code>User</code> (владелец) и <code>State</code>.</p>
+
+      <h3>Шаг 2 · Удалить лишние</h3>
+      <pre><code><span class="c">:: по имени — работает из admin-шелла независимо от владельца</span>
+<span class="k">Unregister-ScheduledTask</span> -TaskName <span class="s">'&lt;имя-из-списка&gt;'</span> -Confirm:$false
+<span class="c">:: если задача лежит в подпапке планировщика — указать и путь</span>
+<span class="k">Unregister-ScheduledTask</span> -TaskName <span class="s">'&lt;имя&gt;'</span> -TaskPath <span class="s">'\&lt;папка&gt;\'</span> -Confirm:$false
+<span class="c">:: штатный способ, если вы работаете из-под владельца задачи</span>
+.\scripts\install-watch-task.ps1 -Remove</code></pre>
+
+      <h3>Шаг 3 · Зарегистрировать одну правильную</h3>
+      <pre><code><span class="c">:: admin-шелл, поднятый ИЗ-ПОД узлового юзера</span>
+<span class="k">cd</span> C:\work\speaker-transcribe
+.\scripts\install-watch-task.ps1 -IntervalMinutes <span class="s">10</span>
+<span class="k">Start-ScheduledTask</span> -TaskName <span class="s">speaker-transcribe-watch</span></code></pre>
+      <div class="check"><b>Проверка:</b> повторите поиск из шага 1 — должна остаться <b>ровно одна</b>
+        задача, её <code>User</code> совпадает с узловым юзером, а в <code>logs\watch.log</code>
+        появляется <code>sweep start</code>.</div>
+      <div class="warn">Наследие прошлых установок живёт под старыми именами: на узлах встречается
+        <code>MS-Audio-Inbox-Watch</code>, запускающая скрипт из <b>другого репозитория</b>. Она может
+        быть <code>Disabled</code> и потому безвредна — но если включена, будет обрабатывать ту же
+        очередь своим, устаревшим кодом. Диагностика печатает строку <code>запускает : …</code> с
+        фактической командой задачи — сверяйте путь, а не только имя.</div>
+      <div class="note">Чужую сессию это не лечит: даже вычищенная и правильно зарегистрированная
+        задача работает лишь тогда, когда её владелец залогинен — иначе нет облачного диска.
+        См. <a class="inl" href="#case-owner">разбор 3</a> и раздел «Автозадача» в
+        <a class="inl" href="node-setup.html#task">Развёртывании</a>.</div>
+    </section>
+
     <section id="case-autostart">
-      <h2><span class="n">4</span>Оболочка стартует сама, но лога нет</h2>
+      <h2><span class="n">5</span>Оболочка стартует сама, но лога нет</h2>
       <p><b>Симптом:</b> при входе в систему всплывает окно PowerShell — похоже, вотчер работает, —
         но <code>watch.log</code> не обновляется, а планировщик задачи не показывает.</p>
       <p><b>Причина:</b> запуск сделан не задачей, а через <b>автозагрузку</b> — ярлык в папке
@@ -258,7 +307,7 @@
     </section>
 
     <section id="case-token">
-      <h2><span class="n">5</span>Диаризация не стартует: токен</h2>
+      <h2><span class="n">6</span>Диаризация не стартует: токен</h2>
       <p><b>Симптом:</b> ASR отрабатывает, а диаризация падает на загрузке модели pyannote.</p>
       <p><b>Причины по порядку проверки:</b></p>
       <ol>
@@ -283,7 +332,7 @@
     </section>
 
     <section id="case-gpu">
-      <h2><span class="n">6</span>Узел считает на CPU вместо GPU</h2>
+      <h2><span class="n">7</span>Узел считает на CPU вместо GPU</h2>
       <p><b>Симптом:</b> прогон идёт втрое дольше ожидаемого; в диагностике
         <code>torch.cuda : False</code> или <code>faster-whisper CUDA: НЕТ</code>.</p>
       <p><b>Что проверять:</b></p>
@@ -305,7 +354,7 @@
     </section>
 
     <section id="case-console">
-      <h2><span class="n">7</span>Окно закрылось раньше, чем прочитали ошибку</h2>
+      <h2><span class="n">8</span>Окно закрылось раньше, чем прочитали ошибку</h2>
       <p><b>Симптом:</b> скрипт запущен двойным кликом, что-то мелькнуло — и окна нет. Между машинами
         нет общего буфера обмена, переписать текст некуда.</p>
       <p><b>Лечение:</b> не читать консоль, а писать файл. Любой поток можно перенаправить целиком,

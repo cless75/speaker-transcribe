@@ -119,6 +119,7 @@
       <a href="#s4">4 · Токены</a>
       <a href="#s5">5 · Конфигурация</a>
       <a href="#s6">6 · Первый запуск</a>
+      <a href="#task">7 · Автозадача (watcher)</a>
       <div class="grp">Использование</div>
       <a href="#flow">Схема работы</a>
       <a href="#use">Режимы запуска</a>
@@ -126,6 +127,7 @@
       <a href="#multi">Мультиузел</a>
       <div class="grp">Справка</div>
       <a href="#diag">Диагностика и обслуживание</a>
+      <a href="#uninstall">Удаление узла</a>
       <a href="troubleshooting.html">Troubleshooting →</a>
       <a href="#privacy">Приватность</a>
       <a href="#macos">macOS (Apple Silicon)</a>
@@ -383,6 +385,107 @@
         (см. <a class="inl" href="#quick">Быстрый запуск</a>).</div>
     </section>
 
+    <section id="task">
+      <h2><span class="n">7</span>Автозадача: вотчер по расписанию</h2>
+      <p class="step-meta">headless-режим: узел сам разбирает очередь каждые N минут</p>
+      <p>До сих пор всё запускалось руками. Чтобы узел работал сам, вотчер вешают на
+        <b>Task Scheduler</b>: задача раз в N минут делает один прогон
+        (<code>watch.ps1 -Once</code>) — сканирует источники, забирает новые файлы, пишет
+        транскрипты в Hub и дописывает <code>logs\watch.log</code>.</p>
+
+      <h3>7.1 · Регистрация</h3>
+      <p>Скрипт сам находит пути (репозиторий может лежать где угодно) и требует
+        <b>прав администратора</b> — регистрация задачи без них невозможна:</p>
+      <pre><code><span class="c">:: PowerShell ОТ АДМИНИСТРАТОРА, поднятый из-под узлового юзера</span>
+<span class="k">cd</span> C:\work\speaker-transcribe
+.\scripts\install-watch-task.ps1 -IntervalMinutes <span class="s">10</span></code></pre>
+      <p>Либо правый клик по <code>scripts\install-watch-task.cmd</code> →
+        <b>«Запуск от имени администратора»</b> (файл сам поднимет права через UAC).</p>
+      <div class="danger"><b>Из-под какого юзера поднят admin-шелл — тому задача и достанется.</b>
+        Скрипт регистрирует её на <code>$env:USERNAME</code> своего шелла
+        (<code>-LogonType Interactive</code>). Если повысить права <i>другой</i> админ-учёткой,
+        задача уйдёт ей — а у неё нет ни примонтированного облачного диска, ни venv узла, и
+        вотчер будет молча падать. Разбор симптома —
+        <a class="inl" href="troubleshooting.html#case-owner">задача есть, узел молчит</a>.</div>
+
+      <h3>7.2 · Параметры</h3>
+      <table>
+        <tr><th>Флаг</th><th>Значение</th></tr>
+        <tr><td><code>-TaskName</code></td><td>имя задачи; по умолчанию <code>speaker-transcribe-watch</code></td></tr>
+        <tr><td><code>-IntervalMinutes</code></td><td>период прогонов, по умолчанию <b>10</b></td></tr>
+        <tr><td><code>-Config</code></td><td>путь к конфигу; по умолчанию <code>&lt;repo&gt;\config\node.local.json</code></td></tr>
+        <tr><td><code>-PythonBin</code></td><td>venv-python для прогонов; без него используется значение по умолчанию из <code>watch.ps1</code></td></tr>
+        <tr><td><code>-LogDir</code></td><td>каталог для <code>watch.log</code>; по умолчанию <code>&lt;repo&gt;\logs</code></td></tr>
+        <tr><td><code>-NoAutoUpdate</code></td><td>отключить самообновление: по умолчанию каждый прогон сначала делает <code>git pull --ff-only</code></td></tr>
+        <tr><td><code>-Remove</code></td><td>удалить задачу</td></tr>
+      </table>
+
+      <h3>7.3 · Что задача делает на самом деле</h3>
+      <ul>
+        <li>триггер <b>при входе пользователя</b> + повтор каждые N минут без ограничения длительности;</li>
+        <li>работает <b>только пока юзер залогинен</b> — иначе облачный диск не смонтирован и Hub недоступен;</li>
+        <li>параллельные прогоны запрещены (<code>IgnoreNew</code>): новый прогон не начнётся, пока идёт предыдущий;</li>
+        <li>упавший прогон перезапускается до 3 раз с интервалом 2 минуты;</li>
+        <li>весь вывод дописывается в <code>logs\watch.log</code> — по нему и судят о жизни узла.</li>
+      </ul>
+      <div class="note"><b>Самообновление.</b> По умолчанию задача каждый прогон подтягивает свежий код
+        (<code>git pull --ff-only</code>, best-effort). Поскольку параллельные прогоны запрещены, обновление
+        всегда происходит <i>между</i> прогонами, а не посреди обработки файла.</div>
+
+      <h3>7.4 · Проверка</h3>
+      <pre><code><span class="c">:: запустить прямо сейчас, не дожидаясь интервала</span>
+<span class="k">Start-ScheduledTask</span> -TaskName <span class="s">speaker-transcribe-watch</span>
+<span class="c">:: состояние и результат последнего запуска</span>
+<span class="k">Get-ScheduledTaskInfo</span> -TaskName <span class="s">speaker-transcribe-watch</span>
+<span class="c">:: живой лог</span>
+<span class="k">Get-Content</span> .\logs\watch.log -Tail <span class="s">20</span> -Wait</code></pre>
+      <div class="check"><b>Успех:</b> в логе появляются строки
+        <code>sweep start (host=…)</code> и <code>queue empty; nothing more to process</code>,
+        а <code>LastTaskResult</code> равен <code>0</code>.</div>
+      <p>Одной командой «жив ли узел вообще» отвечает health-проверка — она смотрит задачу,
+        свежесть лога, доступность Hub, наличие токена и состояние очереди:</p>
+      <pre><code>.\scripts\watch-health.ps1
+<span class="c">:: код возврата: 0 = OK, 1 = деградация (лог протух, истёк claim), 2 = не работает</span></code></pre>
+      <div class="warn"><code>watch.log</code> пишет <b>только задача</b>. Ручной
+        <code>watch.ps1 -Once</code> печатает в консоль и в лог не попадает — не пугайтесь «пустого»
+        лога после ручного прогона.</div>
+
+      <h3>7.5 · Удалить или пере-регистрировать</h3>
+      <pre><code><span class="c">:: удалить (из admin-шелла того юзера, которому задача принадлежит)</span>
+.\scripts\install-watch-task.ps1 -Remove
+<span class="c">:: посмотреть ВСЕ задачи вотчера, включая чужие (нужен admin)</span>
+<span class="k">Get-ScheduledTask</span> | <span class="k">Where-Object</span> {
+  ($_.TaskName -match <span class="s">'watch|transcribe|audio'</span>) -or
+  ((($_.Actions | <span class="k">ForEach-Object</span> { <span class="s">"$($_.Execute) $($_.Arguments)"</span> }) -match <span class="s">'watch\.ps1|audio_inbox_watch'</span>))
+} | <span class="k">Select-Object</span> TaskPath, TaskName, State, @{n=<span class="s">'User'</span>;e={$_.Principal.UserId}}
+<span class="c">:: снести лишнюю по имени</span>
+<span class="k">Unregister-ScheduledTask</span> -TaskName <span class="s">'&lt;имя&gt;'</span> -Confirm:$false</code></pre>
+      <div class="warn"><b>Две задачи на один узел — это не удвоенная скорость, а конкуренция за очередь.</b>
+        Прежде чем регистрировать новую, убедитесь, что старой (в том числе под другим юзером и под
+        старым именем) не осталось. Перечисление задач урезается правами, поэтому проверять надо
+        из-под администратора.</div>
+
+      <h3>7.6 · Чтобы узел пережил перезагрузку</h3>
+      <p>Задача с триггером «при входе» оживёт только если в систему кто-то вошёл. Для узла,
+        который должен подниматься сам:</p>
+      <ol>
+        <li><b>Авто-логин узлового юзера</b> — Sysinternals <b>Autologon</b> (пароль хранится
+          LSA-шифрованным) или <code>netplwiz</code>. Это осознанный размен: физический доступ
+          к машине = доступ к сессии.</li>
+        <li><b>Облачный диск при старте</b> — включить «запускать при входе в систему» и убедиться,
+          что точка монтирования совпадает с <code>hub_root</code> в конфиге.</li>
+        <li><b>Секреты не в пользовательском scope</b> — переменная уровня <b>Machine</b> либо файл
+          в Hub (<code>"secrets": { "hf_token": "file:{hub_root}/_meta/.hf-token" }</code>), иначе
+          задача их не увидит.</li>
+        <li><b>Машина не должна засыпать</b>:</li>
+      </ol>
+      <pre><code><span class="k">powercfg</span> /change standby-timeout-ac <span class="s">0</span>
+<span class="k">powercfg</span> /change hibernate-timeout-ac <span class="s">0</span></code></pre>
+      <div class="note">Переключаясь на другого пользователя, выбирайте <b>«Сменить пользователя»</b>,
+        а не «Выход»: при смене сессия узла остаётся жить — диск смонтирован, задача продолжает
+        тикать. «Выход» уничтожает сессию, и узел молчит до следующего входа.</div>
+    </section>
+
     <section id="flow">
       <h2><span class="n">⛓</span>Схема работы</h2>
       <p>Что движок делает с файлом — от входа до транскрипта:</p>
@@ -565,6 +668,64 @@
         <b>системным</b> python.</div>
     </section>
 
+
+    <section id="uninstall">
+      <h2><span class="n">🗑</span>Удаление узла с машины</h2>
+      <p class="step-meta">снять автозапуск · вычистить окружение · ничего не потерять в Hub</p>
+      <p>Узел оставляет след в нескольких местах сразу: задача планировщика, возможные записи
+        автозапуска, venv, кэш с голосовыми отпечатками, логи, конфиг, переменные окружения и
+        junction-линки. Вычищает всё это <code>scripts\uninstall-node.ps1</code> — каждый пункт за
+        своим флагом, и <b>по умолчанию в режиме плана</b>:</p>
+      <pre><code><span class="c">:: посмотреть, что будет удалено (ничего не трогает)</span>
+.\scripts\uninstall-node.ps1 -All
+<span class="c">:: снять только автозапуск: задачи, записи Startup/Run, живые прогоны</span>
+.\scripts\uninstall-node.ps1 -Force
+<span class="c">:: полная очистка</span>
+.\scripts\uninstall-node.ps1 -All -Force</code></pre>
+      <div class="danger"><b>Без <code>-Force</code> не удаляется ничего.</b> Скрипт печатает план со
+        всеми путями — прочитайте его прежде, чем повторять команду с <code>-Force</code>. Порядок
+        именно такой: сначала посмотреть, потом применить.</div>
+
+      <h3>Что чистится</h3>
+      <table>
+        <tr><th>Флаг</th><th>Что удаляет</th></tr>
+        <tr><td><code>-Tasks</code></td><td>все задачи планировщика, чьё имя <b>или действие</b> ведёт на этот вотчер — включая заведённые вручную и под старыми именами</td></tr>
+        <tr><td><code>-Autostart</code></td><td>ярлыки в папке «Автозагрузка» и ключи <code>Run</code>, указывающие на вотчер</td></tr>
+        <tr><td><code>-Processes</code></td><td>прогон, идущий прямо сейчас</td></tr>
+        <tr><td><code>-Venv</code></td><td>дерево venv из <code>transcribe_python</code></td></tr>
+        <tr><td><code>-Cache</code></td><td><code>cache_root</code> — вместе с локальным стором голосовых отпечатков</td></tr>
+        <tr><td><code>-Logs</code></td><td><code>&lt;repo&gt;\logs</code></td></tr>
+        <tr><td><code>-Config</code></td><td><code>config\node.local.json</code>, его <code>.bak</code> и <code>.last-known-hub</code></td></tr>
+        <tr><td><code>-EnvVars</code></td><td><code>HF_TOKEN</code> / <code>HUGGINGFACE_TOKEN</code> / <code>HUGGING_FACE_HUB_TOKEN</code> на уровне User и Machine</td></tr>
+        <tr><td><code>-Links</code></td><td>junction/symlink из <code>path_links</code> — <b>только сами линки</b>; реальный каталог по тому же пути скрипт не тронет</td></tr>
+        <tr><td><code>-All</code></td><td>всё перечисленное</td></tr>
+      </table>
+      <p>Без флагов чистится <b>набор по умолчанию</b> — задачи, автозапуск и живые прогоны: этого
+        достаточно, чтобы узел перестал работать, но данные и окружение остались на месте.</p>
+
+      <h3>Чего скрипт не трогает</h3>
+      <ul>
+        <li><b>Hub</b> — транскрипты, реестры голосов, конфиги узлов в <code>_meta</code>. Это общая
+          работа нескольких машин: снятие одного узла не должно её удалять.</li>
+        <li><b>Сам репозиторий</b> — скрипт лежит внутри него; папку удаляют вручную, когда всё
+          остальное вычищено.</li>
+        <li><b>Кэш моделей</b> в профиле пользователя (<code>~\.cache\huggingface</code>) — он общий
+          с другими проектами, чистить осознанно.</li>
+      </ul>
+
+      <h3>Права</h3>
+      <div class="warn">Задачу, зарегистрированную <b>другим пользователем</b>, из обычной сессии не
+        видно и не удалить: список задач урезается правами. Скрипт честно скажет «чужая задача —
+        нужен admin-шелл, пропуск» вместо тихого пропуска. Для полной очистки запускайте его из
+        PowerShell от администратора; очистка Machine-переменных тоже требует прав.
+        Подробный разбор — <a class="inl" href="troubleshooting.html#case-cleanup">чистка чужих задач</a>.</div>
+
+      <h3>Проверка после удаления</h3>
+      <pre><code>.\scripts\uninstall-node.ps1 -All        <span class="c">:: повторный план должен быть пустым</span>
+<span class="k">Get-ScheduledTask</span> | <span class="k">Where-Object</span> TaskName -match <span class="s">'watch|transcribe'</span></code></pre>
+      <div class="check"><b>Готово, если:</b> план не содержит строк <code>[dry-run] снять</code> и
+        <code>[dry-run] удалить</code>, а поиск задач ничего не возвращает (из admin-шелла).</div>
+    </section>
     <section id="trouble">
       <h2><span class="n">?</span>Troubleshooting</h2>
       <p class="step-meta">разборы поломок вынесены в отдельный документ</p>
