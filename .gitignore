@@ -36,6 +36,9 @@ credentials*.json
 # ─── Run logs ─────────────────────────────────────────────
 logs/
 
+# ─── Node-local runtime state (written next to the config) ─
+config/.last-known-hub
+
 # ─── Python / virtualenv ──────────────────────────────────
 __pycache__/
 *.py[cod]
