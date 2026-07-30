@@ -404,6 +404,17 @@ def main() -> int:
             kind = s.get("discover") or s.get("route") or ""
             emit(f"  source         : {root_tpl}  ->  " +
                  ("ок" if rp.exists() else "НЕ НАЙДЕН") + (f" ({kind})" if kind else ""))
+        for ln in (cfg.get("path_links") or []):
+            if not isinstance(ln, dict):
+                continue
+            lp = str(ln.get("link") or "")
+            tg = str(ln.get("target") or "")
+            if not lp:
+                continue
+            lp_ok = pathlib.Path(lp).expanduser().exists()
+            tg_ok = bool(tg) and pathlib.Path(tg).expanduser().exists()
+            emit(f"  path_link      : {lp} -> {tg}  [линк: " +
+                 ("есть" if lp_ok else "НЕТ") + f"; target: " + ("ок" if tg_ok else "НЕ НАЙДЕН") + "]")
     else:
         emit("  (конфиг не прочитан — проверки Hub/окна/источников пропущены)")
 

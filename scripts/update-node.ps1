@@ -87,6 +87,38 @@ if ($SyncConfig) {
     if ($cfg.runtime.device -eq "gpu") { Warn "ВНИМАНИЕ: device='gpu' невалидно, движок ждёт 'cuda' — запусти с -SyncConfig" }
 }
 
+# --- 2b) линки путей (стабильный путь к Hub, если GDrive монтируется иначе) ----
+Step "2b. Линки путей (path_links)"
+$cfgNow = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$links  = @($cfgNow.path_links)
+if (-not $links -or $links.Count -eq 0) {
+    Write-Host "   не заданы (config: path_links: [])"
+} else {
+    foreach ($l in $links) {
+        $lp = $l.link; $tg = $l.target
+        $kind = if ($l.kind) { $l.kind } else { "Junction" }
+        if (-not $lp -or -not $tg) { Warn "   у записи нет link/target — пропуск"; continue }
+        if (Test-Path $lp) {
+            Ok "путь уже существует: $lp"
+        } elseif (-not (Test-Path $tg)) {
+            Warn "target не найден: $tg — Google Drive не смонтирован под этим юзером? линк НЕ создан"
+            Warn "  (если диск виртуальный per-user — линк не поможет; см. §6: авто-логин юзера с примонтированным диском)"
+        } else {
+            Do-Run "New-Item -ItemType $kind '$lp' -> '$tg'" {
+                $parent = Split-Path $lp -Parent
+                if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+                try {
+                    New-Item -ItemType $kind -Path $lp -Target $tg -Force -ErrorAction Stop | Out-Null
+                    Ok "создан ${kind}: $lp -> $tg"
+                } catch {
+                    Warn "не удалось создать ${kind}: $($_.Exception.Message)"
+                    Warn "  (Junction — только локальный NTFS-target; для виртуального/сетевого попробуй kind: SymbolicLink, нужен admin/dev-mode)"
+                }
+            }
+        }
+    }
+}
+
 # --- 3) недостающие пакеты ------------------------------------------------
 Step "3. Доустановка недостающих пакетов (opt-стадии)"
 $ensure = @("rapidocr_onnxruntime", "speechbrain")
