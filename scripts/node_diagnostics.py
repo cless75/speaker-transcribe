@@ -105,6 +105,23 @@ def write_report(dest_dir: pathlib.Path, host_tag: str, stamp: str) -> pathlib.P
         return None
 
 
+def write_local_copy(repo: pathlib.Path, host_tag: str, stamp: str) -> pathlib.Path | None:
+    """Дублирует отчёт в <repo>/logs/ — след на узле, когда Hub недоступен
+    или окно консоли закрылось раньше, чем человек успел прочитать вывод."""
+    try:
+        logs = repo / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in host_tag) or "node"
+        path = logs / f"node-diag-{safe}-{stamp}.txt"
+        path.write_text("\n".join(_BUF) + "\n", encoding="utf-8")
+        for old in sorted(logs.glob(f"node-diag-{safe}-*.txt"))[:-REPORT_KEEP]:
+            old.unlink(missing_ok=True)
+        return path
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (не удалось записать локальную копию отчёта: {exc})")
+        return None
+
+
 def default_repo() -> pathlib.Path:
     """Repo root. When run from scripts/ inside the repo, that's the parent dir;
     from a stray copy (e.g. Hub/_meta) fall back to the canonical install path."""
@@ -526,6 +543,9 @@ def main() -> int:
         # печатается ПОСЛЕ записи, поэтому в файле этой строки нет — и хорошо
         print(f"\n>>> отчёт записан: {written}  (+ копия со штампом {stamp})")
         print(">>> он лежит в _meta Hub — можно прочитать с любой машины / из чата")
+    local = write_local_copy(pathlib.Path(args.repo), host_label, stamp)
+    if local:
+        print(f">>> локальная копия (на случай закрытого окна / недоступного Hub): {local}")
     maybe_pause(args.auto)
     return 0
 
