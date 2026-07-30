@@ -132,21 +132,31 @@ Probe "env vars referenced by the config (values never printed)" {
     }
 }
 
+# Match on the ACTION, not just the name: the task may have been created by hand
+# under a different name or in another scheduler folder, and a name-only lookup
+# then reports a running watcher as "not registered".
 Probe "scheduled task" {
+    $pat = 'watch\.ps1|audio_inbox_watch|speaker-transcribe|MS-Audio-Inbox'
     $found = $false
-    foreach ($n in "speaker-transcribe-watch", "MS-Audio-Inbox-Watch") {
-        $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
-        if ($t) {
+    foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+        $act = ($t.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join ' '
+        if (($t.TaskName -match $pat) -or ($act -match $pat)) {
             $found = $true
-            $i = Get-ScheduledTaskInfo -TaskName $n -ErrorAction SilentlyContinue
-            "name      : " + $n
+            $i = Get-ScheduledTaskInfo -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction SilentlyContinue
+            "name      : " + $t.TaskPath + $t.TaskName
             "state     : " + $t.State
             "owner     : " + $t.Principal.UserId + "  (logon: " + $t.Principal.LogonType + ")"
             "last run  : " + $i.LastRunTime + "  result: " + $i.LastTaskResult
             "next run  : " + $i.NextRunTime
+            "action    : " + $act
+            ""
         }
     }
-    if (-not $found) { "NOT REGISTERED (neither speaker-transcribe-watch nor MS-Audio-Inbox-Watch)" }
+    if (-not $found) {
+        "NOT FOUND (no task matches name or action)"
+        "NB: task enumeration is limited by privileges - a task owned by another user"
+        "    is invisible here. Re-check from an elevated shell."
+    }
 }
 
 if ($hubRoot) {

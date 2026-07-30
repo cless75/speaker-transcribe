@@ -168,47 +168,124 @@ def current_user() -> str:
         return os.environ.get("USERNAME") or os.environ.get("USER") or "?"
 
 
-def query_watch_task(cur_user: str) -> list[str]:
-    """Состояние scheduled task вотчера (Windows). Стабильные поля через PowerShell.
+# Ищем вотчер ПО ДЕЙСТВИЮ, а не по имени: задача могла быть заведена руками под
+# другим именем, из другой папки планировщика, или автозапуск сделан вовсе не
+# планировщиком (папка «Автозагрузка», ключ Run). Раньше проверялись только два
+# фиксированных имени — и запущенный вотчер честно рапортовался как «НЕ НАЙДЕНА».
+_WATCH_PROBE_PS = r"""
+$ErrorActionPreference='SilentlyContinue'
+$pat = 'watch\.ps1|audio_inbox_watch|speaker-transcribe|MS-Audio-Inbox'
+foreach ($t in (Get-ScheduledTask)) {
+  $act = ($t.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join ' '
+  if (($t.TaskName -match $pat) -or ($act -match $pat)) {
+    $i = Get-ScheduledTaskInfo -TaskName $t.TaskName -TaskPath $t.TaskPath
+    $exe = ($t.Actions | ForEach-Object { $_.Execute } | Select-Object -First 1)
+    Write-Output ('TASK|{0}{1}|{2}|{3}|{4}|{5}|{6}|{7}' -f $t.TaskPath,$t.TaskName,$t.State,
+      $t.Principal.UserId,$t.Principal.LogonType,$i.LastRunTime,$i.LastTaskResult,$exe)
+  }
+}
+$startupDirs = @([Environment]::GetFolderPath('Startup'),
+                 [Environment]::GetFolderPath('CommonStartup'))
+$sh = New-Object -ComObject WScript.Shell
+foreach ($d in $startupDirs) {
+  if ($d -and (Test-Path $d)) {
+    foreach ($f in (Get-ChildItem $d -File)) {
+      # Ярлык интересен по СОДЕРЖИМОМУ (куда ведёт), а не по имени: посторонние
+      # автозапуски к вотчеру отношения не имеют и в отчёте только мешают.
+      $target = ''
+      if ($f.Extension -eq '.lnk') {
+        $lnk = $sh.CreateShortcut($f.FullName)
+        $target = "$($lnk.TargetPath) $($lnk.Arguments)"
+      }
+      if (($f.Name -match $pat) -or ($target -match $pat)) {
+        Write-Output ('STARTUP|folder|{0}{1}' -f $f.FullName, $(if ($target) { " -> $target" } else { '' }))
+      }
+    }
+  }
+}
+foreach ($hive in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+                    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run')) {
+  $k = Get-ItemProperty -Path $hive
+  if ($k) {
+    foreach ($p in $k.PSObject.Properties) {
+      if ($p.Name -notlike 'PS*' -and ("$($p.Value)" -match $pat)) {
+        Write-Output ('STARTUP|{0}|{1} = {2}' -f $hive.Split('\')[0], $p.Name, $p.Value)
+      }
+    }
+  }
+}
+# Сама проверка идёт из PowerShell и её командная строка содержит эти же паттерны —
+# без отсечки диагностика «находила» саму себя и рапортовала о работающем вотчере.
+$selfPat = 'node_diagnostics|collect-diag|Win32_Process|Get-ScheduledTask'
+foreach ($p in (Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe' OR Name='python.exe'")) {
+  if ($p.ProcessId -eq $PID) { continue }
+  if ("$($p.CommandLine)" -match $selfPat) { continue }
+  if ("$($p.CommandLine)" -match $pat) {
+    $line = "$($p.CommandLine)"
+    if ($line.Length -gt 110) { $line = $line.Substring(0,110) + '...' }
+    Write-Output ('PROC|{0}|{1}|{2}' -f $p.ProcessId,$p.Name,$line)
+  }
+}
+"""
 
-    Возвращает строки для отчёта. Владелец задачи печатается отдельной строкой:
-    задача наследует PATH/venv/примонтированный GDrive ТОГО юзера, на кого она
-    зарегистрирована, — расхождение с текущим юзером и есть частая причина тишины.
+
+def query_watch_task(cur_user: str) -> list[str]:
+    """Что вообще запускает вотчер на этой машине: задачи планировщика (по имени И
+    по действию), автозапуск через «Автозагрузку»/Run и живые процессы.
+
+    Владелец задачи важен отдельно: задача наследует PATH/venv/примонтированный
+    GDrive ТОГО юзера, на кого зарегистрирована, — расхождение с текущим юзером
+    и есть частая причина тишины. Плюс: перечисление задач ограничено правами,
+    поэтому «не найдено» из-под обычного юзера не означает «не существует».
     """
     if sys.platform != "win32":
         return ["  scheduled task : (не Windows — проверь launchd/cron вручную)"]
-    ps = (
-        "$ErrorActionPreference='SilentlyContinue';"
-        "foreach($n in 'speaker-transcribe-watch','MS-Audio-Inbox-Watch'){"
-        "$t=Get-ScheduledTask -TaskName $n;"
-        "if($t){$i=Get-ScheduledTaskInfo -TaskName $n;"
-        "Write-Output ('{0}|{1}|{2}|{3}|{4}|{5}' -f $n,$t.State,$i.LastRunTime,$i.LastTaskResult,"
-        "$t.Principal.UserId,$t.Principal.LogonType);break}}"
-    )
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-                           capture_output=True, text=True, timeout=25)
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WATCH_PROBE_PS],
+                           capture_output=True, text=True, timeout=90)
         out = (r.stdout or "").strip()
     except Exception as exc:  # noqa: BLE001
         return [f"  scheduled task : (ошибка запроса: {exc})"]
-    if not out:
-        return ["  scheduled task : НЕ НАЙДЕНА (ни speaker-transcribe-watch, ни "
-                "MS-Audio-Inbox-Watch) — зарегистрировать install-watch-task.ps1 (admin)"]
-    parts = (out.split("|") + ["?"] * 6)[:6]
-    name, state, last, res, owner, logon = parts
-    hint = ""
-    if str(res).strip() in ("267011", "267009"):
-        hint = " (267011=ни разу не запускалась / 267009=выполняется)"
-    lines = [f"  scheduled task : '{name}' — {state}, посл.запуск {last}, результат {res}{hint}"]
-    # Сравниваем по короткому имени: в задаче обычно DOMAIN\user или .\user.
-    owner_short = str(owner).split("\\")[-1].strip()
-    same = owner_short.lower() == str(cur_user).strip().lower()
-    mark = "= текущий юзер" if same else f"ВНИМАНИЕ: не текущий юзер ({cur_user})"
-    lines.append(f"  владелец задачи: {owner} (logon: {logon})  ->  {mark}")
-    if not same:
-        lines.append("    -> задача видит venv/PATH/GDrive ЭТОГО юзера, а не твоего: если у него нет")
-        lines.append("       примонтированного Hub или рабочего venv — вотчер молчит. Лечение: пере-")
-        lines.append("       регистрировать install-watch-task.ps1 из admin-шелла нужного юзера.")
+
+    tasks, startups, procs = [], [], []
+    for raw in out.splitlines():
+        row = raw.strip()
+        if row.startswith("TASK|"):
+            tasks.append((row.split("|") + ["?"] * 8)[1:8])
+        elif row.startswith("STARTUP|"):
+            startups.append((row.split("|", 2) + ["?", "?"])[1:3])
+        elif row.startswith("PROC|"):
+            procs.append((row.split("|", 3) + ["?"] * 3)[1:4])
+
+    lines: list[str] = []
+    if not tasks:
+        lines.append("  scheduled task : НЕ НАЙДЕНА (ни по имени, ни по действию) — "
+                     "зарегистрировать install-watch-task.ps1 (admin)")
+        lines.append("    NB: список задач урезается правами — под обычным юзером чужие задачи "
+                     "не видны. Проверь ещё раз из admin-шелла.")
+    for name, state, owner, logon, last, res, exe in tasks:
+        hint = ""
+        if str(res).strip() in ("267011", "267009"):
+            hint = " (267011=ни разу не запускалась / 267009=выполняется)"
+        lines.append(f"  scheduled task : '{name}' — {state}, посл.запуск {last}, результат {res}{hint}")
+        owner_short = str(owner).split("\\")[-1].strip()
+        same = owner_short.lower() == str(cur_user).strip().lower()
+        mark = "= текущий юзер" if same else f"ВНИМАНИЕ: не текущий юзер ({cur_user})"
+        lines.append(f"  владелец задачи: {owner} (logon: {logon})  ->  {mark}")
+        lines.append(f"  запускает      : {exe}")
+        if not same:
+            lines.append("    -> задача видит venv/PATH/GDrive ЭТОГО юзера, а не твоего: если у него нет")
+            lines.append("       примонтированного Hub или рабочего venv — вотчер молчит. Лечение: пере-")
+            lines.append("       регистрировать install-watch-task.ps1 из admin-шелла нужного юзера.")
+    for src, entry in startups:
+        lines.append(f"  автозапуск     : {src} -> {entry}")
+        lines.append("    -> это НЕ задача планировщика: запуск идёт при входе юзера и в лог задачи "
+                     "не пишет; если дублирует вотчер — убрать, чтобы не было двух прогонов")
+    if procs:
+        for pid, pname, cmd in procs:
+            lines.append(f"  живой процесс  : pid {pid} · {pname} · {cmd}")
+    elif tasks:
+        lines.append("  живой процесс  : сейчас не запущен (между прогонами это нормально)")
     return lines
 
 
