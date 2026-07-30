@@ -142,34 +142,57 @@ def maybe_pause(auto: bool) -> None:
         pass
 
 
-def query_watch_task() -> str:
-    """Состояние scheduled task вотчера (Windows). Стабильные поля через PowerShell."""
+def current_user() -> str:
+    """Юзер, под которым идёт ЭТОТ прогон (не обязательно владелец задачи)."""
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001
+        return os.environ.get("USERNAME") or os.environ.get("USER") or "?"
+
+
+def query_watch_task(cur_user: str) -> list[str]:
+    """Состояние scheduled task вотчера (Windows). Стабильные поля через PowerShell.
+
+    Возвращает строки для отчёта. Владелец задачи печатается отдельной строкой:
+    задача наследует PATH/venv/примонтированный GDrive ТОГО юзера, на кого она
+    зарегистрирована, — расхождение с текущим юзером и есть частая причина тишины.
+    """
     if sys.platform != "win32":
-        return "(не Windows — проверь launchd/cron вручную)"
+        return ["  scheduled task : (не Windows — проверь launchd/cron вручную)"]
     ps = (
         "$ErrorActionPreference='SilentlyContinue';"
         "foreach($n in 'speaker-transcribe-watch','MS-Audio-Inbox-Watch'){"
         "$t=Get-ScheduledTask -TaskName $n;"
         "if($t){$i=Get-ScheduledTaskInfo -TaskName $n;"
-        "Write-Output ('{0}|{1}|{2}|{3}' -f $n,$t.State,$i.LastRunTime,$i.LastTaskResult);break}}"
+        "Write-Output ('{0}|{1}|{2}|{3}|{4}|{5}' -f $n,$t.State,$i.LastRunTime,$i.LastTaskResult,"
+        "$t.Principal.UserId,$t.Principal.LogonType);break}}"
     )
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
                            capture_output=True, text=True, timeout=25)
         out = (r.stdout or "").strip()
     except Exception as exc:  # noqa: BLE001
-        return f"(ошибка запроса: {exc})"
+        return [f"  scheduled task : (ошибка запроса: {exc})"]
     if not out:
-        return "НЕ НАЙДЕНА (ни speaker-transcribe-watch, ни MS-Audio-Inbox-Watch) — зарегистрировать install-watch-task.ps1 (admin)"
-    parts = out.split("|")
-    name = parts[0] if len(parts) > 0 else "?"
-    state = parts[1] if len(parts) > 1 else "?"
-    last = parts[2] if len(parts) > 2 else "?"
-    res = parts[3] if len(parts) > 3 else "?"
+        return ["  scheduled task : НЕ НАЙДЕНА (ни speaker-transcribe-watch, ни "
+                "MS-Audio-Inbox-Watch) — зарегистрировать install-watch-task.ps1 (admin)"]
+    parts = (out.split("|") + ["?"] * 6)[:6]
+    name, state, last, res, owner, logon = parts
     hint = ""
     if str(res).strip() in ("267011", "267009"):
         hint = " (267011=ни разу не запускалась / 267009=выполняется)"
-    return f"'{name}' — {state}, посл.запуск {last}, результат {res}{hint}"
+    lines = [f"  scheduled task : '{name}' — {state}, посл.запуск {last}, результат {res}{hint}"]
+    # Сравниваем по короткому имени: в задаче обычно DOMAIN\user или .\user.
+    owner_short = str(owner).split("\\")[-1].strip()
+    same = owner_short.lower() == str(cur_user).strip().lower()
+    mark = "= текущий юзер" if same else f"ВНИМАНИЕ: не текущий юзер ({cur_user})"
+    lines.append(f"  владелец задачи: {owner} (logon: {logon})  ->  {mark}")
+    if not same:
+        lines.append("    -> задача видит venv/PATH/GDrive ЭТОГО юзера, а не твоего: если у него нет")
+        lines.append("       примонтированного Hub или рабочего venv — вотчер молчит. Лечение: пере-")
+        lines.append("       регистрировать install-watch-task.ps1 из admin-шелла нужного юзера.")
+    return lines
 
 
 def collect_env_refs(cfg: dict | None) -> list[str]:
@@ -392,7 +415,8 @@ def main() -> int:
 
     # -----------------------------------------------------------------------
     emit("\n[7] Вотчер / источники / расписание (почему может быть тихо)")
-    emit(f"  scheduled task : {query_watch_task()}")
+    for line in query_watch_task(current_user()):
+        emit(line)
 
     if cfg is not None:
         node = cfg.get("node") or {}
@@ -450,12 +474,8 @@ def main() -> int:
 
     # -----------------------------------------------------------------------
     emit("\n[8] Среда и переменные (Error 103: python не найден в PATH)")
-    try:
-        import getpass
-        cur_user = getpass.getuser()
-    except Exception:  # noqa: BLE001
-        cur_user = os.environ.get("USERNAME") or os.environ.get("USER") or "?"
-    emit(f"  текущий пользователь : {cur_user}")
+    cur_user = current_user()
+    emit(f"  текущий пользователь : {cur_user}  (юзер ЭТОГО прогона; владелец задачи — в [7])")
     pth = shutil.which("python") or shutil.which("python3")
     emit("  python в PATH        : " +
          (pth or "НЕ НАЙДЕН — bare python не резолвится (это Error 103; задача под другим юзером?)"))
