@@ -125,6 +125,7 @@
       <a href="#quick">Быстрый запуск (.ps1)</a>
       <a href="#multi">Мультиузел</a>
       <div class="grp">Справка</div>
+      <a href="#diag">Диагностика и обслуживание</a>
       <a href="#trouble">Troubleshooting</a>
       <a href="#privacy">Приватность</a>
       <a href="#macos">macOS (Apple Silicon)</a>
@@ -320,7 +321,12 @@
       <pre><code><span class="c">:: PowerShell — на текущую сессию:</span>
 <span class="k">$env:HF_TOKEN</span> = <span class="s">"hf_ВАШ_ТОКЕН"</span>
 <span class="c">:: постоянно (новые окна):</span>
-<span class="k">setx</span> HF_TOKEN <span class="s">"hf_ВАШ_ТОКЕН"</span></code></pre>
+<span class="k">setx</span> HF_TOKEN <span class="s">"hf_ВАШ_ТОКЕН"</span>
+<span class="c">:: на уровне машины — видна под любым юзером и после перезагрузки (нужен admin-шелл):</span>
+<span class="k">[Environment]::SetEnvironmentVariable</span>(<span class="s">"HF_TOKEN"</span>,<span class="s">"hf_ВАШ_ТОКЕН"</span>,<span class="s">"Machine"</span>)</code></pre>
+      <div class="warn">Для <b>узла с scheduled task</b> ставьте переменную на уровне <b>Machine</b>:
+        <code>setx</code> пишет её только текущему пользователю, а задача выполняется под своим владельцем
+        (см. <a class="inl" href="#diag">Диагностика</a>, секция [7]) — под ним user-scope переменной просто нет.</div>
       <div class="note">Env-переменная <b>надёжнее CLI-логина</b>: не зависит от наличия
         <code>huggingface-cli</code> и переживает пересоздание venv. Для чистого теста ASR
         (<code>--speaker-mode off</code>) токен не нужен вовсе.</div>
@@ -470,6 +476,95 @@
         Узел без CUDA честно падает fail-fast и не «застолбит» файл.</div>
     </section>
 
+    <section id="diag">
+      <h2><span class="n">🩺</span>Диагностика и обслуживание узла</h2>
+      <p class="step-meta">снять состояние узла одним файлом · обновить узел · починить venv</p>
+      <p>Когда узел «молчит» (задача зарегистрирована, а транскриптов нет), главная проблема — не
+        нехватка проверок, а <b>доставка их вывода</b>: окно консоли закрывается раньше, чем человек
+        успевает прочитать ошибку, и общего буфера обмена между машинами нет. Поэтому все инструменты
+        ниже пишут результат <b>файлом</b> — локально в репозиторий и в Hub.</p>
+
+      <h3>Снять состояние узла одним файлом — <code>collect-diag</code></h3>
+      <p>Самый быстрый способ: <b>двойной клик</b> по <code>scripts\collect-diag.cmd</code>
+        (или запуск <code>.\scripts\collect-diag.ps1</code> из корня репозитория).</p>
+      <pre><code><span class="c">:: двойной клик — либо из PowerShell:</span>
+.\scripts\collect-diag.ps1
+<span class="c">:: параметры (необязательно): сколько копий хранить и сколько строк лога брать</span>
+.\scripts\collect-diag.ps1 -Keep <span class="s">10</span> -WatchLogTail <span class="s">40</span></code></pre>
+      <p>Собирает <b>в один файл</b>:</p>
+      <ul>
+        <li>git-состояние репозитория (последний коммит + <code>git status -sb</code>);</li>
+        <li>содержимое <code>pyvenv.cfg</code> и версию venv-python (<code>python -V</code>) —
+          та самая причина «<code>No Python at '...'</code>»;</li>
+        <li>путь к <code>ffmpeg</code> (или «NOT on PATH»);</li>
+        <li>env-переменные, на которые ссылается конфиг (<code>env:VAR</code>) — по scope
+          Process / User / Machine, <b>только</b> <code>set</code>/<code>not set</code>, значения не печатаются;</li>
+        <li>scheduled task вотчера: состояние, <b>владелец</b> (UserId + LogonType), последний/следующий запуск;</li>
+        <li>смонтирован ли <code>hub_root</code> под этим пользователем;</li>
+        <li>полный вывод <code>node_diagnostics.py --auto</code> (а если он падает — текст падения);</li>
+        <li>хвост <code>logs\watch.log</code> с его размером и возрастом.</li>
+      </ul>
+      <p>Куда кладёт результат:</p>
+      <pre><code><span class="c">:: локально — всегда</span>
+&lt;repo&gt;\logs\console-{host}-{YYYY-MM-DD-HHMM}.txt
+<span class="c">:: в Hub — если диск смонтирован под этим юзером</span>
+{hub_root}\_meta\801-console-{host}.txt              <span class="c">:: последний прогон</span>
+{hub_root}\_meta\801-console-{host}-{штамп}.txt      <span class="c">:: история, 10 последних</span></code></pre>
+      <div class="note"><b>Зачем именно так:</b> файл в Hub читается <b>с любой другой машины</b> — не нужен
+        буфер обмена между машинами, и не страшно закрывшееся окно консоли. Скрипт
+        <b>только читает</b>: на узле ничего не меняется, секреты не печатаются, а имена env-переменных
+        берутся из конфига, а не захардкожены.</div>
+
+      <h3>Полная диагностика — <code>node_diagnostics.py</code></h3>
+      <p>Проверяет CUDA, voiceprint, OCR, ffmpeg, версию кода, вотчер и среду. Запускается
+        <b>любым</b> Python — venv узла он находит сам по полю <code>transcribe_python</code>:</p>
+      <pre><code><span class="k">python</span> scripts\node_diagnostics.py
+<span class="c">:: без паузы в конце (для планировщика/агента):</span>
+<span class="k">python</span> scripts\node_diagnostics.py --auto
+<span class="c">:: добавить каталог venv в PATH (лечит Error 103); --machine — для всех юзеров, нужен admin</span>
+<span class="k">python</span> scripts\node_diagnostics.py --fix-path
+<span class="k">python</span> scripts\node_diagnostics.py --fix-path --machine</code></pre>
+      <p>Отчёт не только печатается, но и <b>пишется файлами</b> — с штампом времени, чтобы прогоны
+        можно было сравнивать:</p>
+      <table>
+        <tr><th>Файл</th><th>Что это</th></tr>
+        <tr><td><code>{hub_root}\_meta\801-diag-{HOST}.txt</code></td><td>последний прогон, стабильное имя (перезаписывается) — ссылки и инструкции не ломаются</td></tr>
+        <tr><td><code>{hub_root}\_meta\801-diag-{HOST}-{YYYY-MM-DD-HHMM}.txt</code></td><td>штамп прогона, история — хранятся <b>10 последних</b></td></tr>
+        <tr><td><code>&lt;repo&gt;\logs\node-diag-{host}-{штамп}.txt</code></td><td>локальная копия — всегда остаётся на узле, даже если Hub недоступен или окно закрылось (тоже 10 последних; <code>logs/</code> в <code>.gitignore</code>)</td></tr>
+      </table>
+      <div class="warn"><b>Секция [7] печатает ВЛАДЕЛЬЦА задачи</b> (<code>Principal.UserId</code> +
+        <code>LogonType</code>), а не только юзера текущего прогона, и явно помечает случай, когда владелец
+        задачи ≠ текущий пользователь. Это не косметика: задача видит <code>PATH</code>, venv и
+        смонтированный Google Drive <b>того</b> аккаунта, на который зарегистрирована. Если у него нет
+        примонтированного Hub или рабочего venv — вотчер молчит.</div>
+      <div class="danger"><b>Следствие для установки задачи:</b> <code>install-watch-task.ps1</code>
+        регистрирует задачу на пользователя <b>того шелла</b>, из которого запущен
+        (<code>-UserId $env:USERNAME</code>). Регистрация требует прав администратора — но elevated-шелл
+        нужно поднимать <b>из-под узлового юзера</b>, а не из-под другой админ-учётки: иначе задача
+        достанется чужому аккаунту. Расхождение лечится пере-регистрацией задачи из admin-шелла нужного юзера.</div>
+
+      <h3>Обновление узла — <code>update-node.ps1</code></h3>
+      <p>Приводит узел в актуальное состояние: <code>git pull</code> → синхронизация конфига → линки
+        путей → доустановка недостающих пакетов → диагностика. Рискованное — за явными флагами.</p>
+      <pre><code><span class="c">:: код + зависимости + диагностика</span>
+.\scripts\update-node.ps1
+<span class="c">:: показать план и ничего не делать</span>
+.\scripts\update-node.ps1 -DryRun</code></pre>
+      <table>
+        <tr><th>Флаг</th><th>Что делает</th></tr>
+        <tr><td><code>-FixVenv</code></td><td>чинит venv, чей базовый Python пропал: перенаправляет <code>pyvenv.cfg</code> на живой интерпретатор <b>той же минорной версии</b> и снимает кавычки из путей. Пакеты остаются на месте — torch с CUDA не надо качать заново (бэкап: <code>pyvenv.cfg.bak</code>)</td></tr>
+        <tr><td><code>-SyncConfig</code></td><td>заменить <code>config\node.local.json</code> копией из Hub <code>_meta</code> (с бэкапом <code>.bak</code>). Если JSON не парсится <b>или</b> <code>hub_root</code> из Hub-копии на этой машине не резолвится — конфиг <b>откатывается</b> на прежний</td></tr>
+        <tr><td><code>-PushConfig</code></td><td>обратное направление: выложить рабочий локальный конфиг узла в Hub <code>_meta</code>. Нужен после локальных правок — иначе следующий <code>-SyncConfig</code> их затрёт</td></tr>
+        <tr><td><code>-CudaTorch</code></td><td>переустановить <code>torch</code>+<code>torchaudio</code> со сборкой CUDA (<code>-CudaVersion cu128</code> по умолчанию) и проверить импорт pyannote/speechbrain</td></tr>
+        <tr><td><code>-NoDiag</code> / <code>-Auto</code> / <code>-DryRun</code></td><td>пропустить диагностику / не ждать клавишу в конце (планировщик, агент) / только напечатать план</td></tr>
+      </table>
+      <div class="note"><b>Сломанный venv больше не убивает весь прогон.</b> venv проверяется <i>запуском</i>
+        (он может существовать и не стартовать), и шаги, которым venv не нужен — <code>git pull</code>,
+        синхронизация конфига, линки путей — выполняются как обычно. Зависимые шаги (доустановка пакетов,
+        torch, проверки) пропускаются с явной причиной, а диагностика в этом случае гонится
+        <b>системным</b> python.</div>
+    </section>
+
     <section id="trouble">
       <h2><span class="n">?</span>Troubleshooting</h2>
       <table>
@@ -480,7 +575,49 @@
         <tr><td><code>UnicodeEncodeError</code> в выводе</td><td>не задан <code>PYTHONUTF8=1</code> (cp1251 не кодирует юникод)</td></tr>
         <tr><td>ffmpeg not found</td><td>ffmpeg не в PATH — нужен для видео</td></tr>
         <tr><td>Процесс рапортует <code>exit 9</code></td><td>ложный teardown CUDA; проверять по наличию transcript.md</td></tr>
+        <tr><td><code>No Python at '"C:\...\python.exe'</code>, выход <code>103</code></td><td>venv существует, но не запускается — базовый Python недоступен. См. <a class="inl" href="#case-venv">разбор ниже</a>; лечение — <code>update-node.ps1 -FixVenv</code></td></tr>
+        <tr><td>После <code>-SyncConfig</code> узел перестал видеть Hub</td><td>копия конфига в Hub отстала (сменилась буква облачного диска). См. <a class="inl" href="#case-drive">разбор ниже</a>; правильный порядок — <code>-PushConfig</code> с рабочей машины</td></tr>
+        <tr><td>Задача зарегистрирована, но узел молчит</td><td>владелец задачи ≠ узловой юзер (у него нет Hub/venv) — смотреть секцию <b>[7]</b> диагностики; см. <a class="inl" href="#diag">Диагностика</a></td></tr>
+        <tr><td>Ошибку в консоли не успели прочитать</td><td>двойной клик по <code>scripts\collect-diag.cmd</code> — состояние узла ляжет файлом в <code>logs\</code> и в Hub <code>_meta</code></td></tr>
       </table>
+
+      <h3 id="case-venv">Случай 1 · venv не запускается, хотя <code>python.exe</code> на месте</h3>
+      <p><b>Симптом:</b> <code>Test-Path</code> находит интерпретатор, но любой запуск падает:</p>
+      <pre><code>No Python at '"C:\Users\&lt;другой-юзер&gt;\AppData\Local\Programs\Python\Python311\python.exe'
+<span class="c">:: код возврата: 103</span></code></pre>
+      <p><b>Причина:</b> venv не самодостаточен — в <code>pyvenv.cfg</code> зашит путь к <b>базовому</b>
+        интерпретатору. Если venv создавался под другим пользователем, этот путь ведёт в чужой профиль
+        (недоступный текущему юзеру), либо в путь затесалась кавычка — лаунчер ищет интерпретатор
+        вместе с ней.</p>
+      <p><b>Лечение</b> — без удаления venv, пакеты целы:</p>
+      <pre><code>.\scripts\update-node.ps1 -FixVenv</code></pre>
+      <div class="warn"><b>Важная деталь для диагностики:</b> один и тот же venv прекрасно работает под
+        «своим» юзером и выглядит сломанным под чужим. Поэтому диагностику надо снимать
+        <b>из-под того аккаунта, под которым реально живёт узел</b> — иначе вы диагностируете не ту среду.
+        Быстрая проверка: <code>collect-diag</code> печатает содержимое <code>pyvenv.cfg</code> и
+        владельца scheduled task рядом с текущим юзером.</div>
+      <div class="note">Удалять и пересоздавать venv <b>не нужно</b>: <code>-FixVenv</code> перенаправляет
+        <code>pyvenv.cfg</code> на живой Python той же минорной версии, а <code>site-packages</code>
+        остаются на месте — torch с CUDA (гигабайты) не приходится качать заново. Пересоздание требуется
+        только если живого интерпретатора нужной версии на машине нет вообще.</div>
+
+      <h3 id="case-drive">Случай 2 · сменилась буква облачного диска</h3>
+      <p><b>Симптом:</b> Google Drive переехал (например, <code>D:</code> оказалась занята локальным
+        диском, и облако смонтировалось как <code>G:</code>). Локальный конфиг поправили — узел заработал,
+        но после <code>-SyncConfig</code> он снова перестал видеть Hub.</p>
+      <p><b>Причина:</b> копия конфига в Hub <code>_meta</code> осталась со старой буквой, и синхронизация
+        возвращала узлу нерабочий <code>hub_root</code>.</p>
+      <p><b>Как теперь:</b> <code>-SyncConfig</code> проверяет <code>hub_root</code> из Hub-копии
+        <i>до того</i>, как оставить новый конфиг на месте, и при нерезолвимом пути <b>откатывает</b>
+        конфиг на прежний с явным предупреждением.</p>
+      <p><b>Правильный порядок</b> — сначала выложить рабочий конфиг с той машины, где он верен:</p>
+      <pre><code><span class="c">:: на машине, где конфиг рабочий: локальный -> Hub</span>
+.\scripts\update-node.ps1 -PushConfig
+<span class="c">:: и только потом на остальных: Hub -> локальный</span>
+.\scripts\update-node.ps1 -SyncConfig</code></pre>
+      <div class="note">Устойчивая к букве диска альтернатива — <code>path_links</code> в конфиге: узел
+        создаёт junction/symlink, и <code>hub_root</code> резолвится независимо от того, как смонтировано
+        облако (шаг «2b. Линки путей» в <code>update-node.ps1</code>).</div>
     </section>
 
     <section id="privacy">
@@ -544,7 +681,7 @@
     </section>
 
     <footer>
-      <div>Quickstart развёртывания ASR-узла · self-contained · версия от 2026-06-26 · язык: RU
+      <div>Quickstart развёртывания ASR-узла · self-contained · версия от 2026-07-30 · язык: RU
         (EN-версия — для публичного распространения).</div>
       <div style="margin-top:6px">Версии проверены: <code>torch 2.11.0+cu128</code> ·
         <code>ctranslate2 4.7.1</code> · <code>faster-whisper 1.2.1</code> ·

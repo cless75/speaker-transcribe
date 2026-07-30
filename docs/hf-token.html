@@ -59,12 +59,23 @@
 
   <h2><span class="n">4</span>Задать токен на машине</h2>
   <p>Движок читает токен из переменной окружения <code>HF_TOKEN</code> — это надёжнее, чем CLI-логин
-    (не зависит от наличия <code>huggingface-cli</code>, переживает пересоздание venv).</p>
+    (не зависит от наличия <code>huggingface-cli</code>, переживает пересоздание venv). Имя переменной
+    задаётся в конфиге узла полем <code>"secrets": { "hf_token": "env:HF_TOKEN" }</code> — если вы
+    поменяли его на своё, ставьте переменную с тем же именем.</p>
   <p><b>Windows · на текущую сессию PowerShell (сразу работает):</b></p>
   <pre><code><span class="k">$env:HF_TOKEN</span> = <span class="s">"hf_ВАШ_ТОКЕН"</span></code></pre>
-  <p><b>Windows · постоянно (для новых окон):</b></p>
+  <p><b>Windows · постоянно, только для текущего пользователя:</b></p>
   <pre><code><span class="k">setx</span> HF_TOKEN <span class="s">"hf_ВАШ_ТОКЕН"</span>
 <span class="c"># затем откройте НОВОЕ окно терминала — переменная появится только в новых процессах</span></code></pre>
+  <p><b>Windows · на уровне машины (рекомендуется для узла) — PowerShell от администратора:</b></p>
+  <pre><code><span class="k">[Environment]::SetEnvironmentVariable</span>(<span class="s">"HF_TOKEN"</span>,<span class="s">"hf_ВАШ_ТОКЕН"</span>,<span class="s">"Machine"</span>)
+<span class="c"># затем откройте НОВОЕ окно терминала (или перезапустите задачу вотчера)</span></code></pre>
+  <div class="warn"><b>Почему Machine, а не setx.</b> Узловая задача (scheduled task) выполняется под своим
+    владельцем, а не под тем, кто её ставил: <code>setx</code> пишет переменную только текущему
+    пользователю, и под владельцем задачи токена просто не будет. Machine-scope виден под <b>любым</b>
+    юзером и переживает перезагрузку. Диагностика узла (<code>node_diagnostics.py</code>, секция [8])
+    показывает, видна ли переменная в текущей сессии, и подсказывает ровно эту команду, а
+    <code>collect-diag</code> печатает её наличие отдельно по каждому scope — Process / User / Machine.</div>
   <p><b>macOS / Linux:</b></p>
   <pre><code><span class="k">export</span> HF_TOKEN=<span class="s">"hf_ВАШ_ТОКЕН"</span>
 <span class="c"># чтобы сохранить — добавьте строку в ~/.zshrc или ~/.bashrc</span></code></pre>
