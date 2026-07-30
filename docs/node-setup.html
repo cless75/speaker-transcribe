@@ -126,7 +126,7 @@
       <a href="#multi">Мультиузел</a>
       <div class="grp">Справка</div>
       <a href="#diag">Диагностика и обслуживание</a>
-      <a href="#trouble">Troubleshooting</a>
+      <a href="troubleshooting.html">Troubleshooting →</a>
       <a href="#privacy">Приватность</a>
       <a href="#macos">macOS (Apple Silicon)</a>
     </nav>
@@ -567,57 +567,24 @@
 
     <section id="trouble">
       <h2><span class="n">?</span>Troubleshooting</h2>
+      <p class="step-meta">разборы поломок вынесены в отдельный документ</p>
+      <p>Диагностика и ремонт узла живут в отдельном файле —
+        <a class="inl" href="troubleshooting.html"><b>troubleshooting.html</b></a>: там таблица симптомов
+        и семь разборов реальных поломок с причиной и лечением.</p>
       <table>
-        <tr><th>Симптом</th><th>Причина / решение</th></tr>
-        <tr><td><code>torch.cuda.is_available() == False</code></td><td>драйвер NVIDIA не виден / eGPU не авторизован / поставлена CPU-сборка torch вместо cu128</td></tr>
-        <tr><td>«Could not load cudnn…»</td><td>нет cuDNN 9: поставить <code>nvidia-cudnn-cu12</code> в venv или системный cuDNN в PATH</td></tr>
-        <tr><td>Диаризация падает на загрузке модели</td><td>не принят gated-доступ pyannote или не задан HF_TOKEN (шаг 4)</td></tr>
-        <tr><td><code>UnicodeEncodeError</code> в выводе</td><td>не задан <code>PYTHONUTF8=1</code> (cp1251 не кодирует юникод)</td></tr>
-        <tr><td>ffmpeg not found</td><td>ffmpeg не в PATH — нужен для видео</td></tr>
-        <tr><td>Процесс рапортует <code>exit 9</code></td><td>ложный teardown CUDA; проверять по наличию transcript.md</td></tr>
-        <tr><td><code>No Python at '"C:\...\python.exe'</code>, выход <code>103</code></td><td>venv существует, но не запускается — базовый Python недоступен. См. <a class="inl" href="#case-venv">разбор ниже</a>; лечение — <code>update-node.ps1 -FixVenv</code></td></tr>
-        <tr><td>После <code>-SyncConfig</code> узел перестал видеть Hub</td><td>копия конфига в Hub отстала (сменилась буква облачного диска). См. <a class="inl" href="#case-drive">разбор ниже</a>; правильный порядок — <code>-PushConfig</code> с рабочей машины</td></tr>
-        <tr><td>Задача зарегистрирована, но узел молчит</td><td>владелец задачи ≠ узловой юзер (у него нет Hub/venv) — смотреть секцию <b>[7]</b> диагностики; см. <a class="inl" href="#diag">Диагностика</a></td></tr>
-        <tr><td>Ошибку в консоли не успели прочитать</td><td>двойной клик по <code>scripts\collect-diag.cmd</code> — состояние узла ляжет файлом в <code>logs\</code> и в Hub <code>_meta</code></td></tr>
+        <tr><th>Что случилось</th><th>Разбор</th></tr>
+        <tr><td><code>No Python at '"C:\...\python.exe'</code>, выход <code>103</code></td><td><a class="inl" href="troubleshooting.html#case-venv">venv не запускается</a> — лечится <code>-FixVenv</code>, без удаления пакетов</td></tr>
+        <tr><td>После <code>-SyncConfig</code> узел перестал видеть Hub</td><td><a class="inl" href="troubleshooting.html#case-drive">сменилась буква облачного диска</a> — сначала <code>-PushConfig</code> с рабочей машины</td></tr>
+        <tr><td>Задача <code>Ready</code>, а транскриптов нет</td><td><a class="inl" href="troubleshooting.html#case-owner">владелец задачи ≠ узловой юзер</a></td></tr>
+        <tr><td>Оболочка стартует сама, лог не растёт</td><td><a class="inl" href="troubleshooting.html#case-autostart">запуск идёт из автозагрузки, а не задачей</a></td></tr>
+        <tr><td>Диаризация падает на загрузке модели</td><td><a class="inl" href="troubleshooting.html#case-token">токен не виден процессу задачи</a></td></tr>
+        <tr><td>Прогон идёт на CPU вместо GPU</td><td><a class="inl" href="troubleshooting.html#case-gpu">CUDA не используется</a></td></tr>
+        <tr><td>Ошибку в консоли не успели прочитать</td><td><a class="inl" href="troubleshooting.html#case-console">писать вывод файлом</a>, а не читать окно</td></tr>
       </table>
-
-      <h3 id="case-venv">Случай 1 · venv не запускается, хотя <code>python.exe</code> на месте</h3>
-      <p><b>Симптом:</b> <code>Test-Path</code> находит интерпретатор, но любой запуск падает:</p>
-      <pre><code>No Python at '"C:\Users\&lt;другой-юзер&gt;\AppData\Local\Programs\Python\Python311\python.exe'
-<span class="c">:: код возврата: 103</span></code></pre>
-      <p><b>Причина:</b> venv не самодостаточен — в <code>pyvenv.cfg</code> зашит путь к <b>базовому</b>
-        интерпретатору. Если venv создавался под другим пользователем, этот путь ведёт в чужой профиль
-        (недоступный текущему юзеру), либо в путь затесалась кавычка — лаунчер ищет интерпретатор
-        вместе с ней.</p>
-      <p><b>Лечение</b> — без удаления venv, пакеты целы:</p>
-      <pre><code>.\scripts\update-node.ps1 -FixVenv</code></pre>
-      <div class="warn"><b>Важная деталь для диагностики:</b> один и тот же venv прекрасно работает под
-        «своим» юзером и выглядит сломанным под чужим. Поэтому диагностику надо снимать
-        <b>из-под того аккаунта, под которым реально живёт узел</b> — иначе вы диагностируете не ту среду.
-        Быстрая проверка: <code>collect-diag</code> печатает содержимое <code>pyvenv.cfg</code> и
-        владельца scheduled task рядом с текущим юзером.</div>
-      <div class="note">Удалять и пересоздавать venv <b>не нужно</b>: <code>-FixVenv</code> перенаправляет
-        <code>pyvenv.cfg</code> на живой Python той же минорной версии, а <code>site-packages</code>
-        остаются на месте — torch с CUDA (гигабайты) не приходится качать заново. Пересоздание требуется
-        только если живого интерпретатора нужной версии на машине нет вообще.</div>
-
-      <h3 id="case-drive">Случай 2 · сменилась буква облачного диска</h3>
-      <p><b>Симптом:</b> Google Drive переехал (например, <code>D:</code> оказалась занята локальным
-        диском, и облако смонтировалось как <code>G:</code>). Локальный конфиг поправили — узел заработал,
-        но после <code>-SyncConfig</code> он снова перестал видеть Hub.</p>
-      <p><b>Причина:</b> копия конфига в Hub <code>_meta</code> осталась со старой буквой, и синхронизация
-        возвращала узлу нерабочий <code>hub_root</code>.</p>
-      <p><b>Как теперь:</b> <code>-SyncConfig</code> проверяет <code>hub_root</code> из Hub-копии
-        <i>до того</i>, как оставить новый конфиг на месте, и при нерезолвимом пути <b>откатывает</b>
-        конфиг на прежний с явным предупреждением.</p>
-      <p><b>Правильный порядок</b> — сначала выложить рабочий конфиг с той машины, где он верен:</p>
-      <pre><code><span class="c">:: на машине, где конфиг рабочий: локальный -> Hub</span>
-.\scripts\update-node.ps1 -PushConfig
-<span class="c">:: и только потом на остальных: Hub -> локальный</span>
-.\scripts\update-node.ps1 -SyncConfig</code></pre>
-      <div class="note">Устойчивая к букве диска альтернатива — <code>path_links</code> в конфиге: узел
-        создаёт junction/symlink, и <code>hub_root</code> резолвится независимо от того, как смонтировано
-        облако (шаг «2b. Линки путей» в <code>update-node.ps1</code>).</div>
+      <div class="note">Не знаете, с чего начать — снимите состояние узла одним действием:
+        двойной клик по <code>scripts\collect-diag.cmd</code>. Отчёт ляжет в <code>logs\</code> и в Hub
+        <code>_meta</code>, откуда читается с любой другой машины (см.
+        <a class="inl" href="#diag">Диагностика и обслуживание</a>).</div>
     </section>
 
     <section id="privacy">

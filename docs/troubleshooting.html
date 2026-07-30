@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting ASR-узла · диагностика и ремонт</title>
+<style>
+  :root{
+    --navy:#1a2238; --navy-2:#2d3a5f; --gold:#c9a227; --teal:#2a9d8f;
+    --cream:#f7f4ec; --paper:#fffdf8; --ink:#20242c; --muted:#5b6472;
+    --line:#e4ddca; --code-bg:#1c2533; --code-ink:#e8eef7; --danger:#b3402f;
+    --ok:#2a9d8f; --warn:#c9882a;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--cream); color:var(--ink);
+    font:16px/1.65 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{display:grid; grid-template-columns:264px 1fr; max-width:1180px; margin:0 auto; min-height:100vh}
+  /* ---- sidebar / TOC ---- */
+  aside{
+    position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+    background:var(--navy); color:#cdd6e6; padding:26px 18px 40px;
+  }
+  aside .brand{font-weight:700; color:#fff; font-size:15px; letter-spacing:.3px; line-height:1.35}
+  aside .brand span{color:var(--gold)}
+  aside .sub{color:#8c9bb8; font-size:12px; margin:4px 0 20px}
+  nav a{
+    display:block; color:#b9c4da; text-decoration:none; font-size:13.5px;
+    padding:6px 10px; border-radius:7px; border-left:2px solid transparent; margin:1px 0;
+  }
+  nav a:hover{background:rgba(255,255,255,.06); color:#fff}
+  nav a.active{background:rgba(201,162,39,.16); color:#fff; border-left-color:var(--gold)}
+  nav .grp{font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:#6f7e9c; margin:18px 0 6px 10px}
+  /* ---- content ---- */
+  main{padding:46px 54px 90px; background:var(--cream)}
+  header.head{border-bottom:2px solid var(--line); padding-bottom:22px; margin-bottom:30px}
+  header.head h1{font-size:30px; line-height:1.18; margin:0 0 8px; color:var(--navy)}
+  header.head h1 b{color:var(--gold)}
+  header.head .lead{color:var(--muted); font-size:16px; margin:0; max-width:62ch}
+  .pillrow{margin-top:16px; display:flex; gap:8px; flex-wrap:wrap}
+  .pill{font-size:12px; background:#fff; border:1px solid var(--line); color:var(--navy-2); padding:4px 11px; border-radius:30px; font-weight:600}
+  section{margin:0 0 34px; scroll-margin-top:20px}
+  h2{font-size:22px; color:var(--navy); margin:38px 0 14px; padding-top:6px}
+  h2 .n{display:inline-grid; place-items:center; width:30px; height:30px; background:var(--navy); color:#fff;
+    border-radius:8px; font-size:14px; margin-right:11px; vertical-align:2px}
+  h3{font-size:16.5px; color:var(--navy-2); margin:22px 0 8px}
+  p{margin:10px 0; max-width:70ch}
+  ul,ol{max-width:70ch; padding-left:22px}
+  li{margin:6px 0}
+  code{background:#efe9d8; color:#7a3b16; padding:1.5px 6px; border-radius:5px; font-size:13.5px;
+    font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace}
+  pre{position:relative; background:var(--code-bg); color:var(--code-ink); padding:16px 44px 16px 18px; border-radius:10px; overflow-x:auto;
+    font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:13px; line-height:1.55;
+    border:1px solid #0e151f; box-shadow:0 1px 0 rgba(0,0,0,.04)}
+  pre code{background:none; color:inherit; padding:0; font-size:13px}
+  .copy-btn{position:absolute; top:8px; right:8px; padding:3px 9px; font-size:11px; cursor:pointer;
+    color:#cdd6e6; background:#2a3856; border:1px solid #3c4d72; border-radius:6px; opacity:.55; transition:opacity .15s;
+    font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+  pre:hover .copy-btn{opacity:1}
+  .copy-btn.ok{color:#8fd6c2; border-color:#2a9d8f}
+  pre .c{color:#7f8ea8; user-select:none; -webkit-user-select:none}  /* comment — not selectable, excluded from manual copy */
+  pre .k{color:#e8b85f}            /* keyword/cmd */
+  pre .s{color:#8fd6c2}            /* string/value */
+  .flow{margin:18px 0; max-width:640px}
+  .fl{position:relative; background:var(--paper); border:1px solid var(--line); border-left:3px solid var(--teal);
+    border-radius:8px; padding:9px 14px; margin:0 0 26px; font-size:14px}
+  .fl:not(:last-child)::after{content:"↓"; position:absolute; left:17px; bottom:-23px; color:var(--gold); font-size:17px}
+  .fl.out{border-left-color:var(--gold)}
+  .fl b{color:var(--navy)}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:14px; background:var(--paper);
+    border:1px solid var(--line); border-radius:10px; overflow:hidden}
+  th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{background:var(--navy); color:#fff; font-size:12.5px; letter-spacing:.02em}
+  tr:last-child td{border-bottom:none}
+  /* ---- callouts ---- */
+  .box{border-radius:10px; padding:13px 16px 13px 46px; margin:16px 0; position:relative; font-size:14.5px; border:1px solid}
+  .box::before{position:absolute; left:14px; top:12px; font-size:17px}
+  .note{background:#eafaf6; border-color:#bfe9df}    .note::before{content:"💡"}
+  .ok{background:#e9f7f1; border-color:#b6e3d4}       .ok::before{content:"✅"}
+  .warn{background:#fdf4e3; border-color:#f0dcae}     .warn::before{content:"⚠️"}
+  .danger{background:#fcecea; border-color:#f1c3bc}   .danger::before{content:"⛔"}
+  .priv{background:var(--navy); color:#e7edf7; border-color:var(--navy-2); padding-left:46px}
+  .priv::before{content:"🔒"} .priv b{color:var(--gold)} .priv code{background:#2a3856; color:#ffd98a}
+  .step-meta{font-size:13px; color:var(--muted); margin:-4px 0 12px}
+  .check{font-size:13.5px; background:#fff; border:1px dashed var(--teal); border-radius:8px; padding:8px 13px; margin:10px 0; color:var(--navy-2)}
+  .check b{color:var(--teal)}
+  footer{margin-top:50px; padding-top:20px; border-top:2px solid var(--line); color:var(--muted); font-size:13px}
+  footer code{font-size:12.5px}
+  a.inl{color:#1d6b5f; text-decoration:none; border-bottom:1px solid #a9d6cb}
+  a.inl:hover{border-bottom-color:#1d6b5f}
+  @media (max-width:880px){
+    .wrap{grid-template-columns:1fr}
+    aside{position:static; height:auto}
+    nav{display:flex; flex-wrap:wrap; gap:4px}
+    nav .grp{width:100%}
+    main{padding:30px 22px 70px}
+    .grid2{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <aside>
+    <div class="brand">ASR-узел · <span>Troubleshooting</span></div>
+    <div class="sub">Разбор реальных поломок узла</div>
+    <nav id="toc">
+      <div class="grp">Начать отсюда</div>
+      <a href="#first">Первый шаг: снять состояние</a>
+      <a href="#table">Таблица симптомов</a>
+      <div class="grp">Разборы</div>
+      <a href="#case-venv">1 · venv не запускается (103)</a>
+      <a href="#case-drive">2 · сменилась буква диска</a>
+      <a href="#case-owner">3 · задача есть, узел молчит</a>
+      <a href="#case-autostart">4 · запуск не задачей</a>
+      <a href="#case-token">5 · токен и диаризация</a>
+      <a href="#case-gpu">6 · CUDA не используется</a>
+      <a href="#case-console">7 · окно закрылось</a>
+      <div class="grp">Куда дальше</div>
+      <a href="node-setup.html">← Развёртывание узла</a>
+      <a href="hf-token.html">Токен Hugging Face</a>
+    </nav>
+  </aside>
+
+  <main>
+    <header class="head">
+      <h1>Troubleshooting <b>ASR-узла</b><br>почему узел молчит и как это чинить</h1>
+      <p class="lead">Разборы поломок, которые реально случались на боевых узлах: каждая описана
+        симптомом, причиной и лечением. Общая установка узла — в
+        <a class="inl" href="node-setup.html">Развёртывании</a>; здесь только диагностика и ремонт.</p>
+      <div class="pillrow">
+        <span class="pill">Windows 10/11</span>
+        <span class="pill">scheduled task</span>
+        <span class="pill">venv · CUDA</span>
+        <span class="pill">Google Drive Hub</span>
+      </div>
+    </header>
+
+    <section id="first">
+      <h2><span class="n">0</span>Первый шаг: снять состояние узла</h2>
+      <p class="step-meta">одно действие вместо десятка команд</p>
+      <p>Прежде чем гадать о причине, соберите факты. Двойной клик по
+        <code>scripts\collect-diag.cmd</code> (или запуск <code>.\scripts\collect-diag.ps1</code>):</p>
+      <pre><code>.\scripts\collect-diag.ps1</code></pre>
+      <p>Скрипт <b>только читает</b> и складывает всё в один файл — локально в
+        <code>&lt;repo&gt;\logs\console-{host}-{штамп}.txt</code> и в Hub
+        <code>_meta\801-console-{host}.txt</code>, откуда отчёт читается с любой другой машины.
+        Внутри: версия кода, <code>pyvenv.cfg</code>, версия venv-python, ffmpeg, секреты (только
+        «есть/нет», без значений), задача вотчера с владельцем, монтирование Hub, полная диагностика
+        и хвост <code>watch.log</code>.</p>
+      <div class="warn"><b>Снимайте диагностику из-под того аккаунта, под которым живёт узел.</b>
+        Под другим юзером вы увидите чужой PATH, недоступный venv и неполный список задач —
+        и будете чинить не ту среду.</div>
+    </section>
+
+    <section id="table">
+      <h2><span class="n">?</span>Таблица симптомов</h2>
+      <table>
+        <tr><th>Симптом</th><th>Причина / решение</th></tr>
+        <tr><td><code>No Python at '"C:\...\python.exe'</code>, выход <code>103</code></td><td>venv есть, но базовый Python недоступен — <a class="inl" href="#case-venv">разбор 1</a></td></tr>
+        <tr><td>После <code>-SyncConfig</code> узел перестал видеть Hub</td><td>копия конфига в Hub отстала от машины — <a class="inl" href="#case-drive">разбор 2</a></td></tr>
+        <tr><td>Задача зарегистрирована, но транскриптов нет</td><td>владелец задачи ≠ узловой юзер — <a class="inl" href="#case-owner">разбор 3</a></td></tr>
+        <tr><td>Окно PowerShell стартует само, а <code>watch.log</code> не растёт</td><td>запуск идёт не задачей, а из автозагрузки — <a class="inl" href="#case-autostart">разбор 4</a></td></tr>
+        <tr><td>Диаризация падает на загрузке модели</td><td>не принят gated-доступ pyannote или не виден токен — <a class="inl" href="#case-token">разбор 5</a></td></tr>
+        <tr><td><code>torch.cuda.is_available() == False</code></td><td>CPU-сборка torch вместо cu128, либо драйвер/eGPU не виден — <a class="inl" href="#case-gpu">разбор 6</a></td></tr>
+        <tr><td>«Could not load cudnn…»</td><td>нет cuDNN 9: поставить <code>nvidia-cudnn-cu12</code> в venv или системный cuDNN в PATH</td></tr>
+        <tr><td>Ошибку в консоли не успели прочитать</td><td>вывод надо писать файлом — <a class="inl" href="#case-console">разбор 7</a></td></tr>
+        <tr><td><code>UnicodeEncodeError</code> в выводе</td><td>не задан <code>PYTHONUTF8=1</code> (cp1251 не кодирует юникод)</td></tr>
+        <tr><td><code>ffmpeg not found</code></td><td>ffmpeg не в PATH — нужен для видео и нарезки клипов</td></tr>
+        <tr><td>Процесс рапортует <code>exit 9</code></td><td>ложный teardown CUDA; проверять по наличию <code>transcript.md</code></td></tr>
+      </table>
+    </section>
+
+    <section id="case-venv">
+      <h2><span class="n">1</span>venv не запускается, хотя <code>python.exe</code> на месте</h2>
+      <p><b>Симптом:</b> <code>Test-Path</code> находит интерпретатор, но любой запуск падает:</p>
+      <pre><code>No Python at '"C:\Users\&lt;другой-юзер&gt;\AppData\Local\Programs\Python\Python311\python.exe'
+<span class="c">:: код возврата: 103</span></code></pre>
+      <p><b>Причина:</b> venv не самодостаточен — в <code>pyvenv.cfg</code> зашит путь к <b>базовому</b>
+        интерпретатору. Если venv создавался под другим пользователем, путь ведёт в чужой профиль,
+        недоступный текущему юзеру. Вторая половина той же граблы — кавычка в пути (видна в сообщении
+        как <code>'"C:\...</code>): лаунчер ищет интерпретатор вместе с ней.</p>
+      <p><b>Лечение</b> — без удаления venv:</p>
+      <pre><code>.\scripts\update-node.ps1 -FixVenv</code></pre>
+      <div class="note">Пересоздавать venv <b>не нужно</b>: <code>-FixVenv</code> перенаправляет
+        <code>pyvenv.cfg</code> на живой Python той же минорной версии и снимает кавычки, а
+        <code>site-packages</code> остаются на месте — torch с CUDA (гигабайты) не приходится качать
+        заново. Пересоздание требуется, только если интерпретатора нужной версии на машине нет вовсе:
+        <code>py -3.11 -m venv &lt;путь&gt;</code> + установка зависимостей.</div>
+      <div class="warn">Один и тот же venv <b>работает под своим юзером и выглядит сломанным под чужим</b>.
+        Если диагностика показывает «venv не запускается», сначала проверьте, из-под какого аккаунта
+        она снята: строка «текущий пользователь» в секции [8] и владелец задачи в [7].</div>
+    </section>
+
+    <section id="case-drive">
+      <h2><span class="n">2</span>Сменилась буква облачного диска</h2>
+      <p><b>Симптом:</b> Google Drive переехал (например, <code>D:</code> оказалась занята локальным
+        диском, и облако смонтировалось как <code>G:</code>). Локальный конфиг поправили — узел ожил,
+        но после <code>-SyncConfig</code> снова перестал видеть Hub.</p>
+      <p><b>Причина:</b> копия конфига в Hub <code>_meta</code> осталась со старой буквой, и
+        синхронизация возвращала узлу нерезолвимый <code>hub_root</code>.</p>
+      <p><b>Как теперь:</b> <code>-SyncConfig</code> проверяет <code>hub_root</code> из Hub-копии
+        <i>до того</i>, как оставить новый конфиг на месте, и при нерезолвимом пути <b>откатывает</b>
+        конфиг на прежний с явным предупреждением.</p>
+      <p><b>Правильный порядок</b> — сначала выложить рабочий конфиг с той машины, где он верен:</p>
+      <pre><code><span class="c">:: на машине с рабочим конфигом: локальный -> Hub</span>
+.\scripts\update-node.ps1 -PushConfig
+<span class="c">:: и только потом на остальных: Hub -> локальный</span>
+.\scripts\update-node.ps1 -SyncConfig</code></pre>
+      <div class="note">Устойчивая к букве диска альтернатива — <code>path_links</code> в конфиге: узел
+        создаёт junction/symlink, и <code>hub_root</code> резолвится независимо от того, как смонтировано
+        облако (шаг «2b. Линки путей» в <code>update-node.ps1</code>). Оговорка: если диск под юзером
+        задачи вообще не смонтирован, линк не поможет — нужен запуск под юзером с примонтированным диском.</div>
+    </section>
+
+    <section id="case-owner">
+      <h2><span class="n">3</span>Задача есть, а узел молчит</h2>
+      <p><b>Симптом:</b> в планировщике задача <code>Ready</code>, последний результат <code>0</code>,
+        а транскрипты не появляются и <code>watch.log</code> не растёт.</p>
+      <p><b>Причина:</b> задача выполняется под своим владельцем и наследует <b>его</b> среду —
+        PATH, venv и примонтированный облачный диск. Если владелец не тот аккаунт, под которым
+        установлено окружение узла, вотчер стартует и молча падает: у этого юзера нет ни venv,
+        ни Hub.</p>
+      <p><b>Как увидеть:</b> секция <b>[7]</b> диагностики печатает владельца задачи и помечает
+        расхождение с текущим юзером:</p>
+      <pre><code>  scheduled task : '\speaker-transcribe-watch' — Ready, посл.запуск ..., результат 0
+  владелец задачи: Lenovo (logon: Interactive)  -&gt;  ВНИМАНИЕ: не текущий юзер (corne)</code></pre>
+      <p><b>Лечение</b> — пере-регистрировать задачу из admin-шелла, поднятого <b>из-под узлового
+        юзера</b> (скрипт записывает задачу на <code>$env:USERNAME</code> своего шелла):</p>
+      <pre><code>.\scripts\install-watch-task.ps1 -IntervalMinutes <span class="s">10</span>
+<span class="k">Start-ScheduledTask</span> -TaskName <span class="s">speaker-transcribe-watch</span></code></pre>
+      <div class="danger"><b>Не поднимайте elevated-шелл из другой админ-учётки.</b> Задача достанется
+        ей, и вы получите ровно ту же тишину — уже под новым владельцем. Старую задачу, доставшуюся
+        чужому юзеру, удалите (<code>install-watch-task.ps1 -Remove</code> из-под него), иначе два
+        вотчера будут конкурировать за одну очередь.</div>
+      <div class="warn">Перечисление задач <b>урезается правами</b>: под обычным юзером чужие задачи
+        не видны, и диагностика честно пишет «НЕ НАЙДЕНА». Прежде чем регистрировать новую задачу,
+        перепроверьте из admin-шелла — иначе получите дубль.</div>
+    </section>
+
+    <section id="case-autostart">
+      <h2><span class="n">4</span>Оболочка стартует сама, но лога нет</h2>
+      <p><b>Симптом:</b> при входе в систему всплывает окно PowerShell — похоже, вотчер работает, —
+        но <code>watch.log</code> не обновляется, а планировщик задачи не показывает.</p>
+      <p><b>Причина:</b> запуск сделан не задачей, а через <b>автозагрузку</b> — ярлык в папке
+        Startup или ключ <code>Run</code> в реестре. Такой запуск происходит один раз при входе,
+        не повторяется каждые N минут и не пишет в лог задачи.</p>
+      <p><b>Как увидеть:</b> секция [7] ищет вотчер по трём каналам — задачи (по имени <b>и</b> по
+        действию, в любой папке планировщика), записи автозапуска и живые процессы:</p>
+      <pre><code>  автозапуск     : folder -&gt; C:\Users\...\Startup\watch.lnk -&gt; powershell.exe ... watch.ps1
+  живой процесс  : pid 12345 · powershell.exe · ... watch.ps1 -Once ...</code></pre>
+      <p><b>Лечение:</b> убрать запись из автозагрузки и оставить один канал — scheduled task:
+        только она даёт повтор каждые N минут, лог в <code>logs\watch.log</code> и защиту от
+        параллельных прогонов.</p>
+    </section>
+
+    <section id="case-token">
+      <h2><span class="n">5</span>Диаризация не стартует: токен</h2>
+      <p><b>Симптом:</b> ASR отрабатывает, а диаризация падает на загрузке модели pyannote.</p>
+      <p><b>Причины по порядку проверки:</b></p>
+      <ol>
+        <li>не принят gated-доступ к моделям pyannote под тем же аккаунтом HF (см.
+          <a class="inl" href="hf-token.html">Токен Hugging Face</a>);</li>
+        <li>токен не виден процессу задачи: <code>setx</code> кладёт переменную только текущему
+          пользователю, а задача выполняется под своим владельцем;</li>
+        <li>токен вообще не задан.</li>
+      </ol>
+      <p><b>Два рабочих способа</b> — переменная уровня машины либо файл в Hub:</p>
+      <pre><code><span class="c">:: A. переменная на уровне машины (admin-шелл)</span>
+<span class="k">[Environment]::SetEnvironmentVariable</span>(<span class="s">"HF_TOKEN"</span>,<span class="s">"hf_ВАШ_ТОКЕН"</span>,<span class="s">"Machine"</span>)
+
+<span class="c">:: B. один файл на все узлы — в конфиге узла:</span>
+<span class="s">"secrets"</span>: { <span class="s">"hf_token"</span>: <span class="s">"file:{hub_root}/_meta/.hf-token"</span> }</code></pre>
+      <p>Вариант <b>B</b> избавляет от заведения переменной на каждой машине: вотчер читает файл при
+        старте и кладёт значение в окружение движка. Диагностика показывает читаемость источника:
+        <code>секрет из файла : ... -&gt; ок (37 симв.)</code>.</p>
+      <div class="danger"><b>Файл в Hub виден всем, у кого есть доступ к диску.</b> Держите там только
+        токен с правами <b>Read</b> и не расшаривайте <code>_meta</code> наружу. Если папка когда-нибудь
+        уедет к третьим лицам — отзовите токен на huggingface.co и положите новый.</div>
+    </section>
+
+    <section id="case-gpu">
+      <h2><span class="n">6</span>Узел считает на CPU вместо GPU</h2>
+      <p><b>Симптом:</b> прогон идёт втрое дольше ожидаемого; в диагностике
+        <code>torch.cuda : False</code> или <code>faster-whisper CUDA: НЕТ</code>.</p>
+      <p><b>Что проверять:</b></p>
+      <ul>
+        <li><code>nvidia-smi</code> видит карту (иначе — драйвер или eGPU не авторизован);</li>
+        <li>в venv стоит сборка <code>+cu128</code>, а не CPU-колесо:
+          <code>torch версия : 2.11.0+cu128</code>;</li>
+        <li>для CTranslate2 на GPU нужен cuDNN 9 — пакет <code>nvidia-cudnn-cu12</code> в venv или
+          системные DLL в PATH;</li>
+        <li>в конфиге <code>device: "cuda"</code> (значение <code>"gpu"</code> невалидно) и
+          <code>diarization_device: "cuda"</code>.</li>
+      </ul>
+      <p>Переустановить torch с CUDA-индекса можно одним флагом:</p>
+      <pre><code>.\scripts\update-node.ps1 -CudaTorch</code></pre>
+      <div class="note">Движок при недоступной CUDA молча уходит на CPU — прогон завершится успешно,
+        просто медленно. Поэтому <code>phase=config</code> в начале лога печатает фактические
+        <code>device</code> / <code>compute_type</code> / <code>diar_device</code>: сверяйте их, а не
+        намерения из конфига.</div>
+    </section>
+
+    <section id="case-console">
+      <h2><span class="n">7</span>Окно закрылось раньше, чем прочитали ошибку</h2>
+      <p><b>Симптом:</b> скрипт запущен двойным кликом, что-то мелькнуло — и окна нет. Между машинами
+        нет общего буфера обмена, переписать текст некуда.</p>
+      <p><b>Лечение:</b> не читать консоль, а писать файл. Любой поток можно перенаправить целиком,
+        включая stderr:</p>
+      <pre><code>.\scripts\node_diagnostics.py --auto *&gt; <span class="s">"C:\work\diag-out.txt"</span></code></pre>
+      <p>Но обычно этого не требуется: <code>collect-diag</code> и <code>node_diagnostics.py</code>
+        <b>всегда</b> оставляют файлы — в <code>&lt;repo&gt;\logs\</code> и в Hub <code>_meta</code>,
+        по 10 последних прогонов со штампом времени в имени. Отчёт из Hub читается с любой машины.</p>
+      <div class="note">Отчёты со штампом не затирают друг друга — можно сравнить состояние «до» и
+        «после» правки. Стабильное имя <code>801-diag-{HOST}.txt</code> при этом всегда указывает на
+        последний прогон.</div>
+    </section>
+
+    <footer>
+      <div>Troubleshooting ASR-узла · self-contained · версия от 2026-07-30 · язык: RU ·
+        основной документ: <a class="inl" href="node-setup.html">node-setup.html</a></div>
+    </footer>
+  </main>
+</div>
+</body>
+</html>
