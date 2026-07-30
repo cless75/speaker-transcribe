@@ -126,6 +126,7 @@
       <a href="#quick">Быстрый запуск (.ps1)</a>
       <a href="#multi">Мультиузел</a>
       <div class="grp">Справка</div>
+      <a href="#catalog">Каталог скриптов</a>
       <a href="#diag">Диагностика и обслуживание</a>
       <a href="#uninstall">Удаление узла</a>
       <a href="troubleshooting.html">Troubleshooting →</a>
@@ -579,6 +580,65 @@
         Узел без CUDA честно падает fail-fast и не «застолбит» файл.</div>
     </section>
 
+
+    <section id="catalog">
+      <h2><span class="n">📦</span>Что входит в комплект: каталог скриптов</h2>
+      <p class="step-meta">все исполняемые части пакета и что делает каждая</p>
+      <p>Пометка <b>только читает</b> означает, что скрипт ничего не меняет на машине и его
+        безопасно запускать в любой момент.</p>
+
+      <h3>Запуск и обработка</h3>
+      <table>
+        <tr><th>Файл</th><th>Что делает</th></tr>
+        <tr><td><code>scripts\watch.ps1</code></td><td>обёртка над вотчером: один прогон по источникам (<code>-Once</code>), <code>-CatchUpOnly</code> — только подобрать готовые транскрипты, <code>-Pull</code> — сначала обновить код, <code>-MaxFiles</code>/<code>-TimeBudgetMinutes</code> — ограничить прогон. Пре-флайт пишет причину падения в <code>watch.log</code> и отдаёт код <b>103</b></td></tr>
+        <tr><td><code>src\audio_inbox_watch.py</code></td><td>сам вотчер: сканирует источники, распределяет файлы между узлами (claim/lease), запускает движок, раскладывает результаты по сессиям Hub, публикует статус узла</td></tr>
+        <tr><td><code>scripts\transcribe.ps1</code></td><td>быстрая транскрибация одного файла или целой папки без вотчера — обёртка над CLI с разумными умолчаниями</td></tr>
+        <tr><td><code>src\media_transcribe_cli.py</code></td><td>CLI-обёртка движка: собирает JSON-payload из флагов и передаёт воркеру</td></tr>
+        <tr><td><code>src\media_transcribe.py</code></td><td>движок: ASR (faster-whisper), диаризация (pyannote), voiceprint, сборка транскриптов. Запускается подпроцессом, не руками</td></tr>
+        <tr><td><code>scripts\run-media-transcribe-direct.ps1</code></td><td>прямой вызов движка через stdin-JSON: двухшаговый <code>speaker_pass</code>, подстановка карты имён, Zoom-VTT вместо диаризации, ручное слияние ASR-чанков. Инструмент для нештатных случаев</td></tr>
+        <tr><td><code>src\slide_frames.py</code></td><td>стадия движка: кадры слайдов из видео + локальный OCR</td></tr>
+        <tr><td><code>src\merge_speaker_tracks.py</code></td><td>multi-track Zoom: собирает отдельные дорожки участников в один диаризованный транскрипт</td></tr>
+        <tr><td><code>src\apply_speaker_identities.py</code></td><td>проставляет утверждённые имена спикеров в готовые транскрипты</td></tr>
+      </table>
+
+      <h3>Установка и обслуживание узла</h3>
+      <table>
+        <tr><th>Файл</th><th>Что делает</th></tr>
+        <tr><td><code>scripts\update-node.ps1</code></td><td>привести узел в актуальное состояние: <code>git pull</code>, конфиг из Hub (<code>-SyncConfig</code>) или в Hub (<code>-PushConfig</code>), линки путей, доустановка пакетов, <code>-CudaTorch</code>, <code>-FixVenv</code>, диагностика. См. <a class="inl" href="#diag">Диагностика</a></td></tr>
+        <tr><td><code>scripts\install-watch-task.ps1</code><br><code>scripts\install-watch-task.cmd</code></td><td>регистрация автозадачи вотчера (и <code>-Remove</code>). <code>.cmd</code> сам поднимает права через UAC. Требует admin; задача достаётся юзеру шелла — см. <a class="inl" href="#task">Автозадача</a></td></tr>
+        <tr><td><code>scripts\uninstall-node.ps1</code></td><td>снять узел с машины: задачи, автозапуск, процессы, venv, кэш, логи, конфиг, env-переменные, линки. DRY-RUN без <code>-Force</code>, Hub не трогает — см. <a class="inl" href="#uninstall">Удаление узла</a></td></tr>
+      </table>
+
+      <h3>Диагностика и наблюдение</h3>
+      <table>
+        <tr><th>Файл</th><th>Что делает</th></tr>
+        <tr><td><code>scripts\collect-diag.ps1</code><br><code>scripts\collect-diag.cmd</code></td><td><b>только читает.</b> Состояние узла одним файлом (git, venv, ffmpeg, секреты, задача с владельцем, Hub, полная диагностика, хвост лога) в <code>logs\</code> и в Hub — читается с любой машины</td></tr>
+        <tr><td><code>scripts\node_diagnostics.py</code></td><td><b>только читает</b> (кроме <code>--fix-path</code>). Девять секций: CUDA, voiceprint, OCR, ffmpeg, версия кода, вотчер и его владелец, среда, права на каталоги. Отчёт — в Hub и локально, 10 последних со штампом</td></tr>
+        <tr><td><code>scripts\watch-health.ps1</code></td><td><b>только читает.</b> «Жив ли узел» одной командой: задача, свежесть лога, идущий прогон, доступность Hub, токен, очередь. Код возврата <code>0/1/2</code> — можно вешать алерт</td></tr>
+        <tr><td><code>scripts\hub_report.py</code></td><td><b>только читает.</b> Сводка по всему флоту за день: что готово, что считается сейчас, что ждёт очереди, часы медиа против часов обработки</td></tr>
+        <tr><td><code>scripts\log_critical.py</code></td><td><b>только читает.</b> Выжимка критических моментов из лога узла (сбои, откаты, застревания) в Hub <code>_meta\801-logcrit-{HOST}.txt</code></td></tr>
+        <tr><td><code>src\node_status.py</code></td><td>публикует HTML-страницу состояния узла в Hub <code>_status\</code> — узел сообщает о падении даже когда конфиг сломан</td></tr>
+      </table>
+
+      <h3>Голоса и именование</h3>
+      <table>
+        <tr><th>Файл</th><th>Что делает</th></tr>
+        <tr><td><code>scripts\voiceprint_identity.py</code></td><td>механика для навыка сопоставления голосов: <code>list-candidates</code> — выгрузить анонимные профили (в том числе в Hub, чтобы читать с другой машины), <code>set</code> — атомарно проставить подтверждённое имя в стор и реестр проекта. Кто есть кто — решает агент, не скрипт</td></tr>
+      </table>
+
+      <h3>Тесты</h3>
+      <p>Все запускаются одинаково — <code>python scripts\&lt;имя&gt;.py</code>, без GPU и без аудио;
+        <code>ALL PASS</code> и код возврата <code>0</code> означают успех.</p>
+      <table>
+        <tr><th>Файл</th><th>Что гарантирует</th></tr>
+        <tr><td><code>test-ps-encoding.py</code></td><td>каждый <code>.ps1</code> либо ASCII-only, либо с UTF-8 BOM — иначе PowerShell 5.1 не распарсит файл и задача умрёт без единой строки в логе</td></tr>
+        <tr><td><code>test-config-secrets.py</code></td><td>секрет из конфига (<code>env:</code> / <code>file:</code>) доезжает до окружения движка, а недоступный источник не затирает уже заданную переменную и не роняет прогон</td></tr>
+        <tr><td><code>test-log-contract.py</code></td><td>строки, по которым <code>log_critical</code> ищет проблемы, не «утонули» в debug-уровне</td></tr>
+        <tr><td><code>test-partial-resume.py</code></td><td>обрыв во время ASR не теряет уже посчитанные чанки</td></tr>
+        <tr><td><code>test-match-enroll.py</code></td><td>режим <code>match_enroll</code> узнаёт знакомый голос и заводит профиль новому</td></tr>
+        <tr><td><code>test-voiceprint-identity.py</code></td><td>выгрузка кандидатов и простановка имени работают на реальной структуре стора и реестра</td></tr>
+      </table>
+    </section>
     <section id="diag">
       <h2><span class="n">🩺</span>Диагностика и обслуживание узла</h2>
       <p class="step-meta">снять состояние узла одним файлом · обновить узел · починить venv</p>
