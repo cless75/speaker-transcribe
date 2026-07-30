@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Run the Audio Inbox watcher: scan the configured sources, transcribe new files,
   write transcripts + state to the outputs declared in the node config.

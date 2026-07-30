@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Health check for a node: is the watcher alive, is the hub reachable, is the queue moving?
 

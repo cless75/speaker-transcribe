@@ -1,4 +1,4 @@
-# Транскрибация через media_transcribe.py (stdin JSON).
+﻿# Транскрибация через media_transcribe.py (stdin JSON).
 # Двухшаговый speaker_pass: сначала asr_only (или full) с тем же -OutputDir (по умолчанию …\Transcripts рядом с медиа), затем speaker_pass с тем же -InputPath.
 # Явный путь к ASR-сырью: -AsrRawJsonPath (только при ExecutionMode speaker_pass).
 # Карта имён для сегментов (ключи как «Speaker 1» … после диаризации): JSON-объект в файле, путь через -SpeakerMapPath.

@@ -1,4 +1,4 @@
-# uninstall-node.ps1 -- remove this node's footprint from the machine.
+﻿# uninstall-node.ps1 -- remove this node's footprint from the machine.
 #
 # What it can clean (each behind its own switch, nothing implicit):
 #   scheduled tasks   every task whose NAME or ACTION points at this watcher

@@ -265,8 +265,14 @@ def query_watch_task(cur_user: str) -> list[str]:
                      "не видны. Проверь ещё раз из admin-шелла.")
     for name, state, owner, logon, last, res, exe in tasks:
         hint = ""
-        if str(res).strip() in ("267011", "267009"):
+        code = str(res).strip()
+        if code in ("267011", "267009"):
             hint = " (267011=ни разу не запускалась / 267009=выполняется)"
+        elif code == "103":
+            hint = " (103=пре-флайт вотчера: нет venv/watcher/конфига — причина строкой FATAL в watch.log)"
+        elif code == "1":
+            hint = (" (1=скрипт не выполнился: .ps1 не распарсился — не-ASCII без BOM ломает PS 5.1 — "
+                    "либо старая задача не пробрасывает код; лог при этом остаётся пустым)")
         lines.append(f"  scheduled task : '{name}' — {state}, посл.запуск {last}, результат {res}{hint}")
         owner_short = str(owner).split("\\")[-1].strip()
         same = owner_short.lower() == str(cur_user).strip().lower()
@@ -307,6 +313,39 @@ def collect_env_refs(cfg: dict | None) -> list[str]:
 
     walk(cfg or {})
     return found
+
+
+def probe_access(path: str | None, need_write: bool) -> str:
+    """Реальный доступ к каталогу: не «существует», а «читается / можно писать».
+
+    Проверяем пробной записью, а не атрибутами: под задачей путь может быть виден,
+    но недоступен на запись (чужой профиль, ACL, диск смонтирован read-only), и
+    вотчер тогда падает уже посреди работы.
+    """
+    if not path:
+        return "не задан"
+    p = pathlib.Path(str(path)).expanduser()
+    if not p.exists():
+        return f"НЕ СУЩЕСТВУЕТ ({p})"
+    if not p.is_dir():
+        return f"не каталог ({p})"
+    try:
+        next(iter(os.scandir(p)), None)
+    except PermissionError:
+        return f"НЕТ ДОСТУПА НА ЧТЕНИЕ ({p})"
+    except OSError as exc:  # noqa: BLE001
+        return f"ошибка чтения: {type(exc).__name__} ({p})"
+    if not need_write:
+        return "чтение ок"
+    probe = p / f".write-probe-{os.getpid()}"
+    try:
+        probe.write_text("probe", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return "чтение+запись ок"
+    except PermissionError:
+        return f"ЗАПРЕЩЕНА ЗАПИСЬ ({p}) — вотчер не сможет сюда писать"
+    except OSError as exc:  # noqa: BLE001
+        return f"ЗАПИСЬ НЕ УДАЛАСЬ: {type(exc).__name__} ({p})"
 
 
 def collect_file_secrets(cfg: dict | None) -> list[str]:
@@ -648,9 +687,36 @@ def main() -> int:
                 emit(f'       [Environment]::SetEnvironmentVariable("{name}","<значение>","Machine")')
     emit("  Подсказка: задача с триггером AtLogon наследует PATH/env ТОГО юзера, что залогинен.")
 
+    # -----------------------------------------------------------------------
+    emit("\n[9] Права доступа к каталогам (может ли вотчер туда писать)")
+    repo_dir = pathlib.Path(args.repo)
+    targets = [
+        ("logs (watch.log)", str(repo_dir / "logs"), True),
+        ("config", str(repo_dir / "config"), True),
+    ]
+    if cfg is not None:
+        hub_root = cfg.get("hub_root")
+        node_cfg = cfg.get("node") or {}
+        targets.append(("hub_root", hub_root, True))
+        if hub_root:
+            targets.append(("hub _meta", str(pathlib.Path(str(hub_root)) / "_meta"), True))
+        targets.append(("cache_root", node_cfg.get("cache_root"), True))
+    if venv:
+        targets.append(("venv", str(pathlib.Path(str(venv)).expanduser().parent.parent), False))
+    denied = False
+    for label, path, need_write in targets:
+        verdict = probe_access(path, need_write)
+        if "ЗАПРЕЩ" in verdict or "НЕТ ДОСТУПА" in verdict or "НЕ УДАЛАСЬ" in verdict:
+            denied = True
+        emit(f"  {label:17}: {verdict}")
+    if denied:
+        emit("    -> запуск идёт под юзером, которому каталог недоступен: проверь владельца задачи в [7]")
+        emit("       и права на каталог (вкладка «Безопасность» в свойствах папки)")
+
     emit("\n" + LINE)
     emit(" [2]/[3] — GPU и voiceprint; [7] — почему вотчер молчит (задача/Hub/окно/источники/лог);")
-    emit(" [8] — среда (пользователь/python-в-PATH/venv/env-переменные, Error 103).")
+    emit(" [8] — среда (пользователь/python-в-PATH/venv/env-переменные, Error 103);")
+    emit(" [9] — права на каталоги (чтение/запись пробным файлом).")
     emit(LINE)
 
     written = write_report(hub_meta, host_label, stamp)

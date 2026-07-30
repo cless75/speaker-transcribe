@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Install (or remove) a Windows Scheduled Task that runs the watcher continuously.
 
@@ -97,6 +97,10 @@ $inner = "& '$watcher' -Once -Config '$Config'"
 if (-not $NoAutoUpdate) { $inner += " -Pull" }
 if ($PythonBin) { $inner += " -PythonBin '$PythonBin'" }
 $inner += " *>> '$logFile'"
+# powershell.exe -Command "& 'script.ps1'" НЕ пробрасывает код возврата скрипта:
+# любой ненулевой выход превращается в 1, и distinctive exit 103 (пре-флайт вотчера)
+# в планировщике не виден. Явный exit возвращает настоящий код в LastTaskResult.
+$inner += "; exit `$LASTEXITCODE"
 $argument = "-NoProfile -ExecutionPolicy Bypass -Command `"$inner`""
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument

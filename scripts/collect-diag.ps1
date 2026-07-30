@@ -1,4 +1,4 @@
-# collect-diag.ps1 -- collect everything needed to debug a silent node into ONE file.
+﻿# collect-diag.ps1 -- collect everything needed to debug a silent node into ONE file.
 #
 # Why: the console window closes (or scrolls away) before a human can read the
 # error, and there is no shared clipboard between machines. This script captures
