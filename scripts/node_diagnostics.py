@@ -173,11 +173,42 @@ def collect_env_refs(cfg: dict | None) -> list[str]:
     return found
 
 
+def add_dir_to_path(dir_to_add: str, machine: bool) -> str:
+    """Добавить каталог в PATH (User по умолч.; Machine нужен admin). Идемпотентно. Windows."""
+    if sys.platform != "win32":
+        return "(не Windows — добавь каталог в PATH вручную)"
+    scope = "Machine" if machine else "User"
+    d = dir_to_add.replace("'", "''")
+    ps = (
+        f"$d='{d}';$s='{scope}';"
+        "$cur=[Environment]::GetEnvironmentVariable('Path',$s);"
+        "$parts=@(); if($cur){$parts=$cur.Split(';')};"
+        "if($parts -notcontains $d){"
+        "  $new=((@($parts)+$d)|Where-Object{$_ -ne ''}) -join ';';"
+        "  [Environment]::SetEnvironmentVariable('Path',$new,$s);"
+        "  Write-Output ('ДОБАВЛЕНО в '+$s+' PATH: '+$d+'  (перелогинься/перезапусти задачу)')"
+        "} else { Write-Output ('уже в '+$s+' PATH: '+$d) }"
+    )
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, text=True, timeout=25)
+    except Exception as exc:  # noqa: BLE001
+        return f"(ошибка: {exc})"
+    out = (r.stdout or "").strip() or (r.stderr or "").strip()
+    if r.returncode != 0 and machine:
+        return f"НЕ УДАЛОСЬ (Machine требует запуск от администратора): {out}"
+    return out or f"(rc={r.returncode})"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=str(default_repo()))
     ap.add_argument("--auto", "--no-pause", dest="auto", action="store_true",
                     help="автоматический режим: не ждать клавишу в конце (для scheduled/agent)")
+    ap.add_argument("--fix-path", dest="fix_path", action="store_true",
+                    help="добавить каталог venv (где python) в PATH — лечит Error 103")
+    ap.add_argument("--machine", action="store_true",
+                    help="с --fix-path: писать в PATH уровня Machine (нужен admin); иначе User")
     args = ap.parse_args()
 
     cfg_path = pathlib.Path(args.repo) / "config" / "node.local.json"
@@ -402,6 +433,19 @@ def main() -> int:
              ("ок" if vp.exists() else "НЕ НАЙДЕН (venv отсутствует или другой путь)"))
     else:
         emit("  transcribe_python    : не задан — вотчер возьмёт bare 'python' из PATH (уязвимо к Error 103)")
+    # Каталог venv (где python.exe) в PATH? Если нет — bare 'python' не резолвится = Error 103.
+    if venv:
+        venv_bin = str(pathlib.Path(str(venv)).expanduser().parent)
+        parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+        def _norm(p: str) -> str:
+            return os.path.normcase(os.path.normpath(p))
+        on_path = any(_norm(p) == _norm(venv_bin) for p in parts)
+        emit(f"  venv-каталог в PATH  : " + ("да" if on_path else f"НЕТ — {venv_bin}"))
+        if args.fix_path:
+            emit(f"  --fix-path           : {add_dir_to_path(venv_bin, args.machine)}")
+        elif not on_path:
+            emit("    -> добавить в PATH: node_diagnostics.py --fix-path            (для текущего юзера)")
+            emit("                        node_diagnostics.py --fix-path --machine  (для всех, admin)")
     refs = collect_env_refs(cfg) if cfg is not None else []
     if not refs:
         emit("  env-переменные       : в конфиге нет ссылок env:VAR")
