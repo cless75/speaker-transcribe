@@ -19,6 +19,7 @@ param(
     [string]$CudaVersion = "cu128",   # соответствует requirements.txt; драйвер 590+ тянет
     [switch]$SyncConfig,
     [switch]$NoDiag,
+    [switch]$Auto,        # автоматический режим: не ждать клавишу в конце (scheduled/agent)
     [switch]$DryRun
 )
 
@@ -124,8 +125,9 @@ if ($NoDiag) { Write-Host "   пропуск (-NoDiag)" }
 else {
     $diag = Join-Path $Repo "scripts\node_diagnostics.py"
     if (Test-Path $diag) {
+        # диагностику зовём в авторежиме — паузу для чтения делает update-node в самом конце
         Do-Run "python $diag" {
-            & $venv $diag --repo $Repo
+            & $venv $diag --repo $Repo --auto
         }
     } else { Warn "scripts\node_diagnostics.py не найден (сделай git pull)" }
 }
@@ -133,3 +135,12 @@ else {
 Head "ГОТОВО"
 if ($DryRun) { Write-Host " Это был DRY-RUN. Убери -DryRun, чтобы применить." }
 else { Write-Host " Отчёт диагностики — в Hub: _meta\801-diag-$hostLabel.txt" }
+
+# Пауза, чтобы человек успел прочитать вывод, если окно закроется после запуска.
+# Пропускается в -Auto и в неинтерактивных сессиях (scheduled task / agent), чтобы не подвиснуть.
+if (-not $Auto -and [Environment]::UserInteractive) {
+    Write-Host ""
+    Write-Host "  [нажмите любую клавишу, чтобы закрыть окно] " -NoNewline
+    try { $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { }
+    Write-Host ""
+}

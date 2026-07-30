@@ -94,9 +94,39 @@ def default_repo() -> pathlib.Path:
     return pathlib.Path(r"C:\work\speaker-transcribe")
 
 
+def maybe_pause(auto: bool) -> None:
+    """Пауза в конце — чтобы человек успел прочитать отчёт в сессии.
+
+    Ждёт нажатия ОДНОЙ клавиши. Пропускается: (1) в авторежиме (--auto); (2) когда ввод
+    не интерактивный — scheduled task / пайп / запуск из агента (stdin не TTY), чтобы
+    автоматические прогоны не подвисали в ожидании клавиши.
+    """
+    if auto:
+        return
+    try:
+        if not sys.stdin.isatty():
+            return
+    except Exception:
+        return
+    prompt = "\n  [нажмите любую клавишу, чтобы закрыть окно] "
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            print(prompt, end="", flush=True)
+            msvcrt.getch()          # читает один символ без Enter
+            print()
+        else:
+            print(prompt, end="", flush=True)
+            sys.stdin.read(1)
+    except Exception:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=str(default_repo()))
+    ap.add_argument("--auto", "--no-pause", dest="auto", action="store_true",
+                    help="автоматический режим: не ждать клавишу в конце (для scheduled/agent)")
     args = ap.parse_args()
 
     cfg_path = pathlib.Path(args.repo) / "config" / "node.local.json"
@@ -266,6 +296,7 @@ def main() -> int:
         # печатается ПОСЛЕ записи, поэтому в файле этой строки нет — и хорошо
         print(f"\n>>> отчёт записан: {written}")
         print(">>> он лежит в _meta Hub — можно прочитать с любой машины / из чата")
+    maybe_pause(args.auto)
     return 0
 
 
