@@ -333,8 +333,43 @@ def sanitize_pid(value: str) -> str:
     return v
 
 
+# Метка времени в имени файла: сначала 4-значный год (Zoom/GMT ``20260603-065526``),
+# потом 2-значный (диктофон ``260727_101652``) — иначе YYYYMMDD съедается вторым шаблоном.
+_NAME_TS_PATTERNS = (
+    (re.compile(r"(?<!\d)(\d{4})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})(?!\d)"), False),
+    (re.compile(r"(?<!\d)(\d{2})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})(?!\d)"), True),
+)
+
+
+def parse_started_from_name(stem: str) -> dt.datetime | None:
+    """Recording start time encoded in the filename, or ``None``.
+
+    Recorders and meeting apps stamp the *recording* time into the name
+    (``Голос 260727_101652``, ``GMT20260603-065526``). That is the only field
+    that survives copying: mtime becomes the copy time, so a batch dropped into
+    the inbox at once collapses onto one timestamp — and therefore one SessionId.
+    """
+    for pattern, two_digit_year in _NAME_TS_PATTERNS:
+        for m in pattern.finditer(stem or ""):
+            year, mon, day, hh, mi, ss = (int(g) for g in m.groups())
+            if two_digit_year:
+                year += 2000
+            try:
+                return dt.datetime(year, mon, day, hh, mi, ss)
+            except ValueError:
+                continue  # не дата (напр. телефон/счётчик) — пробуем следующее совпадение
+    return None
+
+
 def started_at_for(audio: pathlib.Path) -> dt.datetime:
-    """Best-effort recording time: file mtime (stable across re-scans)."""
+    """Best-effort recording time: timestamp in the filename, else file mtime.
+
+    mtime is only a fallback: it reflects the last copy, not the recording, so
+    it is not distinctive for a batch copied in one go.
+    """
+    from_name = parse_started_from_name(audio.stem)
+    if from_name:
+        return from_name
     try:
         return dt.datetime.fromtimestamp(audio.stat().st_mtime)
     except OSError:
@@ -347,6 +382,63 @@ def generate_session_id(audio: pathlib.Path, started_at_dt: dt.datetime) -> str:
     time_part = started_at_dt.strftime("T%H%M")
     slug = slugify_from_filename(audio.stem) or "voice-note"
     return f"S{date_part}{time_part}-{slug}"
+
+
+def _source_file_name(meta_value: str) -> str:
+    """basename of a run-meta ``source_file`` recorded on any platform."""
+    return meta_value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def session_dir_taken_by_other(transcript_dir: pathlib.Path, audio: pathlib.Path) -> bool:
+    """True if this session dir already holds a *different* recording's run.
+
+    Ownership comes from ``*-run-meta.json`` (it stores ``source_file``). No
+    run-meta -> not a collision: catch-up matches transcripts by name and sorts
+    it out, and we must not push an already-processed file into a new dir.
+    """
+    if not transcript_dir.is_dir():
+        return False
+    try:
+        metas = sorted(transcript_dir.glob("*-run-meta.json"))
+    except OSError:
+        return False
+    seen_other = False
+    for meta in metas:
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        src = data.get("source_file") or ""
+        if not src:
+            continue
+        if _source_file_name(src) == audio.name:
+            return False  # каталог наш — используем его
+        seen_other = True
+    return seen_other
+
+
+def resolve_session_dirs(cfg: dict, pid: str, audio: pathlib.Path,
+                         started: dt.datetime) -> tuple[str, dict, pathlib.Path, pathlib.Path]:
+    """SessionId + output dirs, stepping aside from dirs owned by another file.
+
+    Two recordings can still start within the same minute (SessionId is
+    minute-grained), so a busy dir gets a ``-2``, ``-3``… suffix instead of two
+    runs writing over each other.
+    """
+    base_sid = generate_session_id(audio, started)
+    sid = base_sid
+    for attempt in range(1, 51):
+        ctx = session_placeholder_ctx(cfg, pid, sid, started)
+        transcript_dir = resolve_output_dir(cfg, "transcript_dir", ctx,
+                                            audio.parent / "Transcripts")
+        if not session_dir_taken_by_other(transcript_dir, audio):
+            state_dir = resolve_output_dir(cfg, "state_dir", ctx, transcript_dir)
+            return sid, ctx, transcript_dir, state_dir
+        sid = f"{base_sid}-{attempt + 1}"
+    log(f"session id collisions exhausted for {audio.name}; using {sid}")
+    ctx = session_placeholder_ctx(cfg, pid, sid, started)
+    transcript_dir = resolve_output_dir(cfg, "transcript_dir", ctx, audio.parent / "Transcripts")
+    return sid, ctx, transcript_dir, resolve_output_dir(cfg, "state_dir", ctx, transcript_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -900,13 +992,63 @@ def marker_processed_asr(audio: pathlib.Path) -> pathlib.Path:
     return audio.with_suffix(audio.suffix + ".processed-asr")
 
 
+_SESSIONS_INDEX_CACHE: dict[str, dict[str, pathlib.Path]] = {}
+
+
+def _sessions_root_of(transcript_dir: pathlib.Path) -> pathlib.Path | None:
+    """Project-level ``sessions/`` above a resolved per-session transcript dir."""
+    for parent in transcript_dir.parents:
+        if parent.name == "sessions":
+            return parent
+    return None
+
+
+def _sessions_run_meta_index(sessions_root: pathlib.Path) -> dict[str, pathlib.Path]:
+    """``basename(source_file) -> transcript`` over every run under ``sessions/``.
+
+    run-meta records which audio a run came from, so this survives what names
+    alone cannot: a run written under a different SessionId or slug (an older
+    collision, or a one-off script that transliterates differently). Built once
+    per process — the tree is on a synced drive and rglob over it is not cheap.
+    """
+    key = str(sessions_root)
+    cached = _SESSIONS_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    index: dict[str, pathlib.Path] = {}
+    try:
+        metas = sessions_root.rglob("*-run-meta.json")
+    except OSError:
+        metas = iter(())
+    for meta in metas:
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        src = data.get("source_file") or ""
+        if not src:
+            continue
+        transcript = meta.with_name(meta.name.replace("-run-meta.json", "-transcript.md"))
+        try:
+            if not transcript.is_file() or transcript.stat().st_size == 0:
+                continue
+        except OSError:
+            continue
+        index.setdefault(_source_file_name(src), transcript)
+    _SESSIONS_INDEX_CACHE[key] = index
+    log(f"run-meta index: {len(index)} completed runs under {sessions_root}", level="debug")
+    return index
+
+
 def existing_transcript(audio: pathlib.Path,
                         transcript_dir: pathlib.Path | None = None) -> pathlib.Path | None:
     """Look for an already-written transcript (catch-up of pre-existing work).
 
     Searches, in order: the resolved ``transcript_dir`` for this file, a local
-    ``Transcripts/`` next to the audio, and historical sidecar formats. Falls back
-    to recording-timestamp matching because the ASR worker transliterates names.
+    ``Transcripts/`` next to the audio, historical sidecar formats, and finally
+    every run recorded under the project's ``sessions/`` keyed by run-meta
+    ``source_file``. Falls back to recording-timestamp matching because the ASR
+    worker transliterates names.
     """
     base = audio.stem
     direct = [
@@ -928,13 +1070,17 @@ def existing_transcript(audio: pathlib.Path,
         if c.is_file():
             return c
     tokens = re.findall(r"\d{6,}", base)
-    if not tokens:
-        return None
     for d in search_dirs:
-        if d and d.is_dir():
+        if d and d.is_dir() and tokens:
             for tr in d.glob("*-transcript.md"):
                 if any(token in tr.name for token in tokens):
                     return tr
+    if transcript_dir:
+        sessions_root = _sessions_root_of(transcript_dir)
+        if sessions_root and sessions_root.is_dir():
+            hit = _sessions_run_meta_index(sessions_root).get(audio.name)
+            if hit:
+                return hit
     return None
 
 
@@ -1970,10 +2116,7 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
         return
 
     # resolve outputs early (used for catch-up search + ASR + state mirror)
-    sid_preview = generate_session_id(audio, started)
-    ctx = session_placeholder_ctx(cfg, pid, sid_preview, started)
-    transcript_dir = resolve_output_dir(cfg, "transcript_dir", ctx, audio.parent / "Transcripts")
-    state_dir = resolve_output_dir(cfg, "state_dir", ctx, transcript_dir)
+    sid_preview, ctx, transcript_dir, state_dir = resolve_session_dirs(cfg, pid, audio, started)
 
     # 1) catch-up: existing transcript without a sidecar -> mark asr-done
     if not state_file.exists():
@@ -2254,8 +2397,7 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                     continue
                 pid, _ = route_pid_for_audio(audio, root, source, cfg, mapper)
                 started = started_at_for(audio)
-                ctx = session_placeholder_ctx(cfg, pid, generate_session_id(audio, started), started)
-                transcript_dir = resolve_output_dir(cfg, "transcript_dir", ctx, audio.parent / "Transcripts")
+                _sid, _ctx, transcript_dir, _state_dir = resolve_session_dirs(cfg, pid, audio, started)
                 transcript = existing_transcript(audio, transcript_dir)
                 if not transcript:
                     continue
