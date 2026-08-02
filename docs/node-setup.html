@@ -791,7 +791,7 @@
       <p class="step-meta">разборы поломок вынесены в отдельный документ</p>
       <p>Диагностика и ремонт узла живут в отдельном файле —
         <a class="inl" href="troubleshooting.html"><b>troubleshooting.html</b></a>: там таблица симптомов
-        и семь разборов реальных поломок с причиной и лечением.</p>
+        и десять разборов реальных поломок с причиной и лечением.</p>
       <table>
         <tr><th>Что случилось</th><th>Разбор</th></tr>
         <tr><td><code>No Python at '"C:\...\python.exe'</code>, выход <code>103</code></td><td><a class="inl" href="troubleshooting.html#case-venv">venv не запускается</a> — лечится <code>-FixVenv</code>, без удаления пакетов</td></tr>
@@ -801,6 +801,8 @@
         <tr><td>Диаризация падает на загрузке модели</td><td><a class="inl" href="troubleshooting.html#case-token">токен не виден процессу задачи</a></td></tr>
         <tr><td>Прогон идёт на CPU вместо GPU</td><td><a class="inl" href="troubleshooting.html#case-gpu">CUDA не используется</a></td></tr>
         <tr><td>Ошибку в консоли не успели прочитать</td><td><a class="inl" href="troubleshooting.html#case-console">писать вывод файлом</a>, а не читать окно</td></tr>
+        <tr><td>Задача падает с результатом <code>1</code>, лог не растёт</td><td><a class="inl" href="troubleshooting.html#case-path">каталог venv не в PATH</a> — лечится <code>--fix-path --machine</code></td></tr>
+        <tr><td>Из пачки записей расшифрована одна</td><td><a class="inl" href="troubleshooting.html#case-batch">общий mtime дал общий SessionId</a> — обновить код, затем <code>--catch-up-only</code></td></tr>
       </table>
       <div class="note">Не знаете, с чего начать — снимите состояние узла одним действием:
         двойной клик по <code>scripts\collect-diag.cmd</code>. Отчёт ляжет в <code>logs\</code> и в Hub

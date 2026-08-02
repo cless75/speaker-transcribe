@@ -120,6 +120,8 @@
       <a href="#case-token">6 · токен и диаризация</a>
       <a href="#case-gpu">7 · CUDA не используется</a>
       <a href="#case-console">8 · окно закрылось</a>
+      <a href="#case-path">9 · venv не в PATH (103 у задачи)</a>
+      <a href="#case-batch">10 · пачка записей в одной сессии</a>
       <div class="grp">Куда дальше</div>
       <a href="node-setup.html">← Развёртывание узла</a>
       <a href="hf-token.html">Токен Hugging Face</a>
@@ -164,6 +166,8 @@
         <tr><td><code>No Python at '"C:\...\python.exe'</code>, выход <code>103</code></td><td>venv есть, но базовый Python недоступен — <a class="inl" href="#case-venv">разбор 1</a></td></tr>
         <tr><td>После <code>-SyncConfig</code> узел перестал видеть Hub</td><td>копия конфига в Hub отстала от машины — <a class="inl" href="#case-drive">разбор 2</a></td></tr>
         <tr><td>Задача зарегистрирована, но транскриптов нет</td><td>владелец задачи ≠ узловой юзер — <a class="inl" href="#case-owner">разбор 3</a></td></tr>
+        <tr><td>Задача стартует и сразу падает с результатом <code>1</code></td><td>каталог venv не в PATH юзера задачи — <a class="inl" href="#case-path">разбор 9</a></td></tr>
+        <tr><td>Скинули пачку записей — уцелел транскрипт одной</td><td>общий mtime дал общий SessionId (до <code>3ccbaa5</code>) — <a class="inl" href="#case-batch">разбор 10</a></td></tr>
         <tr><td>Окно PowerShell стартует само, а <code>watch.log</code> не растёт</td><td>запуск идёт не задачей, а из автозагрузки — <a class="inl" href="#case-autostart">разбор 5</a></td></tr>
         <tr><td>Диагностика пишет «задача не найдена», хотя она есть</td><td>задача принадлежит другому юзеру и не видна — <a class="inl" href="#case-cleanup">разбор 4</a></td></tr>
         <tr><td>Диаризация падает на загрузке модели</td><td>не принят gated-доступ pyannote или не виден токен — <a class="inl" href="#case-token">разбор 6</a></td></tr>
@@ -368,8 +372,65 @@
         последний прогон.</div>
     </section>
 
+    <section id="case-path">
+      <h2><span class="n">9</span>Задача стартует и сразу падает: venv не в PATH</h2>
+      <p><b>Симптом:</b> задача <code>Ready</code>, владелец — правильный юзер, но каждый прогон
+        завершается мгновенно, а <code>watch.log</code> не растёт часами:</p>
+      <pre><code><span class="k">Get-ScheduledTaskInfo</span> -TaskName <span class="s">speaker-transcribe-watch</span>
+<span class="c">LastTaskResult : 1</span></code></pre>
+      <p><b>Причина:</b> отличается от <a class="inl" href="#case-venv">разбора 1</a> — venv здесь
+        исправен и запускается руками. Не хватает другого: каталог <code>…\venvs\asr\Scripts</code>
+        отсутствует в PATH того юзера, под которым идёт задача, и оболочка падает до первой полезной
+        строки. Диагностика показывает это в секции <b>[8]</b> прямой строкой:</p>
+      <pre><code>  python в PATH        : C:\Users\corne\AppData\...\Python311\python.EXE
+  transcribe_python    : C:/work/venvs/asr/Scripts/python.exe  -&gt;  ок
+  venv-каталог в PATH  : НЕТ — C:\work\venvs\asr\Scripts</code></pre>
+      <p><b>Лечение</b> — из admin-шелла, чтобы PATH записался на уровне машины и пережил смену
+        залогиненного пользователя:</p>
+      <pre><code><span class="k">python</span> scripts\node_diagnostics.py --fix-path --machine --auto</code></pre>
+      <p>Затем <b>закрыть окно и открыть новое</b> (у запущенных процессов остаётся старое окружение)
+        и поднять задачу:</p>
+      <pre><code><span class="k">Start-ScheduledTask</span> -TaskName <span class="s">speaker-transcribe-watch</span>
+<span class="k">Get-ScheduledTaskInfo</span> -TaskName <span class="s">speaker-transcribe-watch</span> | <span class="k">Format-List</span> LastRunTime, LastTaskResult</code></pre>
+      <div class="note">Без <code>--machine</code> правка ложится только на текущего юзера. Этого
+        достаточно, пока задача принадлежит ему же, но переживёт не всякий сценарий — при переезде
+        узла на выделенную учётку PATH придётся чинить заново.</div>
+      <div class="warn"><code>--auto</code> обязателен, когда команду запускает планировщик или агент:
+        без него скрипт ждёт нажатия клавиши и висит до таймаута.</div>
+    </section>
+
+    <section id="case-batch">
+      <h2><span class="n">10</span>Скинули пачку записей — уцелела одна</h2>
+      <p><b>Симптом:</b> в inbox легли, скажем, 32 файла с диктофона; отработала пачка целиком,
+        но в <code>sessions\</code> лежит горстка папок, а транскриптов заметно меньше, чем записей.
+        Файлы при этом помечены <code>asr-done</code>, поэтому вотчер к ним больше не вернётся.</p>
+      <p><b>Причина</b> (в коде до <code>3ccbaa5</code>): SessionId строился от <b>mtime</b> файла.
+        У пачки, скопированной в inbox одним махом, mtime одинаковый — весь набор получал общий
+        <code>S{YYYYMMDD}T{HHMM}-{slug}</code>, прогоны писали в один каталог и затирали артефакты
+        друг друга. Коллизия при этом не разводилась.</p>
+      <p><b>Лечение — обновить код:</b></p>
+      <pre><code><span class="k">git</span> pull
+<span class="k">python</span> scripts\test-session-id.py   <span class="c">:: ожидается PASS</span></code></pre>
+      <p>После обновления время записи берётся из метки в имени файла (<code>260727_101652</code>,
+        <code>GMT20260603-065526</code>), mtime остаётся запасным вариантом, а совпадение минуты
+        разводится суффиксом <code>-2</code>.</p>
+      <p><b>Разобрать последствия</b> — прогон без ASR, только пометка уже сделанного:</p>
+      <pre><code><span class="k">python</span> src\audio_inbox_watch.py --catch-up-only</code></pre>
+      <p>Он ищет готовый прогон по <code>source_file</code> из <code>run-meta.json</code>, поэтому
+        находит и то, что лежит под чужим SessionId или slug — например, записанное разовым скриптом
+        в обход вотчера.</p>
+      <div class="note">Записи, которые действительно не расшифровывались, catch-up не трогает: они
+        остаются в очереди и уйдут в обычный прогон. Чтобы перегнать заново уже обработанное, нужно
+        снять sidecar-ы (<code>.processed-asr</code>, <code>.state.json</code>) <b>и</b> удалить папку
+        сессии — иначе catch-up снова пометит файл готовым.</div>
+      <div class="warn">Дубликаты вида <code>Запись (1).m4a</code>, которые Google Drive плодит при
+        повторной выгрузке, catch-up закрыть не может: их run-meta ссылается на оригинал. Их либо
+        удаляют из inbox (сверив <code>Get-FileHash</code>), либо вотчер потратит на них полный
+        прогон.</div>
+    </section>
+
     <footer>
-      <div>Troubleshooting ASR-узла · self-contained · версия от 2026-07-30 · язык: RU ·
+      <div>Troubleshooting ASR-узла · self-contained · версия от 2026-08-02 · язык: RU ·
         основной документ: <a class="inl" href="node-setup.html">node-setup.html</a></div>
     </footer>
   </main>
