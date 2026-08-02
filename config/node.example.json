@@ -34,6 +34,9 @@
   },
 
   "hub_root": "<GOOGLE_DRIVE>/Hub",
+  "_hub_wait_note": "гонка старта: задача планировщика стартует по AtLogOn, а облачный диск монтируется через секунды-минуты ПОСЛЕ логина — прогон в этом окне не видел ни Hub, ни секрет на нём и уходил в 'nothing to do'. hub_wait_seconds = сколько ждать появления hub_root перед прогоном (0 = не ждать вовсе, для узлов без облачного Hub); hub_wait_poll_sec = период проб. Здоровый узел не платит ничем: первая проба проходит сразу.",
+  "hub_wait_seconds": 300,
+  "hub_wait_poll_sec": 10,
   "_path_links_note": "необязательно: junction/симлинки, чтобы стабильный путь (напр. hub_root) резолвился, когда Google Drive монтируется по другой букве/пути под юзером задачи. update-node.ps1 (шаг 2b) создаёт недостающие. kind: Junction (по умолч., без admin, ТОЛЬКО локальный NTFS-target) | SymbolicLink (гибче, но нужен admin/Developer Mode). ВАЖНО: если диск под этим юзером вообще НЕ смонтирован (виртуальный per-user GDrive), линк не поможет — задачу надо гонять под юзером с примонтированным диском (см. §6 deployment).",
   "path_links": [],
   "_voiceprint_mode_note": "off = diarization only (SPEAKER_00/01…); enroll = enroll ONLY the dominant speaker per file (bootstrap, no matching); match = identify speakers against the existing registry, no new enrolls; match_enroll = RECOMMENDED — match every speaker against the registry, enroll the unmatched ones as new profiles (recognize known, remember new; one profile per person). Requires speaker_mode: diarize + HF token.",

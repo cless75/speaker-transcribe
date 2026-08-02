@@ -71,6 +71,12 @@ DEFAULT_SKIP_FILENAME_SUFFIXES = [
 ]
 DEFAULT_SKIP_FILENAME_PATTERNS = [r"^_PROJECT-.*", r"^_README.*"]
 
+# Облачный Hub монтируется per-user и ПОСЛЕ логина, а задача стартует по AtLogOn —
+# прогон успевает увидеть мир без Hub'а. Ждём появления каталога вместо того, чтобы
+# констатировать его отсутствие (см. wait_for_hub_root).
+DEFAULT_HUB_WAIT_SECONDS = 300
+DEFAULT_HUB_WAIT_POLL_SEC = 10
+
 # Cyrillic -> Latin transliteration for slug generation (filename -> ASCII slug).
 _CYR_TRANSLIT = {
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
@@ -632,6 +638,65 @@ def resolved_sources(cfg: dict) -> list[tuple[pathlib.Path, dict]]:
         root = pathlib.Path(resolve_template(root_tpl, ctx)).expanduser()
         out.append((root, source))
     return out
+
+
+def resolved_hub_root(cfg: dict) -> pathlib.Path | None:
+    """``hub_root`` из конфига с раскрытыми плейсхолдерами (None — не задан)."""
+    raw = cfg.get("hub_root")
+    if not raw:
+        return None
+    try:
+        return pathlib.Path(resolve_template(str(raw), base_placeholder_ctx(cfg))).expanduser()
+    except Exception:  # noqa: BLE001 — кривой шаблон не должен ронять прогон
+        return None
+
+
+def wait_for_hub_root(cfg: dict) -> bool:
+    """Дождаться, пока смонтируется ``hub_root``. True — доступен, False — не появился.
+
+    Задача планировщика стартует по AtLogOn, а облачный диск (Google Drive и любое
+    другое per-user монтирование) поднимается через секунды-минуты ПОСЛЕ логина.
+    Прогон, попавший в это окно, видел мир без Hub'а: секрет из
+    ``file:{hub_root}/...`` не читался, ни один source root не пробивался, и sweep
+    уходил в «nothing to do», хотя минутой позже всё было на месте.
+
+    Поэтому ждём появления каталога, а не констатируем его отсутствие. Здоровый
+    узел не платит за это ничем: первая проба проходит сразу. Настройки —
+    ``hub_wait_seconds`` (0 = не ждать, для узлов без облачного Hub) и
+    ``hub_wait_poll_sec``.
+    """
+    hub = resolved_hub_root(cfg)
+    if hub is None:
+        return True  # узел без hub_root — ждать нечего
+    ok, err = _probe_dir(hub)
+    if ok:
+        return True
+    total_sec = float(cfg.get("hub_wait_seconds", DEFAULT_HUB_WAIT_SECONDS))
+    poll_sec = max(1.0, float(cfg.get("hub_wait_poll_sec", DEFAULT_HUB_WAIT_POLL_SEC)))
+    if total_sec <= 0:
+        if err:
+            log(err)
+        return False
+    span = f"{total_sec / 60:.0f} мин" if total_sec >= 120 else f"{total_sec:.0f} с"
+    log(f"hub_root {hub} пока недоступен — жду монтирования до {span} "
+        f"(проба каждые {poll_sec:.0f} с)")
+    started = time.monotonic()
+    deadline = started + total_sec
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        time.sleep(min(poll_sec, left))
+        ok, err = _probe_dir(hub)
+        if ok:
+            log(f"hub_root {hub} смонтирован через ~{time.monotonic() - started:.0f} с "
+                "— продолжаю прогон")
+            return True
+    if err:
+        log(err)
+    log(f"hub_root {hub} не появился за {span}: облачный диск не смонтирован "
+        "в сессии юзера, под которым идёт прогон (проверить логин в диск и букву в конфиге)")
+    return False
 
 
 def _discover_project_inboxes(hub_root: pathlib.Path, source: dict, cfg: dict
@@ -2579,6 +2644,11 @@ def main() -> int:
                 sys.stderr.write(f"status published to {published}\n")
         return 2
     cfg["_config_dir"] = str(cfg_path.parent)
+    # Ждать Hub нужно ДО чтения секретов: токен обычно лежит на нём самом
+    # (file:{hub_root}/_meta/.hf-token). Если диск так и не поднялся — идём дальше:
+    # локальные источники (если они есть) отработают, а run_once честно скажет,
+    # что читать нечего.
+    wait_for_hub_root(cfg)
     apply_config_secrets(cfg)
 
     try:

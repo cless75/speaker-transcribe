@@ -132,6 +132,9 @@ config-driven:
 - **State machine** per file via a sidecar `*.state.json`: `queued -> in-progress
   -> asr-done` (with retry / `_failed/` on repeated errors).
 - **CPU-aware**: defers ASR while the machine is busy (`respect_cpu_load`).
+- **Waits for the hub to mount** (`hub_wait_seconds`, `hub_wait_poll_sec`): the task
+  fires at logon, a cloud drive appears seconds-to-minutes later — a sweep in that
+  window would otherwise find no source root and do nothing.
 - **Multi-node** (opt-in `enable_multi_machine`): per-file claim-and-verify with a
   lease + heartbeat — several nodes share one hub without fragile locks.
 - **Zoom bundles**: a multi-file meeting export is transcribed once (primary), its
