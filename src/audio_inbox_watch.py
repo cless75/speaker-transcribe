@@ -1255,20 +1255,100 @@ def move_to_processed(audio: pathlib.Path, source_root: pathlib.Path, cfg: dict)
 # Signatures of a cloud-mount / input-staging failure (not the file's fault). Such a
 # failure defers the file (re-queued, no attempt counted) instead of quarantining it.
 _TRANSIENT_CLOUD_ERROR_SIGNS = (
-    "resource deadlock avoided",  # EDEADLK (errno 11): macOS fcopyfile on a GDrive src
-    "errno 11",
+    "resource deadlock avoided",  # EDEADLK: macOS File Provider on a dataless source
     "operation timed out",        # ETIMEDOUT (errno 60): dataless enumeration / read
     "errno 60",
+)
+
+# Bare "errno 11" means EDEADLK only on macOS. On Linux errno 11 is EAGAIN
+# ("resource temporarily unavailable") — a routine condition that has nothing to do
+# with a wedged mount, and treating it as transient would defer the file forever.
+_TRANSIENT_CLOUD_ERROR_SIGNS_DARWIN = ("errno 11",)
+
+# The staging code path is a strong hint of a cloud-read problem, but not proof: a
+# copy also fails on a full disk or a permission problem, and those must NOT be
+# deferred indefinitely — they need a human, and deferring hides them.
+_STAGING_CONTEXT_SIGNS = (
     "stage_ascii_input",          # failed staging the unicode->ascii input copy
     "input-ascii",                # staged-copy destination path in the traceback
+)
+_LOCAL_FAULT_SIGNS = (
+    "no space left", "errno 28",          # ENOSPC
+    "permission denied", "errno 13",      # EACCES
+    "read-only file system", "errno 30",  # EROFS
+    "file name too long", "errno 63",     # ENAMETOOLONG
+    "parameter is incorrect", "winerror 87",
 )
 
 
 def _is_transient_cloud_error(err_tail: str) -> bool:
     """True if an ASR failure looks like a wedged cloud mount / input-staging problem
-    (dataless read, fcopyfile deadlock) rather than a real problem with the media."""
+    (dataless read, materialization deadlock) rather than a real problem with the media.
+
+    A local fault (full disk, denied permission) that happens to surface inside the
+    staging copy is NOT transient: deferring it would loop forever on a condition no
+    retry can clear.
+    """
     t = (err_tail or "").lower()
-    return any(sign in t for sign in _TRANSIENT_CLOUD_ERROR_SIGNS)
+    if any(sign in t for sign in _LOCAL_FAULT_SIGNS):
+        return False
+    signs = _TRANSIENT_CLOUD_ERROR_SIGNS
+    if sys.platform == "darwin":
+        signs = signs + _TRANSIENT_CLOUD_ERROR_SIGNS_DARWIN
+    if any(sign in t for sign in signs):
+        return True
+    return any(sign in t for sign in _STAGING_CONTEXT_SIGNS)
+
+
+# A deferred file costs a full pickup (claim, cloud reads, sidecar writes) every tick.
+# Without a ceiling and a backoff a single wedged source burns the sweep budget forever
+# and the queue never drains — see the M4-MAC incident in 801-g7.
+DEFAULT_MAX_CLOUD_DEFERS = 20
+DEFAULT_CLOUD_DEFER_BACKOFF_MINUTES = [1, 5, 15, 60]
+
+
+def cloud_defer_backoff_minutes(defer_count: int, cfg: dict) -> float:
+    """Minutes to wait before the next attempt on a file deferred ``defer_count`` times.
+
+    Ladder, last step repeats: 1 -> 5 -> 15 -> 60 -> 60 ...
+    """
+    ladder = cfg.get("cloud_defer_backoff_minutes") or DEFAULT_CLOUD_DEFER_BACKOFF_MINUTES
+    if not ladder:
+        return 0.0
+    idx = max(0, min(int(defer_count) - 1, len(ladder) - 1))
+    try:
+        return float(ladder[idx])
+    except (TypeError, ValueError):
+        return float(DEFAULT_CLOUD_DEFER_BACKOFF_MINUTES[-1])
+
+
+def _cloud_defers_exhausted(state: dict, cfg: dict) -> bool:
+    """True once a file has been deferred so many times that deferring is pointless."""
+    ceiling = int(cfg.get("max_cloud_defers", DEFAULT_MAX_CLOUD_DEFERS))
+    if ceiling <= 0:          # 0 / negative disables deferring entirely
+        return True
+    return int(state.get("cloud_defers", 0)) >= ceiling
+
+
+def retry_gate_open(state: dict, now: dt.datetime | None = None) -> bool:
+    """False while a deferred file is still inside its backoff window.
+
+    An unreadable/absent stamp opens the gate: a garbled sidecar must not lock a real
+    recording out of the queue forever.
+    """
+    stamp = state.get("retry_not_before")
+    if not stamp:
+        return True
+    try:
+        return (now or dt.datetime.now()) >= dt.datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return True
+
+
+def clear_retry_gate(state: dict) -> None:
+    """Drop defer bookkeeping once the file gets through — a later failure starts fresh."""
+    state.pop("cloud_defers", None)
+    state.pop("retry_not_before", None)
 
 
 # ---------------------------------------------------------------------------
@@ -2223,8 +2303,13 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
             state["status"] = "asr-done"
             state["transcript_path"] = str(existing)
             state["last_error"] = None
+            # Adopting someone else's transcript is still a completion: stamp both ends
+            # so the record cannot read "finished but never started" (started_at is None
+            # on a fresh sidecar, and tidy_done measures age from finished_at).
+            state["started_at"] = state.get("started_at") or now_iso()
             state["finished_at"] = now_iso()
             state["reused_transcript"] = True
+            clear_retry_gate(state)
             atomic_write_json(state_file, state)
             retire_claim(audio, cfg)
             marker_processed_asr(audio).touch()
@@ -2279,13 +2364,16 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
         # it; re-raise so the sweep aborts (every file would hit the same wall).
         state["status"] = "queued"
         state["last_error"] = str(exc)
-        state["finished_at"] = now_iso()
+        # No finished_at here: the file goes back to the queue, it did not finish.
+        # Stamping it left a queued record carrying a completion time, and the next
+        # attempt then rewrote started_at to a LATER moment — finished before started.
         atomic_write_json(state_file, state)
         retire_claim(audio, cfg)
         raise
     duration = time.time() - t0
     state["duration_sec"] = round(duration, 1)
-    state["finished_at"] = now_iso()
+    # finished_at is stamped per outcome below, not here: only a terminal status
+    # (asr-done / failed) may carry it. Invariant: finished_at set <=> terminal.
     log(f"asr done: {audio.name} ok={ok} elapsed={duration/60:.1f}m "
         f"transcript={transcript.name if transcript else 'NONE'}")
 
@@ -2293,6 +2381,8 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
         state["status"] = "asr-done"
         state["transcript_path"] = str(transcript)
         state["last_error"] = None
+        state["finished_at"] = now_iso()
+        clear_retry_gate(state)
         if cfg.get("enable_multi_machine"):
             state["processed_by_host"] = host_label
         atomic_write_json(state_file, state)
@@ -2333,12 +2423,19 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     # _failed, which would strand real recordings that merely need the source made
     # available-offline. Defer instead — roll back to queued, keep the claim retired.
     err_tail = err_tail or "unknown error"
-    if _is_transient_cloud_error(err_tail):
+    if _is_transient_cloud_error(err_tail) and not _cloud_defers_exhausted(state, cfg):
+        defers = int(state.get("cloud_defers", 0)) + 1
+        max_defers = int(cfg.get("max_cloud_defers", DEFAULT_MAX_CLOUD_DEFERS))
+        delay_min = cloud_defer_backoff_minutes(defers, cfg)
         state["status"] = "queued"
         state["last_error"] = err_tail
+        state["cloud_defers"] = defers
+        state["retry_not_before"] = (dt.datetime.now()
+                                     + dt.timedelta(minutes=delay_min)).isoformat(timespec="seconds")
         atomic_write_json(state_file, state)
         retire_claim(audio, cfg)
-        log(f"ASR deferred — transient cloud/staging error, attempt not counted "
+        log(f"ASR deferred {defers}/{max_defers} — transient cloud/staging error, "
+            f"attempt not counted, next try not before +{delay_min:g} мин "
             f"(make the source available-offline if it persists): {audio.name}")
         return
 
@@ -2346,12 +2443,24 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     state["attempts"] = int(state.get("attempts", 0)) + 1
     state["last_error"] = err_tail
     max_attempts = int(cfg.get("max_attempts", 3))
+    if state.get("cloud_defers") and _is_transient_cloud_error(err_tail):
+        # Deferring stopped helping: the source never materialized. Fall through to the
+        # ordinary retry/quarantine path so the file can reach a terminal state instead
+        # of being re-queued forever — an unbounded defer is how a single wedged file
+        # racks up thousands of no-op runs (observed on M4-MAC: 14 776 in 24h).
+        log(f"cloud defers exhausted ({state['cloud_defers']}), treating as a real "
+            f"failure: {audio.name}")
+    # The backoff stamp belongs to the defer path only. Left in place it would also hold
+    # back this ordinary retry for up to an hour, on an error that has nothing to do with
+    # the mount. The counter itself stays as history.
+    state.pop("retry_not_before", None)
     if state["attempts"] < max_attempts:
         state["status"] = "queued"
         atomic_write_json(state_file, state)
         log(f"ASR fail (retry {state['attempts']}/{max_attempts}): {audio.name}")
     else:
         state["status"] = "failed"
+        state["finished_at"] = now_iso()
         atomic_write_json(state_file, state)
         log(f"ASR fail (final): {audio.name} -> _failed/")
         try:
@@ -2533,7 +2642,11 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                             continue             # garbled/unreadable state -> skip
                         status = s.get("status")
                         if status == "queued":
-                            actionable.append((audio, root, source))
+                            # A file deferred by a wedged cloud mount carries a backoff
+                            # stamp; picking it up early costs a full pickup (claim +
+                            # cloud reads) and yields the same failure.
+                            if retry_gate_open(s):
+                                actionable.append((audio, root, source))
                         elif status == "in-progress" and inprogress_recoverable(audio, s, cfg):
                             # Orphaned by a node that died mid-ASR (hard crash / power
                             # loss / host unreachable). reset_stuck + claim-preempt live
