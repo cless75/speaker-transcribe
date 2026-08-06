@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import datetime as dt
 import array
+import errno
 import hashlib
 import json
 import math
@@ -1192,19 +1193,55 @@ def _copy_file_bounded(src: pathlib.Path, dst: pathlib.Path,
             signal.alarm(0)
 
 
+# A cloud source can refuse to materialize for a while and then succeed — the read
+# either deadlocks (EDEADLK) or blows the copy budget. Both are worth retrying with a
+# widening pause; a local fault (no space, denied) is not and propagates immediately.
+_STAGE_COPY_RETRY_DELAYS_SEC = (5, 15, 45)
+
+
+def _stage_copy_with_retry(src: pathlib.Path, dst: pathlib.Path, timeout_sec: int,
+                           warnings: list[str]) -> None:
+    delays = list(_STAGE_COPY_RETRY_DELAYS_SEC)
+    for attempt in range(len(delays) + 1):
+        try:
+            _copy_file_bounded(src, dst, timeout_sec=timeout_sec)
+            if attempt:
+                warnings.append(f"input_staging_succeeded_after_retry_{attempt}")
+            return
+        except (TimeoutError, OSError) as exc:
+            retryable = isinstance(exc, TimeoutError) or getattr(exc, "errno", None) in (
+                errno.EDEADLK, errno.EAGAIN, errno.ETIMEDOUT, errno.EBUSY)
+            if not retryable or attempt >= len(delays):
+                raise
+            pause = delays[attempt]
+            stderr_log_line(f"input staging retry {attempt + 1}/{len(delays)} in {pause}s "
+                            f"({type(exc).__name__}: {exc})", level="warn")
+            try:
+                dst.unlink(missing_ok=True)   # partial copy must not look complete
+            except OSError:
+                pass
+            time.sleep(pause)
+
+
 def stage_ascii_input(payload: dict, warnings: list[str], job_root: pathlib.Path) -> None:
     input_path = pathlib.Path(payload["input_path"])
     payload["original_input_path"] = str(input_path.resolve())
     payload["output_base_name"] = ascii_slug(input_path.stem)
-    if all(ord(char) < 128 for char in str(input_path)):
+    # Staging exists for two reasons: an ASCII-only path for the toolchain, and a LOCAL
+    # copy of the media. The second matters on every macOS cloud mount, ASCII path or
+    # not — without it ffmpeg/torchaudio read the dataless source directly, with no copy
+    # budget and no retry. On other platforms keep the original narrow trigger.
+    ascii_path = all(ord(char) < 128 for char in str(input_path))
+    if ascii_path and sys.platform != "darwin":
         return
 
     stage_root = stage_dir(job_root, "input-ascii")
     staged_path = stage_root / f"{payload['output_base_name']}{input_path.suffix.lower()}"
-    _copy_file_bounded(input_path, staged_path,
-                       timeout_sec=int(payload.get("stage_copy_timeout_sec", 180)))
+    _stage_copy_with_retry(input_path, staged_path,
+                           int(payload.get("stage_copy_timeout_sec", 180)), warnings)
     payload["input_path"] = str(staged_path)
-    warnings.append("unicode_source_path_workaround_ascii_copy")
+    warnings.append("unicode_source_path_workaround_ascii_copy" if not ascii_path
+                    else "cloud_source_staged_locally")
 
 
 def estimate_worker_memory_gb(payload: dict, runtime: dict) -> float:

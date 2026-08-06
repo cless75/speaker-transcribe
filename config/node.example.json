@@ -78,6 +78,10 @@
   "stuck_threshold_minutes": 120,
   "process_window_local": "",
 
+  "_cloud_defer_policy": "a cloud-mount / staging failure is not the file's fault, so it is re-queued WITHOUT burning an attempt. That path needs its own ceiling: unbounded deferring let one wedged source rack up 14776 no-op runs in 24h on M4-MAC. cloud_defers is counted per file, each defer pushes retry_not_before out by the backoff ladder (minutes, last step repeats), and once max_cloud_defers is reached the file falls through to the ordinary max_attempts / _failed path. Set max_cloud_defers to 0 to disable deferring entirely.",
+  "max_cloud_defers": 20,
+  "cloud_defer_backoff_minutes": [1, 5, 15, 60],
+
   "_multi_node": "opt-in cross-machine coordination via per-file claim.json",
   "enable_multi_machine": true,
   "required_capabilities": [],
