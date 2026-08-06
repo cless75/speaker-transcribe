@@ -152,6 +152,8 @@ def _build_payload(args: argparse.Namespace) -> dict:
         payload["output_base_name"] = args.output_base_name
     if args.timestamps:
         payload["timestamps"] = args.timestamps
+    if args.word_timestamps:
+        payload["word_timestamps_override"] = args.word_timestamps == "on"
     if args.project_speaker_registry_path:
         payload["project_speaker_registry_path"] = str(
             pathlib.Path(args.project_speaker_registry_path).expanduser().resolve()
@@ -256,6 +258,12 @@ def main() -> int:
     parser.add_argument("--work-root", dest="work_root", default=None)
     parser.add_argument("--output-base-name", dest="output_base_name", default=None)
     parser.add_argument("--timestamps", default=None, choices=("hms", "vtt", "both", "none"))
+    # НЕ путать с --timestamps выше: тот про формат отображения времени, этот — про
+    # границы каждого слова. Умолчание None означает «решает проект или узел».
+    parser.add_argument(
+        "--word-timestamps", dest="word_timestamps", default=None, choices=("on", "off"),
+        help="Границы каждого слова в -segments.jsonl. Перебивает признак проекта и конфиг узла.",
+    )
     parser.add_argument(
         "--project-speaker-registry", dest="project_speaker_registry_path", default=None,
         help="Directory for the per-project speaker registry (index.json + profiles/). "

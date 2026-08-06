@@ -3035,6 +3035,65 @@ def resolve_speaker_turns(audio_path: str, payload: dict, job_root: pathlib.Path
     return turns, diarization_meta, zoom_meta
 
 
+# Допуск на «слово упирается в край своего чанка». Меньше — и обрезанное слово
+# пролезет как целое; больше — потеряется слово, честно закончившееся у самого края.
+WORD_EDGE_EPS_SEC = 0.05
+
+
+def collect_chunk_words(item, job: dict) -> list[dict]:
+    """Границы слов сегмента, приведённые к таймлайну всей записи.
+
+    Правило шва разбирается по словам, а не наследуется от сегмента, и отличается
+    от сегментного намеренно.
+
+    Геометрия: перекрытие — это последние ``overlap`` секунд чанка k и первые
+    ``overlap`` секунд чанка k+1. Слово, пересекающее шов, у чанка k **обрезано**
+    концом его аудио, а у чанка k+1 звучит целиком. Для резки видео нужны обе
+    настоящие границы, поэтому владельцем такого слова назначается k+1, и начало
+    ему НЕ подрезается (в отличие от сегмента, где подрезка безобидна). У чанка k
+    оно, наоборот, выбрасывается — иначе слово задвоится.
+
+    Возвращает пустой список, если границы не запрашивались или движок их не отдал.
+    """
+    if not job.get("word_timestamps"):
+        return []
+    raw = getattr(item, "words", None) or []
+    if not raw:
+        return []
+    overlap = float(job.get("chunk_overlap_sec") or 0.0)
+    chunk_start = float(job["chunk_start"])
+    duration = job.get("chunk_duration")
+    edge = None
+    if duration is not None and not job.get("is_last_chunk"):
+        edge = float(duration) - WORD_EDGE_EPS_SEC
+    out: list[dict] = []
+    for w in raw:
+        try:
+            ws, we = float(w.start), float(w.end)
+        except (TypeError, ValueError):
+            continue
+        text = (getattr(w, "word", "") or "").strip()
+        if not text:
+            continue
+        if job["chunk_index"] > 0 and we <= overlap:
+            continue          # слово целиком в перекрытии — оно у предыдущего чанка
+        if edge is not None and we >= edge:
+            continue          # обрезано краем своего чанка — отдаст следующий, целым
+        word = {
+            "word": text,
+            "start": round(ws + chunk_start, 3),
+            "end": round(we + chunk_start, 3),
+        }
+        prob = getattr(w, "probability", None)
+        if prob is not None:
+            try:
+                word["probability"] = round(float(prob), 2)
+            except (TypeError, ValueError):
+                pass
+        out.append(word)
+    return out
+
+
 def transcribe_chunk_worker(job: dict, model: WhisperModel | None = None) -> dict:
     reuse = model is not None
     # Show device once (first chunk) at INFO so a tail confirms cpu vs cuda; the
@@ -3101,15 +3160,22 @@ def transcribe_chunk_worker(job: dict, model: WhisperModel | None = None) -> dic
                 continue
             if start < overlap:
                 start = overlap
-        collected.append(
-            {
-                "start": round(start + float(job["chunk_start"]), 3),
-                "end": round(end + float(job["chunk_start"]), 3),
-                "text": text,
-                "speaker": None,
-                "chunk_index": job["chunk_index"],
-            }
-        )
+        seg = {
+            "start": round(start + float(job["chunk_start"]), 3),
+            "end": round(end + float(job["chunk_start"]), 3),
+            "text": text,
+            "speaker": None,
+            "chunk_index": job["chunk_index"],
+        }
+        words = collect_chunk_words(item, job)
+        if words:
+            # Сегмент на шве получил подрезанное начало, а слово, пересекающее шов,
+            # сохраняет истинную границу — иначе резать по слову нельзя. Расширяем
+            # сегмент до слов, чтобы не нарушить вложенность.
+            seg["start"] = min(seg["start"], words[0]["start"])
+            seg["end"] = max(seg["end"], words[-1]["end"])
+            seg["words"] = words
+        collected.append(seg)
     stderr_log_line(f"chunk segment iteration done: index={job['chunk_index']} kept={len(collected)}", level="debug")
     return {
         "chunk_index": job["chunk_index"],
@@ -3282,6 +3348,81 @@ def expected_chunk_count_for_audio(audio_path: str, payload: dict, warnings: lis
     return count
 
 
+PROJECT_SETTINGS_FILENAME = "_PROJECT-settings.json"
+
+
+def load_project_settings(payload: dict) -> dict:
+    """Настройки проекта из Хаба: ``{hub_root}/{pid}/_PROJECT-settings.json``.
+
+    Признак принадлежит проекту, а не машине, поэтому живёт в Хабе, а не в конфиге
+    узла: узлы взаимозаменяемы и не должны расходиться в том, как считать одну и ту
+    же запись. Имя файла попадает под зарезервированный шаблон ``^_PROJECT-.*`` в
+    ``audio_inbox_watch.DEFAULT_SKIP_FILENAME_PATTERNS`` — сканер его не подберёт.
+
+    Любая ошибка чтения — не повод ронять прогон: Хаб живёт на облачном диске,
+    который бывает не смонтирован. Молча возвращаем пустые настройки.
+    """
+    cached = payload.get("_project_settings_cache")
+    if isinstance(cached, dict):
+        return cached
+    settings: dict = {}
+    hub_root = payload.get("hub_root")
+    pid = payload.get("project_id")
+    if hub_root and pid:
+        path = pathlib.Path(str(hub_root)).expanduser() / str(pid) / PROJECT_SETTINGS_FILENAME
+        try:
+            if path.is_file():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    settings = loaded
+        except (OSError, ValueError):
+            settings = {}
+    payload["_project_settings_cache"] = settings
+    return settings
+
+
+def word_timestamps_decision(payload: dict) -> tuple[bool, str]:
+    """Считать ли пословные границы и кто это решил.
+
+    Порядок: запуск → проект → узел → выключено. Признак проекта сильнее конфига
+    узла: «этой записи нужны границы слов» — свойство материала, а не машины,
+    которой досталась очередь.
+    """
+    override = payload.get("word_timestamps_override")
+    if override is not None:
+        return bool(override), "run"
+    project = load_project_settings(payload).get("word_timestamps")
+    if project is not None:
+        return bool(project), "project"
+    node = payload.get("word_timestamps")
+    if node is not None:
+        return bool(node), "node"
+    return False, "default"
+
+
+def resolve_word_timestamps(payload: dict) -> bool:
+    return word_timestamps_decision(payload)[0]
+
+
+def build_word_timestamps_meta(payload: dict, segments: list[dict]) -> dict:
+    """Наблюдаемость пословных границ в метаданных прогона (требование Т5).
+
+    Фиксируются только измеримые величины. «Добавка по времени» сюда не пишется:
+    она разностная и из одного прогона не извлекается. Записанного здесь хватает,
+    чтобы посчитать её сравнением двух прогонов одного файла на одной ноде.
+    """
+    enabled, source = word_timestamps_decision(payload)
+    meta: dict = {
+        "enabled": enabled,
+        "decided_by": source,
+        "asr_sec": payload.get("_asr_elapsed_sec"),
+    }
+    if enabled:
+        meta["words_total"] = sum(len(seg.get("words") or ()) for seg in segments)
+        meta["segments_with_words"] = sum(1 for seg in segments if seg.get("words"))
+    return meta
+
+
 def build_asr_recovery_fingerprint(payload: dict, audio_path: str) -> dict:
     orig = payload.get("original_input_path") or payload["input_path"]
     src = pathlib.Path(orig).expanduser()
@@ -3310,6 +3451,9 @@ def build_asr_recovery_fingerprint(payload: dict, audio_path: str) -> dict:
         "chunk_overlap_sec": int(payload.get("chunk_overlap_sec", 30) or 30),
         "selected_model": payload.get("selected_model"),
         "quality_preset": payload.get("quality_preset"),
+        # Без этого ключа частичный resume смешает чанки, посчитанные с границами слов
+        # и без них, — половина сегментов молча останется без поля words.
+        "word_timestamps": resolve_word_timestamps(payload),
     }
 
 
@@ -3337,6 +3481,11 @@ def fingerprint_matches(stored: dict | None, current: dict) -> bool:
     for k in keys:
         if not _fp_scalar_match(stored.get(k), current.get(k)):
             return False
+    # Отдельно и с умолчанием: у отпечатков, записанных до появления пословных
+    # границ, ключа нет вовсе, и сверка через _fp_scalar_match (None против False)
+    # обнулила бы resume всем начатым прогонам. Отсутствие == выключено.
+    if bool(stored.get("word_timestamps", False)) != bool(current.get("word_timestamps", False)):
+        return False
     return True
 
 
@@ -4285,14 +4434,28 @@ def main() -> None:
                 "vad_filter": True,
                 "condition_on_previous_text": True,
             }
+            want_words = resolve_word_timestamps(payload)
+            payload["word_timestamps_resolved"] = want_words
+            # Условная вставка, а не kwargs["word_timestamps"] = bool(...): при
+            # выключённом признаке словарь обязан остаться прежним до ключа, иначе
+            # движок пойдёт другим путём и выход перестанет совпадать побайтово.
+            if want_words:
+                kwargs["word_timestamps"] = True
             if payload.get("language_hint"):
                 kwargs["language"] = payload["language_hint"]
             max_parallel, cpu_threads = choose_parallelism(payload, runtime, len(chunks))
+            last_index = max((c["index"] for c in chunks), default=0)
             jobs = [
                 {
                     "chunk_index": chunk["index"],
                     "chunk_start": chunk["start"],
                     "chunk_overlap_sec": payload.get("chunk_overlap_sec", 30),
+                    # Длительность и признак последнего чанка нужны правилу шва:
+                    # слово, обрезанное границей своего чанка, отдаётся следующим,
+                    # где оно звучит целиком (см. collect_chunk_words).
+                    "chunk_duration": chunk.get("duration"),
+                    "is_last_chunk": chunk["index"] >= last_index,
+                    "word_timestamps": want_words,
                     "audio_path": chunk["path"],
                     "runtime_device": runtime.get("device", "cpu"),
                     "runtime_compute_type": runtime.get("compute_type", "int8"),
@@ -4435,6 +4598,11 @@ def main() -> None:
                 # Pyannote diarization that follows can allocate VRAM alongside the kept-alive
                 # WhisperModel; RTX 3050 8GB has plenty of room (Whisper-medium ~1.5GB + pyannote ~2GB).
                 log(payload, "phase=gpu_cache_skip after asr (bug-1 avoidance: process-exit VRAM reclaim)", level="debug")
+
+            # Стоимость распознавания замеряется всегда: без неё добавку пословных
+            # границ не с чем сравнить — величина разностная, из одного прогона её
+            # не достать (требование Т5).
+            payload["_asr_elapsed_sec"] = round(time.monotonic() - chunk_phase_t0, 1)
 
         log(payload, f"phase=after_chunk_loop start collected_segments={len(collected)} detected_languages={len(detected_languages)}", level="debug")
         log(payload, "phase=sort_collected begin", level="debug")
@@ -4979,6 +5147,7 @@ def main() -> None:
             "speaker_clips": speaker_clips,
             "speaker_review": {},
             "clip_generation": clip_generation_meta,
+            "word_timestamps": build_word_timestamps_meta(payload, collected),
             "segments": collected,
         }
         result["speaker_review"] = build_speaker_review(result)
