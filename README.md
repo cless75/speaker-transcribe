@@ -95,6 +95,7 @@ scripts/    transcribe.ps1   (single file / folder)   watch.ps1  (run the watche
             run-media-transcribe-direct.ps1  (low-level PowerShell wrapper)
 config/     node.example.json   mapper.example.json   (copy to *.local.json)
 docs/       node-setup.html  (install)   deployment.md  (operate)   speaker-recognition.md  (diarization + voiceprints)
+            slide-frames.md  (screenshots + local OCR of slide text)
 ```
 
 ## Engine quickstart (CLI)

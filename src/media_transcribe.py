@@ -3730,7 +3730,12 @@ def write_outputs(payload: dict, result: dict) -> dict:
         and slides_meta.get("status") == "ok"
         and slides_meta.get("embed_in_transcript", True)
     ):
-        slide_list = [s for s in (slides_meta.get("slides") or []) if isinstance(s, dict)]
+        # Отфильтрованные кадры остаются в frames/ и slides.json, но в транскрипт
+        # не идут: кадр без текста слайда или его десятый дубль засоряют конспект.
+        slide_list = [
+            s for s in (slides_meta.get("slides") or [])
+            if isinstance(s, dict) and s.get("embed", True)
+        ]
         slide_list.sort(key=lambda s: float(s.get("time_sec") or 0.0))
         frames_dir_name = slides_meta.get("frames_dir") or "frames"
 
