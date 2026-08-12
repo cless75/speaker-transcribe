@@ -90,6 +90,28 @@ unreadable export is not fatal: it falls back to normal diarization. Attribution
 recorded as `speaker_source: ktalk_txt`, with parse details under
 `diarization.external` in `*-run-meta.json`.
 
+## Whose name wins: export vs voiceprint
+
+When a meeting export already named the speakers, two sources of truth meet. The
+rule: **a voiceprint links identities, it does not silently rename people.**
+
+| Situation | What happens |
+|---|---|
+| Manual `speaker_map` | Untouched — always wins |
+| Export name + match `confidence_band: high` | Name replaced by the registry name; the export name is kept in `export_speaker_name` |
+| Export name + weaker match | Export name stays; `voice_hash` is still written, so the voice is linked |
+| No export name | Registry name is applied, as before |
+
+Both halves matter. A high-confidence match is what merges **one person joining
+twice** — a second laptop shows up in the export as a separate participant with a
+different display name, and only the voice knows it is the same human. A weak match
+(0.4–0.6) is what used to hand a participant somebody else's name, silently and
+without a trace.
+
+Every disagreement between the two sources is surfaced in `speaker_review` —
+`export_name`, `name_conflict` and the match score sit next to each other, so a
+human decides rather than a similarity threshold.
+
 ## First-time workflow
 
 1. Set `speaker_mode: diarize`, `HF_TOKEN`, and `voiceprint_mode: enroll`.
@@ -127,6 +149,7 @@ python src/media_transcribe_cli.py \
 
 | Symptom | Cause → fix |
 |---|---|
+| Registry name did not replace the export name | The match was not `confidence_band: high` — by design. Check `speaker_review.name_conflict` and the score; confirm by hand if the match is right |
 | Speakers stay `SPEAKER_00/01` | `voiceprint_mode: off`; or registry empty (run `enroll` first); or `canonical_name` not set on the profiles |
 | `profile_store_path is required for voiceprint mode` | voiceprint mode is on but no store path — configure `outputs.voiceprints.local_cache` (the watcher then passes `--voiceprint-store` automatically) |
 | No speaker turns at all | `speaker_mode` is not `diarize`, or `HF_TOKEN` missing/invalid |

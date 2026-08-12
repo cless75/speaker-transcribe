@@ -53,6 +53,33 @@ HUB_HINT_FILENAME = ".last-known-hub"
 # ---------------------------------------------------------------------------
 
 
+def _repo_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parent.parent
+
+
+def engine_version() -> str | None:
+    """Содержимое VERSION рядом с кодом; None, если файла нет."""
+    try:
+        return (_repo_root() / "VERSION").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def engine_branch() -> str | None:
+    """Текущая ветка репозитория узла — тот самый канал, откуда идёт self-update.
+
+    Читаем .git/HEAD напрямую: subprocess ради одной строки на каждом тике узла
+    избыточен, а git в PATH на узле не гарантирован.
+    """
+    try:
+        head = (_repo_root() / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if head.startswith("ref:"):
+        return head.split("/", 2)[-1] or None
+    return head[:12] or None  # detached HEAD — показываем коммит
+
+
 def _now() -> dt.datetime:
     return dt.datetime.now()
 
@@ -334,6 +361,11 @@ def build_snapshot(*, host: str, phase: str, cfg: dict | None = None,
             "slides_enabled": bool((cfg.get("video_frames") or {}).get("mode")
                                    not in (None, "", "off", "none")),
             "zoom_vtt_autodetect": cfg.get("zoom_vtt_autodetect", True),
+            # Канал обновления и версия кода: узел тянет свою текущую ветку, и без
+            # этих полей «на чём он стоит» узнаётся только логином на машину.
+            # Так уже было — узел месяцами работал на старом коде незамеченно.
+            "branch": engine_branch(),
+            "version": engine_version(),
         },
         "current": current,
         "queue": queue or {},

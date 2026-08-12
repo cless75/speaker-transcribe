@@ -861,6 +861,67 @@ def zoom_vtt_for(audio: pathlib.Path, cfg: dict) -> pathlib.Path | None:
     return None
 
 
+def frames_video_for(audio: pathlib.Path, cfg: dict) -> pathlib.Path | None:
+    """The bundle video to capture frames from, when it is not the ASR input.
+
+    The bundle primary is chosen for ASR — the small active-speaker track, cheap to
+    decode. The shared screen lives in the heavy file, so frames taken from the
+    primary are worthless: on session W1 of project 506 not one of its 139 frames
+    carried slide text, only the speaker name plate.
+
+    The rule lives in the config rather than in code (``video_frames.source``):
+    Zoom, Telemost and Ktalk name their exports differently, and a regex outlives a
+    platform change. Returns ``None`` when no rule is set — then the stage keeps
+    using the ASR input, exactly as before.
+    """
+    source = (cfg.get("video_frames") or {}).get("source")
+    if not isinstance(source, dict):
+        return None
+    prefer = [str(p) for p in (source.get("prefer_patterns") or []) if str(p).strip()]
+    exclude = [str(p) for p in (source.get("exclude_patterns") or []) if str(p).strip()]
+    if not prefer and not exclude:
+        return None
+    match = BUNDLE_TS_PATTERN.search(audio.name)
+    if not match:
+        return None
+    token = match.group(1)
+    skip_suffixes = cfg.get("skip_filename_suffixes", DEFAULT_SKIP_FILENAME_SUFFIXES)
+    try:
+        siblings = sorted(audio.parent.iterdir())
+    except OSError:
+        return None
+
+    candidates: list[pathlib.Path] = []
+    for path in siblings:
+        try:
+            if not path.is_file() or path.suffix.lower() not in VIDEO_EXTS:
+                continue
+        except OSError:
+            continue
+        if is_output_artifact(path.name, skip_suffixes):
+            continue
+        sibling_match = BUNDLE_TS_PATTERN.search(path.name)
+        if not sibling_match or sibling_match.group(1) != token:
+            continue
+        if any(re.search(pattern, path.name, re.IGNORECASE) for pattern in exclude):
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None
+
+    for pattern in prefer:
+        for path in candidates:
+            if re.search(pattern, path.name, re.IGNORECASE):
+                return None if path == audio else path
+    if str(source.get("fallback") or "").strip().lower() == "largest":
+        try:
+            chosen = max(candidates, key=lambda p: p.stat().st_size)
+        except OSError:
+            chosen = candidates[0]
+        return None if chosen == audio else chosen
+    return None
+
+
 def source_for_audio(audio: pathlib.Path, cfg: dict) -> tuple[pathlib.Path, dict] | None:
     """Find which configured source root is an ancestor of ``audio``."""
     for root, source in resolved_sources(cfg):
@@ -2162,6 +2223,13 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
         if ktalk_txt:
             cmd += ["--ktalk-txt", str(ktalk_txt)]
             log(f"ktalk transcript found (speakers from export, no diarization): {ktalk_txt.name}")
+
+    # Frames come from the video that shows the shared screen, not from the light
+    # track ASR runs on. Silent when no rule is configured (see frames_video_for).
+    frames_video = frames_video_for(audio, cfg)
+    if frames_video:
+        cmd += ["--frames-input", str(frames_video)]
+        log(f"frames source: {frames_video.name} (ASR runs on {audio.name})")
 
     # Voiceprint storage at the PROJECT ROOT ({hub_root}/{pid}) when enabled.
     # The registry (index.json + profiles/) lives with the project; the embeddings

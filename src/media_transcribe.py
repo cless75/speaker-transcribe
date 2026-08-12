@@ -40,6 +40,11 @@ AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".mpga", ".
 VOICEPRINT_SCHEMA_VERSION = "v3"
 VOICEPRINT_SCHEMA_LEGACY_V2 = "v2"
 
+# Источники, где имя спикера пришло из экспорта встречи, а не выведено движком.
+# Такое имя — наблюдаемый факт (платформа его показывала участникам), поэтому
+# voiceprint вправе связать голос с профилем, но не подменить имя молча.
+MEETING_EXPORT_NAME_SOURCES = {"zoom_vtt", "ktalk_txt"}
+
 # Канон media-transcription skill: не более двух параллельных чанков (CUDA/RAM).
 MAX_PARALLEL_CHUNKS_HARD_CAP = 2
 
@@ -1307,6 +1312,56 @@ def create_whisper_model(job: dict) -> WhisperModel:
     return WhisperModel(job["model_path"], **model_kwargs)
 
 
+def apply_voiceprint_identity(
+    segments: list[dict],
+    matches: dict[str, dict],
+    enrolled_by_speaker: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Проставить сегментам ``voice_hash`` по результатам сопоставления голосов.
+
+    Голос **связывает** идентичности и не переименовывает участника молча
+    (``org/voiceprint-links-identities-not-renames``). Имя, пришедшее из экспорта
+    встречи, уступает только уверенному совпадению: так два подключения одного
+    человека сходятся в одного, а слабый матч не выдаёт участника за чужого.
+    Исходное имя экспорта всегда остаётся в ``export_speaker_name``.
+
+    Ручная разметка (``manual_map``) неприкосновенна, как и раньше.
+    """
+    enrolled_by_speaker = enrolled_by_speaker or {}
+    for segment in segments:
+        if segment.get("speaker_source") == "manual_map":
+            continue
+        speaker_id = segment.get("speaker_id")
+        if not speaker_id:
+            continue
+        export_name = (
+            segment.get("speaker_name")
+            if segment.get("speaker_source") in MEETING_EXPORT_NAME_SOURCES
+            else None
+        )
+        if export_name:
+            segment["export_speaker_name"] = export_name
+        match = matches.get(speaker_id)
+        if match and match.get("matched"):
+            segment["voice_hash"] = match.get("voice_hash")
+            if match.get("contact_name"):
+                if not export_name or match.get("confidence_band") == "high":
+                    segment["speaker_name"] = match.get("contact_name")
+                    segment["speaker"] = match.get("contact_name")
+                    segment["speaker_source"] = "voiceprint_contact"
+            elif not export_name:
+                segment["speaker_source"] = "voiceprint_hash"
+        else:
+            # match_enroll: несовпавший спикер только что заведён — ставим его хэш,
+            # чтобы рекуррентный голос был стабильно идентифицирован уже с этой записи.
+            enrolled = enrolled_by_speaker.get(speaker_id)
+            if enrolled and enrolled.get("voice_hash"):
+                segment["voice_hash"] = enrolled.get("voice_hash")
+                if not export_name:
+                    segment["speaker_source"] = "voiceprint_hash"
+    return segments
+
+
 def build_speaker_review(result: dict) -> dict:
     grouped_segments: dict[str, list[dict]] = defaultdict(list)
     for segment in result.get("segments", []):
@@ -1336,11 +1391,17 @@ def build_speaker_review(result: dict) -> dict:
             current_name = speaker_id
         match = match_by_speaker.get(speaker_id) or {}
         clip = clip_by_speaker.get(speaker_id) or {}
+        export_name = next((seg.get("export_speaker_name") for seg in segments if seg.get("export_speaker_name")), None)
+        # Расхождение экспорта и голоса показываем всегда — и когда имя подменено,
+        # и когда подмена не сработала: решает человек, а не порог сходства.
+        voiceprint_name = match.get("canonical_name") or match.get("contact_name")
         speakers.append(
             {
                 "speaker_id": speaker_id,
                 "current_name": current_name,
                 "current_source": current_source,
+                "export_name": export_name,
+                "name_conflict": bool(export_name and voiceprint_name and export_name != voiceprint_name),
                 "num_segments": len(segments),
                 "preview_clip_path": clip.get("clip_path"),
                 "voice_hash": next((seg.get("voice_hash") for seg in segments if seg.get("voice_hash")), clip.get("profile_id")),
@@ -3669,7 +3730,12 @@ def write_outputs(payload: dict, result: dict) -> dict:
         and slides_meta.get("status") == "ok"
         and slides_meta.get("embed_in_transcript", True)
     ):
-        slide_list = [s for s in (slides_meta.get("slides") or []) if isinstance(s, dict)]
+        # Отфильтрованные кадры остаются в frames/ и slides.json, но в транскрипт
+        # не идут: кадр без текста слайда или его десятый дубль засоряют конспект.
+        slide_list = [
+            s for s in (slides_meta.get("slides") or [])
+            if isinstance(s, dict) and s.get("embed", True)
+        ]
         slide_list.sort(key=lambda s: float(s.get("time_sec") or 0.0))
         frames_dir_name = slides_meta.get("frames_dir") or "frames"
 
@@ -4726,28 +4792,11 @@ def main() -> None:
                         release_lock(lock_path)
 
                     if vp_match:
-                        for segment in collected:
-                            if segment.get("speaker_source") == "manual_map":
-                                continue
-                            speaker_id = segment.get("speaker_id")
-                            if not speaker_id:
-                                continue
-                            match = voiceprint_meta["matches"].get(speaker_id)
-                            if match and match.get("matched"):
-                                segment["voice_hash"] = match.get("voice_hash")
-                                if match.get("contact_name"):
-                                    segment["speaker_name"] = match.get("contact_name")
-                                    segment["speaker"] = match.get("contact_name")
-                                    segment["speaker_source"] = "voiceprint_contact"
-                                else:
-                                    segment["speaker_source"] = "voiceprint_hash"
-                            else:
-                                # match_enroll: несовпавший спикер только что заведён — ставим его хэш,
-                                # чтобы рекуррентный голос был стабильно идентифицирован уже с этой записи.
-                                enrolled = enrolled_by_speaker.get(speaker_id)
-                                if enrolled and enrolled.get("voice_hash"):
-                                    segment["voice_hash"] = enrolled.get("voice_hash")
-                                    segment["speaker_source"] = "voiceprint_hash"
+                        apply_voiceprint_identity(
+                            collected,
+                            voiceprint_meta.get("matches") or {},
+                            enrolled_by_speaker,
+                        )
 
                     observed_names = zoom_vtt_meta.get("speaker_observations", {}) if isinstance(zoom_vtt_meta, dict) else {}
                     observed_at = dt.datetime.now(dt.UTC).isoformat()

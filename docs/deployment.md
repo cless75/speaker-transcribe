@@ -24,9 +24,16 @@ ffmpeg / Python), see [`node-setup.html`](node-setup.html).
 
 ## 2. Get the engine
 
+**A node runs the `release` branch, not `main`.** The watcher self-updates with
+`git pull --ff-only` before every sweep, which means whatever sits on the branch the
+node is checked out to reaches production at the next recording — with no decision in
+between. `main` is where development lands; `release` is what nodes are allowed to
+pick up.
+
 ```bash
 git clone https://github.com/cless75/speaker-transcribe.git
 cd speaker-transcribe
+git checkout release
 
 # create a venv ON THIS MACHINE (venvs are NOT portable — never copy one
 # between machines; the base-interpreter path is hard-coded inside it)
@@ -139,6 +146,29 @@ schtasks /query  /tn "speaker-transcribe-watch" /v /fo LIST   # inspect the task
 schtasks /run    /tn "speaker-transcribe-watch"               # trigger a sweep now
 schtasks /delete /tn "speaker-transcribe-watch" /f            # remove it
 ```
+
+### Releasing a change to the nodes
+
+Development happens on `main`; nodes follow `release`. Promoting is one push, and the
+timing is the whole point:
+
+```bash
+# 1. the node must not be mid-run — check its status file in the hub
+#    _status/<HOST>.json -> "phase": "idle"   (also: runtime.branch, runtime.version)
+# 2. promote
+git push origin main:release
+git tag -a v1.2.0 -m "what changed" && git push origin v1.2.0
+# 3. the node picks it up on its next sweep; runtime.version in the status file
+#    tells you it actually landed
+```
+
+Never promote while `phase` is `running`: the sweep is protected against a mid-ASR
+pull (`MultipleInstances=IgnoreNew`), but a half-processed recording is still the
+worst moment to change the code under it.
+
+The reverse failure is just as real: a node once ran months-old code because updating
+it depended on somebody remembering. `runtime.branch` and `runtime.version` in
+`_status/<HOST>.json` exist so that drift is visible without logging into the machine.
 
 ### Monitoring — is the watcher alive?
 

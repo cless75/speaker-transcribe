@@ -59,6 +59,17 @@ def _ffmpeg_available(ffmpeg_bin: str) -> bool:
     return pathlib.Path(ffmpeg_bin).exists() or bool(shutil.which(ffmpeg_bin))
 
 
+def frames_source_path(payload: dict) -> str:
+    """Which file the frames are captured from.
+
+    Defaults to the ASR input, but a bundle usually ships several videos and the
+    one picked for ASR is the *worst* for frames: the watcher prefers the small
+    speaker-only track (fast to decode), while the shared screen lives in the big
+    one. ``frames_input_path`` lets the caller point the capture elsewhere.
+    """
+    return str(payload.get("frames_input_path") or payload.get("input_path") or "")
+
+
 def resolve_config(payload: dict) -> dict | None:
     """Return a normalized config dict if the stage is enabled for this input,
     else ``None`` (disabled / not a video)."""
@@ -68,10 +79,11 @@ def resolve_config(payload: dict) -> dict | None:
     mode = str(vf.get("mode") or "off").strip().lower()
     if mode in ("", "off", "none"):
         return None
-    suffix = pathlib.Path(str(payload.get("input_path") or "")).suffix.lower()
+    suffix = pathlib.Path(frames_source_path(payload)).suffix.lower()
     if suffix not in VIDEO_EXTENSIONS:
         return {"_not_video": True, "mode": mode}
     ocr_enabled = bool(vf.get("ocr", True))
+    flt = vf.get("filter") if isinstance(vf.get("filter"), dict) else {}
     return {
         "mode": mode if mode in ("slide-change", "interval") else "slide-change",
         "scene_threshold": float(vf.get("scene_threshold", DEFAULT_SCENE_THRESHOLD) or DEFAULT_SCENE_THRESHOLD),
@@ -81,6 +93,11 @@ def resolve_config(payload: dict) -> dict | None:
         "ocr_engine": str(vf.get("ocr_engine") or DEFAULT_OCR_ENGINE).strip().lower(),
         "embed_in_transcript": bool(vf.get("embed_in_transcript", True)),
         "frames_dir": str(vf.get("frames_dir") or DEFAULT_FRAMES_DIR),
+        # Filter is OFF by default: the engine ships the mechanism, the consumer
+        # sets the policy. Both knobs are meaningless without OCR text.
+        "min_ocr_chars": int(flt.get("min_ocr_chars") or 0),
+        "dedupe_similarity": float(flt.get("dedupe_similarity") or 0.0),
+        "dedupe_visual": float(flt.get("dedupe_visual") or 0.0),
     }
 
 
@@ -198,6 +215,120 @@ class _OcrRunner:
         return " ".join(pieces).strip()
 
 
+_SHINGLE_SIZE = 4
+
+
+def _shingles(text: str, size: int = _SHINGLE_SIZE) -> set[str]:
+    """Character n-grams of the letters/digits only.
+
+    Word-level comparison does not survive OCR: the same slide read twice gives
+    "AMTpui be3yrbi" and "AmuTpuibe3yrb", and glues words together
+    ("OKRsaregenericornot"). Both wreck a word set while barely moving the
+    character stream, so shingles are what actually recognises a repeated slide.
+    """
+    packed = re.sub(r"[\W_]+", "", text.lower(), flags=re.UNICODE)
+    if len(packed) < size:
+        return {packed} if packed else set()
+    return {packed[i:i + size] for i in range(len(packed) - size + 1)}
+
+
+def _text_similarity(left: str, right: str) -> float:
+    """Jaccard over character shingles — tolerant to the OCR noise on frames."""
+    a, b = _shingles(left), _shingles(right)
+    if not a or not b:
+        return 1.0 if a == b else 0.0
+    return len(a & b) / len(a | b)
+
+
+def frame_fingerprint(png_path: pathlib.Path, ffmpeg_bin: str) -> str | None:
+    """64-bit difference hash of a frame, as hex. ``None`` when it cannot be read.
+
+    Text comparison alone cannot tell a repeated slide from a new one: OCR reads
+    the same slide differently on every pass ("To make sure your strategy" becomes
+    "To make sure your strar"), so the word stream drifts while the picture does
+    not. The hash looks at the picture instead. ffmpeg does the scaling — it is
+    already required by this stage, unlike Pillow, which is not a declared
+    dependency.
+    """
+    proc = subprocess.run(
+        [ffmpeg_bin, "-hide_banner", "-nostdin", "-v", "error", "-i", str(png_path),
+         "-vf", "scale=9:8,format=gray", "-f", "rawvideo", "-"],
+        capture_output=True, check=False,
+    )
+    data = proc.stdout or b""
+    if len(data) < 72:
+        return None
+    bits = 0
+    for row in range(8):
+        base = row * 9
+        for col in range(8):
+            bits = (bits << 1) | (1 if data[base + col] > data[base + col + 1] else 0)
+    return f"{bits:016x}"
+
+
+def _fingerprint_similarity(left: str | None, right: str | None) -> float:
+    """1.0 = identical pictures; 0.0 = nothing in common (or unreadable)."""
+    if not left or not right:
+        return 0.0
+    try:
+        distance = bin(int(left, 16) ^ int(right, 16)).count("1")
+    except ValueError:
+        return 0.0
+    return 1.0 - distance / 64.0
+
+
+def apply_content_filter(
+    slides: list[dict],
+    min_ocr_chars: int,
+    dedupe_similarity: float,
+    dedupe_visual: float = 0.0,
+) -> dict:
+    """Mark which frames are worth embedding into the transcript.
+
+    Interval capture buys coverage at the cost of noise: a talking head carries no
+    slide text, and one slide held for ten minutes yields ten near-identical
+    frames. Both are dropped from the transcript but stay on disk and in
+    ``slides.json`` with a reason — a silently discarded frame is
+    indistinguishable from a bug.
+
+    Two dedupe criteria, either is enough. ``dedupe_similarity`` compares OCR text
+    and catches slides whose text is genuinely the same; ``dedupe_visual``
+    compares the picture and catches what OCR instability hides — on a real
+    recording the text route alone kept 101 of 152 frames of a single slide.
+    """
+    stats = {"embedded": 0, "no_text": 0, "duplicate": 0}
+    previous_text: str | None = None
+    previous_fingerprint: str | None = None
+    for slide in slides:
+        text = " ".join((slide.get("ocr_text") or "").split())
+        if min_ocr_chars and len(text) < min_ocr_chars:
+            slide["embed"] = False
+            slide["filter_reason"] = "no_text"
+            stats["no_text"] += 1
+            continue
+        same_text = bool(
+            dedupe_similarity
+            and previous_text is not None
+            and _text_similarity(text, previous_text) >= dedupe_similarity
+        )
+        same_picture = bool(
+            dedupe_visual
+            and previous_fingerprint
+            and _fingerprint_similarity(slide.get("fingerprint"), previous_fingerprint) >= dedupe_visual
+        )
+        if same_text or same_picture:
+            slide["embed"] = False
+            slide["filter_reason"] = "duplicate"
+            slide["duplicate_of"] = "picture" if same_picture else "text"
+            stats["duplicate"] += 1
+            continue
+        slide["embed"] = True
+        previous_text = text
+        previous_fingerprint = slide.get("fingerprint") or previous_fingerprint
+        stats["embedded"] += 1
+    return stats
+
+
 def build_slide_markdown(slide: dict, frames_dir_name: str) -> str:
     """Render the transcript-embedded block for one slide (portable Markdown)."""
     hms = slide.get("time_hms") or _hms(slide.get("time_sec") or 0)
@@ -236,7 +367,7 @@ def run_stage(
         warnings.append("slide_frames_skipped_ffmpeg_unavailable")
         return {"enabled": True, "status": "skipped", "reason": "ffmpeg_unavailable"}
 
-    input_path = str(pathlib.Path(payload["input_path"]).resolve())
+    input_path = str(pathlib.Path(frames_source_path(payload)).resolve())
     output_dir = pathlib.Path(payload["output_dir"]).resolve()
     base_name = str(payload.get("output_base_name") or pathlib.Path(input_path).stem)
     frames_dir_name = config["frames_dir"]
@@ -275,14 +406,17 @@ def run_stage(
             warnings.append(f"slide_frames_capture_failed_at:{hms}")
             continue
         ocr_text = ocr.text_for(out_png) if (ocr and ocr.available) else ""
-        slides.append({
+        entry = {
             "index": index,
             "time_sec": t,
             "time_hms": hms,
             "image": image_name,
             "image_rel": f"{frames_dir_name}/{image_name}",
             "ocr_text": ocr_text,
-        })
+        }
+        if config["dedupe_visual"]:
+            entry["fingerprint"] = frame_fingerprint(out_png, ffmpeg_bin)
+        slides.append(entry)
 
     ocr_meta = {
         "enabled": bool(config["ocr"]),
@@ -295,14 +429,27 @@ def run_stage(
         "reason": (ocr.reason if (ocr and not ocr.available) else None),
     }
 
+    filter_stats = apply_content_filter(
+        slides, config["min_ocr_chars"], config["dedupe_similarity"], config["dedupe_visual"]
+    )
+
     meta = {
         "enabled": True,
         "status": "ok" if slides else "error",
         "mode": config["mode"],
+        # Откуда сняты кадры — обязательное поле: без него нельзя отличить
+        # правильные кадры от бесполезных, и дефект живёт незамеченным.
+        "source_path": input_path,
         "frames_dir": frames_dir_name,
         "embed_in_transcript": config["embed_in_transcript"],
         "count": len(slides),
         "dropped": dropped,
+        "filter": {
+            "min_ocr_chars": config["min_ocr_chars"],
+            "dedupe_similarity": config["dedupe_similarity"],
+            "dedupe_visual": config["dedupe_visual"],
+            **filter_stats,
+        },
         "ocr": ocr_meta,
         "slides": slides,
     }
@@ -325,8 +472,14 @@ def run_stage(
         warnings.append(f"slide_frames_json_write_failed: {exc}")
 
     ocred = sum(1 for s in slides if s.get("ocr_text"))
+    filtered_note = ""
+    if config["min_ocr_chars"] or config["dedupe_similarity"]:
+        filtered_note = (
+            f" embed={filter_stats['embedded']}/{len(slides)} "
+            f"(без текста {filter_stats['no_text']}, дублей {filter_stats['duplicate']})"
+        )
     log_fn(
-        f"slide_frames: done ✓ frames={len(slides)} ocr_text={ocred}/{len(slides)} "
+        f"slide_frames: done ✓ frames={len(slides)} ocr_text={ocred}/{len(slides)}{filtered_note} "
         f"engine={ocr_meta['engine']} status={ocr_meta['status']} dir={frames_dir}"
     )
     return meta

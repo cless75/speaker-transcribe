@@ -181,7 +181,21 @@ def _build_payload(args: argparse.Namespace) -> dict:
             video_frames["ocr_engine"] = args.slide_ocr_engine
         if args.slide_no_embed:
             video_frames["embed_in_transcript"] = False
+        slide_filter = dict(video_frames.get("filter") or {})
+        if args.slide_min_ocr_chars is not None:
+            slide_filter["min_ocr_chars"] = args.slide_min_ocr_chars
+        if args.slide_dedupe is not None:
+            slide_filter["dedupe_similarity"] = args.slide_dedupe
+        if args.slide_dedupe_visual is not None:
+            slide_filter["dedupe_visual"] = args.slide_dedupe_visual
+        if slide_filter:
+            video_frames["filter"] = slide_filter
         payload["video_frames"] = video_frames
+
+    # Кадры можно снимать не с того файла, что идёт в ASR: в бандле встречи
+    # звук берут с лёгкой дорожки, а демонстрация экрана лежит в тяжёлой.
+    if args.frames_input:
+        payload["frames_input_path"] = str(pathlib.Path(args.frames_input).expanduser().resolve())
 
     identification = dict(payload.get("identification") or {})
     if args.project_id:
@@ -305,6 +319,28 @@ def main() -> int:
     parser.add_argument(
         "--slide-no-embed", dest="slide_no_embed", action="store_true",
         help="Do not embed slides into the transcript .md (still writes frames/ + slides.json).",
+    )
+    parser.add_argument(
+        "--frames-input", dest="frames_input", default=None,
+        help="Video to capture frames from, when it differs from --input. A meeting bundle "
+             "ships several videos: ASR wants the light speaker track, frames want the one "
+             "showing the shared screen.",
+    )
+    parser.add_argument(
+        "--slide-min-ocr-chars", dest="slide_min_ocr_chars", type=int, default=None,
+        help="Keep out of the transcript any frame whose OCR text is shorter than this "
+             "(0 = no filtering, default). Frames stay on disk with a reason.",
+    )
+    parser.add_argument(
+        "--slide-dedupe", dest="slide_dedupe", type=float, default=None,
+        help="Drop a frame from the transcript when its OCR text is this similar (0..1) to "
+             "the previous kept frame. 0 = no dedupe (default).",
+    )
+    parser.add_argument(
+        "--slide-dedupe-visual", dest="slide_dedupe_visual", type=float, default=None,
+        help="Same, but comparing the picture (0..1 over a 64-bit difference hash). This is "
+             "the effective one: OCR reads the same slide differently on every pass, the "
+             "picture does not. Suggested 0.95; 0 = off (default).",
     )
     parser.add_argument(
         "--worker", default=None,
