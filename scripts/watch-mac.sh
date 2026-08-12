@@ -5,6 +5,9 @@
 # ТОЛЬКО когда основной недоступен: молчит дольше PRIMARY_STALE_MIN минут ЛИБО
 # отчитался аварийной фазой. Пока основной здоров — sweep не запускается вовсе.
 #
+# ВЕТКА: узел живёт на `release` (git checkout release), не на `main` — см.
+# docs/deployment.md. Self-update ниже тянет именно ту ветку, на которой стоит клон.
+#
 # ЗАПУСК: не напрямую из launchd, а через .app-обёртку (scripts/install-mac-node-app.sh).
 # Из «голого» launchd-процесса Google Drive не материализует dataless-файлы:
 # read() -> EDEADLK. Ротация логов живёт в launcher'е обёртки, не здесь.
@@ -27,6 +30,30 @@ CONFIG="$REPO/config/node.local.json"
 
 PRIMARY_HOST="${PRIMARY_HOST:-LENOVO-AMD}"
 PRIMARY_STALE_MIN="${PRIMARY_STALE_MIN:-45}"
+
+# --- self-update: тянем ветку узла (release) ПЕРЕД standby-guard ---
+# Обновляться после guard бессмысленно: пока основной узел жив, guard выходит
+# раньше — и резерв не обновляется никогда. Так и вышло: мак месяцами работал на
+# старом коде. --ff-only + gitignored node.local.json дают чистый fast-forward или
+# чистый пропуск; сетевая ошибка логируется и не срывает sweep. SELF_UPDATE=0 —
+# отключить (ручная диагностика на конкретной версии).
+if [ "${SELF_UPDATE:-1}" = "1" ] && [ -d "$REPO/.git" ]; then
+  version_before="$(cat "$REPO/VERSION" 2>/dev/null || echo '?')"
+  pull_out="$(git -C "$REPO" pull --ff-only 2>&1)" || true
+  version_after="$(cat "$REPO/VERSION" 2>/dev/null || echo '?')"
+  branch_now="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+  if [ "$version_before" != "$version_after" ]; then
+    printf '[%s] engine updated: %s -> %s (%s)\n' \
+      "$(date '+%Y-%m-%d %H:%M:%S')" "$version_before" "$version_after" "$branch_now"
+  else
+    printf '[%s] engine up to date: %s (%s)\n' \
+      "$(date '+%Y-%m-%d %H:%M:%S')" "$version_after" "$branch_now"
+  fi
+  case "$pull_out" in
+    *error*|*fatal*|*Aborting*)
+      printf '[%s] engine self-update skipped: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$pull_out" ;;
+  esac
+fi
 
 # --- standby guard: работаем только если основной узел недоступен ---
 # SKIP_STANDBY_GUARD=1 — принудительный прогон (ручная диагностика).
