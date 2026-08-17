@@ -1168,20 +1168,40 @@ def _sessions_run_meta_index(sessions_root: pathlib.Path) -> dict[str, pathlib.P
 
 def existing_transcript(audio: pathlib.Path,
                         transcript_dir: pathlib.Path | None = None) -> pathlib.Path | None:
-    """Look for an already-written transcript (catch-up of pre-existing work).
+    """Look for a transcript THIS pipeline already wrote (catch-up of prior work).
 
-    Searches, in order: the resolved ``transcript_dir`` for this file, a local
-    ``Transcripts/`` next to the audio, historical sidecar formats, and finally
-    every run recorded under the project's ``sessions/`` keyed by run-meta
-    ``source_file``. Falls back to recording-timestamp matching because the ASR
+    Catch-up marks a recording ``asr-done`` without running ASR, so what counts
+    as proof decides whether a recording is transcribed or silently skipped.
+    Only output dirs of the pipeline are searched: the resolved
+    ``transcript_dir``, a local ``Transcripts/`` (the default when a node
+    configures no output dir), and the run-meta index under the project's
+    ``sessions/``. Falls back to recording-timestamp matching because the ASR
     worker transliterates names.
+
+    Deliberately NOT proof — a text file sitting next to the audio in the inbox.
+    Recorders drop their own text there (``{stem}_original.txt`` from the
+    dictaphone app, meeting exports), the pipeline never writes there, and
+    accepting it produced a green ``asr-done`` with no session in the hub: the
+    recording became invisible to both the triage queue and ``stuck``. External
+    text is an input, not a result — cf. the Ktalk sidecar, which supplies
+    speaker names while ASR still runs.
     """
     base = audio.stem
-    direct = [
-        audio.parent / f"{base}-transcript.md",
-        audio.parent / "Transcripts" / f"{base}-transcript.md",
-        audio.parent / f"{base}_original.txt",
-    ]
+    tokens = re.findall(r"\d{6,}", base)
+
+    def carries_our_timestamp(name: str) -> bool:
+        """Does this candidate belong to THIS recording, not a neighbour?
+
+        ``slugify_from_filename`` strips the timestamp, so every voice note of
+        a dictaphone collapses to the same slug ("Голос 260817_120718" ->
+        "golos") and a slug glob matches all of them. Paired with a session-id
+        collision — which lands several recordings in one transcript dir — that
+        is how five recordings once ended up sharing one transcript. When the
+        name carries timestamp tokens, require all of them.
+        """
+        return all(token in name for token in tokens) if tokens else True
+
+    direct = [audio.parent / "Transcripts" / f"{base}-transcript.md"]
     search_dirs = [transcript_dir] if transcript_dir else []
     search_dirs.append(audio.parent / "Transcripts")
     for d in search_dirs:
@@ -1191,15 +1211,15 @@ def existing_transcript(audio: pathlib.Path,
             translit = slugify_from_filename(base)
             if translit:
                 for c in d.glob(f"*{translit}*-transcript.md"):
-                    direct.append(c)
+                    if carries_our_timestamp(c.name):
+                        direct.append(c)
     for c in direct:
         if c.is_file():
             return c
-    tokens = re.findall(r"\d{6,}", base)
     for d in search_dirs:
         if d and d.is_dir() and tokens:
             for tr in d.glob("*-transcript.md"):
-                if any(token in tr.name for token in tokens):
+                if carries_our_timestamp(tr.name):
                     return tr
     if transcript_dir:
         sessions_root = _sessions_root_of(transcript_dir)
@@ -2340,6 +2360,9 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
             maybe_stamp_primary_bundle(state, audio, source_root, cfg)
             atomic_write_json(state_file, state)
             marker_processed_asr(audio).touch()
+            # Say it out loud: this marks the file done without running ASR, and
+            # a wrong match here loses a recording quietly.
+            log(f"caught-up: {audio.name} <- {transcript}")
             return
         state = queued_state(pid, host_label)
         state["session_id"] = sid_preview
