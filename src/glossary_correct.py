@@ -661,12 +661,15 @@ def run_retro(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 # Классы кейсов — из приёмки 801-o11 (замер 1). Ключ — observed в нижнем регистре.
+# Вердикт владельца org/term-canon-by-nature-cyrillic-concepts (22.08.2026): канон
+# определяется природой термина, латиница exocortex — обычный заменяемый вариант
+# «экзокортекса». Кейс ушёл из «вне замера» в безусловный класс: порог 8 из 8.
 MEASURE_UNCONDITIONAL = {
     "экзопортексом", "экокордекс", "за кортексом", "хармнес",
-    "chart space", "клода", "обсидиант",
+    "chart space", "клода", "обсидиант", "exocortex",
 }
 MEASURE_CONDITIONAL = {"кладе", "install cloud", "даю бок", "положить бок"}
-MEASURE_OUT_OF_SCOPE = {"exocortex"}
+MEASURE_OUT_OF_SCOPE: set[str] = set()
 
 # Контроль «защищённые формы не тронуты»: фразы без выполненного условия.
 # Синтетика объявлена в выводе — в контрольном наборе таких фраз нет.
@@ -718,7 +721,7 @@ def run_measure(args: argparse.Namespace) -> int:
         key = observed.lower()
         corrected, report = corrector.correct(fragment)
         if key in MEASURE_OUT_OF_SCOPE:
-            note = ("без изменения — предмет вердикта владельца, не порча"
+            note = ("без изменения — вне классов замера"
                     if corrected == fragment else "ИЗМЕНЁН (не ожидалось)")
             classes["out_of_scope"].append(f"  вне    «{observed}»: {note}")
             continue
@@ -746,7 +749,7 @@ def run_measure(args: argparse.Namespace) -> int:
 
     n_uncond = len(classes["unconditional"])
     n_cond = len(classes["conditional"])
-    print(f"Безусловная замена (variants + multiword_variants), порог 7 из 7:")
+    print(f"Безусловная замена (variants + multiword_variants), порог 8 из 8:")
     print("\n".join(classes["unconditional"]))
     print(f"  итог: {passed['unconditional']} из {n_uncond}")
     print()
@@ -754,7 +757,7 @@ def run_measure(args: argparse.Namespace) -> int:
     print("\n".join(classes["conditional"]))
     print(f"  итог: {passed['conditional']} из {n_cond}")
     print()
-    print("Вне замера (латиница — вердикт владельца):")
+    print("Вне замера:")
     print("\n".join(classes["out_of_scope"]) or "  —")
     if classes["unknown"]:
         print()
@@ -767,7 +770,7 @@ def run_measure(args: argparse.Namespace) -> int:
     print("Правки прослеживаются (что, где, из чего):",
           "да" if not trace_violations else f"НЕТ: {trace_violations}")
 
-    ok_all = (passed["unconditional"] == n_uncond == 7
+    ok_all = (passed["unconditional"] == n_uncond == 8
               and passed["conditional"] >= 3
               and not protect_violations
               and not trace_violations)

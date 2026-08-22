@@ -22,7 +22,7 @@
       "status": "approved",
       "approved_by": "cless75",
       "approved_at": "2026-08-22",
-      "variants": ["экзопортекс", "экокордекс", "экзокорпекс", "экзопорт"],
+      "variants": ["exocortex", "экзопортекс", "экокордекс", "экзокорпекс", "экзопорт"],
       "multiword_variants": ["за кортекс", "за портекс"],
       "protect": [],
       "examples": ["S20260607T1301-golos: «играться со своим экзопортексом»"]
@@ -87,7 +87,7 @@
       "context_rules": [
         {
           "form": "бок",
-          "replace_if_near": ["даю", "положить", "база", "знаний", "skill", "эксперт", "кейс"],
+          "replace_if_near": ["даю", "положить", "база", "знаний", "skill", "скилл", "эксперт", "кейс"],
           "never_if_near": ["болит", "правый", "левый", "бок о бок"]
         },
         {
@@ -98,11 +98,22 @@
       ]
     },
     {
-      "canonical": "skill",
-      "weight": 5,
+      "canonical": "скилл",
+      "weight": 9,
+      "status": "approved",
+      "approved_by": "cless75",
+      "approved_at": "2026-08-22",
+      "variants": ["skill", "скил"],
+      "protect": [],
+      "examples": ["канон кириллицей по org/term-canon-by-nature-cyrillic-concepts: замена сохраняет падежи («скилы» -> «скиллы»)"]
+    },
+    {
+      "canonical": "воркфлоу",
+      "weight": 4,
       "status": "proposed",
-      "variants": ["скилл", "скил"],
-      "protect": []
+      "variants": ["workflow", "воркфлов"],
+      "protect": [],
+      "note": "синтетический proposed-термин: держит тестовое покрытие гейта status"
     }
   ]
 }

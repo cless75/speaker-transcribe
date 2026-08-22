@@ -2,8 +2,10 @@
 
 Что держит этот набор:
 
-1. Контрольный набор до/после по классам приёмки (безусловная замена 7/7,
-   условная не ниже 3/4, латиница вне замера) — на ТЕСТОВОМ глоссарии.
+1. Контрольный набор до/после по классам приёмки (безусловная замена 8/8,
+   условная не ниже 3/4) — на ТЕСТОВОМ глоссарии. Латиница exocortex — в
+   безусловном классе: вердикт org/term-canon-by-nature-cyrillic-concepts
+   сделал её обычным вариантом «экзокортекса».
 2. Защищённые формы не тронуты без выполненного контекстного условия.
 3. Многословная замена только по точной последовательности токенов;
    перестановка или вставка токена — замены нет.
@@ -79,6 +81,10 @@ def _reconstruct(source: str, replacements: list[dict]) -> str:
     ("chart space", "shared space"),
     ("клода", "Claude"),
     ("обсидиант", "Obsidian"),
+    # org/term-canon-by-nature-cyrillic-concepts: exocortex — обычный вариант;
+    # «Экзокортекс» с заглавной: preserve-sentence-case сохраняет регистр
+    # исходного «Exocortex».
+    ("exocortex", "Экзокортекс"),
 ])
 def test_golden_unconditional(glossary, golden_cases, observed, expect_fragment):
     case = _case(golden_cases, observed)
@@ -103,12 +109,12 @@ def test_golden_conditional(glossary, golden_cases, observed, rule_expected):
     assert rule_expected in rules, "условная замена идёт через context_rules"
 
 
-def test_golden_out_of_scope_untouched(glossary, golden_cases):
-    """Латиница exocortex — вне замера: предмет вердикта владельца, не порча."""
-    case = _case(golden_cases, "exocortex")
-    corrected, report = gc.correct_text(case["fragment"], glossary)
-    assert corrected == case["fragment"]
-    assert not report["replacements"]
+def test_out_of_scope_class_is_empty():
+    """После вердикта org/term-canon-by-nature-cyrillic-concepts класс «вне
+    замера» пуст: все 12 кейсов набора разложены по замеряемым классам."""
+    assert not gc.MEASURE_OUT_OF_SCOPE
+    assert len(gc.MEASURE_UNCONDITIONAL) == 8
+    assert "exocortex" in gc.MEASURE_UNCONDITIONAL
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +195,11 @@ def test_multiword_negative_missing_token(glossary):
 
 
 def test_proposed_not_replaced_but_reported(glossary):
-    phrase = "Каждый скилл собирает тренды."
+    phrase = "Наш workflow собирает тренды."
     corrected, report = gc.correct_text(phrase, glossary)
     assert corrected == phrase, "proposed не попадает в замену"
     assert report["candidates"], "proposed попадает в отчёт кандидатов"
-    assert report["candidates"][0]["canonical"] == "skill"
+    assert report["candidates"][0]["canonical"] == "воркфлоу"
     assert report["candidates"][0]["status"] == "proposed"
 
 
@@ -201,9 +207,19 @@ def test_prompts_exclude_proposed(glossary):
     """Подсказки — часть применения термина: только approved."""
     prompt = gc.build_initial_prompt(glossary)
     hotwords = gc.build_hotwords(glossary)
-    assert "skill" not in (prompt or "")
-    assert "skill" not in hotwords
+    assert "воркфлоу" not in (prompt or "")
+    assert "воркфлоу" not in hotwords
     assert "экзокортекс" in hotwords
+    assert "скилл" in hotwords, "скилл approved вердиктом — в подсказках"
+
+
+def test_skill_canon_cyrillic_keeps_endings(glossary):
+    """Решающий довод вердикта — морфологический: кириллический канон «скилл»
+    сохраняет падежи, латиница заменяется на канон."""
+    corrected, _ = gc.correct_text("Прокачай свои скилы.", glossary)
+    assert corrected == "Прокачай свои скиллы."
+    corrected, _ = gc.correct_text("Каждый skill работает сам.", glossary)
+    assert corrected == "Каждый скилл работает сам."
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +293,7 @@ def test_measure_cli_green(capsys):
                   "--golden", str(GOLDEN_PATH)])
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert "итог: 7 из 7" in out
+    assert "итог: 8 из 8" in out
     assert "ИТОГ ЗАМЕРА: ПРОЙДЕН" in out
 
 
@@ -329,8 +345,8 @@ def test_initial_prompt_natural_line_weight_order(glossary):
     terms = prompt[len("Обсуждение: "):-1].split(", ")
     assert terms[0] == "экзокортекс", "наибольший weight — первым"
     assert terms[1] == "Claude"
-    assert set(terms) == {"экзокортекс", "Claude", "harness", "shared space",
-                          "Obsidian", "BoK"}
+    assert set(terms) == {"экзокортекс", "Claude", "скилл", "harness",
+                          "shared space", "Obsidian", "BoK"}
 
 
 def test_initial_prompt_token_limit():
