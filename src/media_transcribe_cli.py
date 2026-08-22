@@ -154,6 +154,9 @@ def _build_payload(args: argparse.Namespace) -> dict:
         payload["timestamps"] = args.timestamps
     if args.word_timestamps:
         payload["word_timestamps_override"] = args.word_timestamps == "on"
+    if args.glossary:
+        # 'off' и путь различает glossary_correct.glossary_decision (уровень «запуск»).
+        payload["glossary_override"] = args.glossary
     if args.project_speaker_registry_path:
         payload["project_speaker_registry_path"] = str(
             pathlib.Path(args.project_speaker_registry_path).expanduser().resolve()
@@ -263,6 +266,12 @@ def main() -> int:
     parser.add_argument(
         "--word-timestamps", dest="word_timestamps", default=None, choices=("on", "off"),
         help="Границы каждого слова в -segments.jsonl. Перебивает признак проекта и конфиг узла.",
+    )
+    parser.add_argument(
+        "--glossary", dest="glossary", default=None,
+        help="Уровень «запуск» для глоссария (801-o11): путь к файлу глоссария "
+             "или 'off' — выключить. Перебивает {hub_root}/{pid}/_PROJECT-glossary.json "
+             "и glossary_path из конфига узла.",
     )
     parser.add_argument(
         "--project-speaker-registry", dest="project_speaker_registry_path", default=None,

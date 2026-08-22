@@ -35,6 +35,13 @@ try:
 except Exception:  # pragma: no cover - module lives alongside this script
     slide_frames = None
 
+try:
+    # Глоссарий проекта (801-o11): initial_prompt/hotwords для ASR. Отдельный
+    # лёгкий модуль без faster-whisper — пост-коррекция и ретро-прогон живут там.
+    import glossary_correct
+except Exception:  # pragma: no cover - module lives alongside this script
+    glossary_correct = None
+
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".mpga", ".mpeg"}
 VOICEPRINT_SCHEMA_VERSION = "v3"
@@ -3381,6 +3388,55 @@ def load_project_settings(payload: dict) -> dict:
     return settings
 
 
+def resolve_glossary_prompt(payload: dict) -> dict:
+    """Подсказки модели из глоссария проекта (801-o11): initial_prompt и hotwords.
+
+    Источник разрешается в glossary_correct по порядку запуск → проект → узел →
+    выключено (файл ``{hub_root}/{pid}/_PROJECT-glossary.json`` — тот же принцип,
+    что ``_PROJECT-settings.json``). Кэш в payload: отпечаток resume и kwargs
+    обязаны видеть одно и то же решение. Ошибка чтения — подсказки выключены,
+    прогон не роняем.
+    """
+    cached = payload.get("_glossary_prompt_cache")
+    if isinstance(cached, dict):
+        return cached
+    info = {"source": "default", "initial_prompt": None, "hotwords": None,
+            "prompt_terms": 0, "fingerprint": ""}
+    if glossary_correct is not None:
+        try:
+            info = glossary_correct.build_prompt_info(payload)
+        except Exception:
+            pass
+    payload["_glossary_prompt_cache"] = info
+    return info
+
+
+def apply_glossary_to_kwargs(payload: dict, kwargs: dict) -> dict:
+    """Пробросить подсказки глоссария в kwargs model.transcribe().
+
+    Условная вставка, как у word_timestamps: без глоссария словарь kwargs обязан
+    остаться прежним до ключа. kwargs уходят в каждый чанк (нарезка 20 мин),
+    поэтому подсказка не выветривается к концу записи.
+    """
+    info = resolve_glossary_prompt(payload)
+    if info.get("initial_prompt"):
+        kwargs["initial_prompt"] = info["initial_prompt"]
+    if info.get("hotwords"):
+        kwargs["hotwords"] = info["hotwords"]
+    return info
+
+
+def build_glossary_meta(payload: dict) -> dict:
+    """Наблюдаемость глоссария в метаданных прогона: источник и объём подсказки."""
+    info = resolve_glossary_prompt(payload)
+    return {
+        "enabled": bool(info.get("initial_prompt") or info.get("hotwords")),
+        "decided_by": info.get("source"),
+        "prompt_terms": info.get("prompt_terms"),
+        "fingerprint": info.get("fingerprint"),
+    }
+
+
 def word_timestamps_decision(payload: dict) -> tuple[bool, str]:
     """Считать ли пословные границы и кто это решил.
 
@@ -3454,6 +3510,9 @@ def build_asr_recovery_fingerprint(payload: dict, audio_path: str) -> dict:
         # Без этого ключа частичный resume смешает чанки, посчитанные с границами слов
         # и без них, — половина сегментов молча останется без поля words.
         "word_timestamps": resolve_word_timestamps(payload),
+        # Подсказки глоссария влияют на само распознавание: чанки, посчитанные с
+        # разными initial_prompt/hotwords, смешивать в одном resume нельзя.
+        "glossary_prompt": resolve_glossary_prompt(payload).get("fingerprint") or "",
     }
 
 
@@ -3485,6 +3544,10 @@ def fingerprint_matches(stored: dict | None, current: dict) -> bool:
     # границ, ключа нет вовсе, и сверка через _fp_scalar_match (None против False)
     # обнулила бы resume всем начатым прогонам. Отсутствие == выключено.
     if bool(stored.get("word_timestamps", False)) != bool(current.get("word_timestamps", False)):
+        return False
+    # Тот же принцип для глоссария: у старых отпечатков ключа нет вовсе,
+    # отсутствие == подсказки выключены (пустая строка).
+    if str(stored.get("glossary_prompt") or "") != str(current.get("glossary_prompt") or ""):
         return False
     return True
 
@@ -4441,6 +4504,16 @@ def main() -> None:
             # движок пойдёт другим путём и выход перестанет совпадать побайтово.
             if want_words:
                 kwargs["word_timestamps"] = True
+            # Глоссарий проекта (801-o11): initial_prompt/hotwords рядом с
+            # beam_size, условной вставкой — без глоссария kwargs прежние до ключа.
+            glossary_info = apply_glossary_to_kwargs(payload, kwargs)
+            if glossary_info.get("initial_prompt") or glossary_info.get("hotwords"):
+                log(
+                    payload,
+                    f"glossary prompts on: source={glossary_info.get('source')} "
+                    f"terms={glossary_info.get('prompt_terms')} "
+                    f"fp={glossary_info.get('fingerprint')}",
+                )
             if payload.get("language_hint"):
                 kwargs["language"] = payload["language_hint"]
             max_parallel, cpu_threads = choose_parallelism(payload, runtime, len(chunks))
@@ -5148,6 +5221,7 @@ def main() -> None:
             "speaker_review": {},
             "clip_generation": clip_generation_meta,
             "word_timestamps": build_word_timestamps_meta(payload, collected),
+            "glossary": build_glossary_meta(payload),
             "segments": collected,
         }
         result["speaker_review"] = build_speaker_review(result)
