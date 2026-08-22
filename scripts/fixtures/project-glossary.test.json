@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "project_id": "test-801-o11",
+  "updated": "2026-08-22",
+  "note": "ТЕСТОВЫЙ глоссарий для pytest и раннера замера 1. Не боевой файл: {hub_root}/700/_PROJECT-glossary.json наполняется только с вердиктами владельца.",
+  "review_policy": {
+    "mode": "by-cluster",
+    "rule": "термин применяется в прогоне только при status=approved; proposed попадает в отчёт кандидатов, но не в замену",
+    "reviewer": "cless75"
+  },
+  "rules": {
+    "case_policy": "preserve-sentence-case",
+    "morphology": "match-russian-endings",
+    "apply_to": "copy-only",
+    "log_replacements": true,
+    "min_confidence": 0.0
+  },
+  "terms": [
+    {
+      "canonical": "экзокортекс",
+      "weight": 10,
+      "status": "approved",
+      "approved_by": "cless75",
+      "approved_at": "2026-08-22",
+      "variants": ["экзопортекс", "экокордекс", "экзокорпекс", "экзопорт"],
+      "multiword_variants": ["за кортекс", "за портекс"],
+      "protect": [],
+      "examples": ["S20260607T1301-golos: «играться со своим экзопортексом»"]
+    },
+    {
+      "canonical": "Claude",
+      "weight": 9,
+      "status": "approved",
+      "approved_by": "cless75",
+      "approved_at": "2026-08-22",
+      "variants": ["клод", "клауд", "клоуд"],
+      "protect": ["cloud", "кладе"],
+      "context_rules": [
+        {
+          "form": "cloud",
+          "replace_if_near": ["install", "npm", "код", "агент", "сессия", "поставить"],
+          "never_if_near": ["aws", "google cloud", "облак"]
+        },
+        {
+          "form": "кладе",
+          "replace_if_near": ["работает", "скачивает", "код", "агент", "сессия"],
+          "never_if_near": ["золот", "сокровищ", "клады"]
+        }
+      ]
+    },
+    {
+      "canonical": "harness",
+      "weight": 8,
+      "status": "approved",
+      "approved_by": "cless75",
+      "approved_at": "2026-08-22",
+      "variants": ["хармнес", "харнес", "харнесс"],
+      "protect": []
+    },
+    {
+      "canonical": "shared space",
+      "weight": 7,
+      "status": "approved",
+      "approved_by": "cless75",
+      "approved_at": "2026-08-22",
+      "variants": [],
+      "multiword_variants": ["chart space", "шаред спейс"],
+      "protect": []
+    },
+    {
+      "canonical": "Obsidian",
+      "weight": 7,
+      "status": "approved",
+      "approved_by": "cless75",
+      "approved_at": "2026-08-22",
+      "variants": ["обсидиан", "обсидиант"],
+      "protect": []
+    },
+    {
+      "canonical": "BoK",
+      "weight": 6,
+      "status": "approved",
+      "approved_by": "cless75",
+      "approved_at": "2026-08-22",
+      "variants": [],
+      "protect": ["бок", "боков"],
+      "context_rules": [
+        {
+          "form": "бок",
+          "replace_if_near": ["даю", "положить", "база", "знаний", "skill", "эксперт", "кейс"],
+          "never_if_near": ["болит", "правый", "левый", "бок о бок"]
+        },
+        {
+          "form": "боков",
+          "replace_if_near": ["база", "знаний", "skill", "эксперт", "публикац"],
+          "never_if_near": ["болит", "правый", "левый"]
+        }
+      ]
+    },
+    {
+      "canonical": "skill",
+      "weight": 5,
+      "status": "proposed",
+      "variants": ["скилл", "скил"],
+      "protect": []
+    }
+  ]
+}
