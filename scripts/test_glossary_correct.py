@@ -2,10 +2,14 @@
 
 Что держит этот набор:
 
-1. Контрольный набор до/после по классам приёмки (безусловная замена 8/8,
-   условная не ниже 3/4) — на ТЕСТОВОМ глоссарии. Латиница exocortex — в
-   безусловном классе: вердикт org/term-canon-by-nature-cyrillic-concepts
-   сделал её обычным вариантом «экзокортекса».
+1. Контрольный набор до/после по классам приёмки (безусловная замена 10/10,
+   условная 2/2) — на ТЕСТОВОМ глоссарии. Переразметки по вердиктам:
+   org/term-canon-by-nature-cyrillic-concepts — exocortex обычный вариант
+   «экзокортекса»; org/bok-homonym-replaced-by-default — «бок» заменяется по
+   умолчанию (146:1), protect BoK сжат до идиом, «даю бок» и «положить бок»
+   безусловные. Плюс приоритет protect: одиночный protect действует внутри
+   своего термина и не гасит точную многословную последовательность чужого
+   (находка ретро-прогона: «Cloud Code» против protect «cloud»).
 2. Защищённые формы не тронуты без выполненного контекстного условия.
 3. Многословная замена только по точной последовательности токенов;
    перестановка или вставка токена — замены нет.
@@ -85,6 +89,10 @@ def _reconstruct(source: str, replacements: list[dict]) -> str:
     # «Экзокортекс» с заглавной: preserve-sentence-case сохраняет регистр
     # исходного «Exocortex».
     ("exocortex", "Экзокортекс"),
+    # org/bok-homonym-replaced-by-default: «бок» заменяется по умолчанию,
+    # context_rules у BoK сняты — оба кейса стали безусловными.
+    ("даю бок", "BoK"),
+    ("положить бок", "BoK"),
 ])
 def test_golden_unconditional(glossary, golden_cases, observed, expect_fragment):
     case = _case(golden_cases, observed)
@@ -98,8 +106,6 @@ def test_golden_unconditional(glossary, golden_cases, observed, expect_fragment)
 @pytest.mark.parametrize("observed,rule_expected", [
     ("кладе", "context"),
     ("install cloud", "context"),
-    ("даю бок", "context"),
-    ("положить бок", "context"),
 ])
 def test_golden_conditional(glossary, golden_cases, observed, rule_expected):
     case = _case(golden_cases, observed)
@@ -109,12 +115,13 @@ def test_golden_conditional(glossary, golden_cases, observed, rule_expected):
     assert rule_expected in rules, "условная замена идёт через context_rules"
 
 
-def test_out_of_scope_class_is_empty():
-    """После вердикта org/term-canon-by-nature-cyrillic-concepts класс «вне
-    замера» пуст: все 12 кейсов набора разложены по замеряемым классам."""
+def test_measure_class_layout():
+    """Раскладка классов после вердиктов: «вне замера» пуст, безусловных 10
+    (в т.ч. exocortex и оба кейса «бок»), условных 2 (омонимы Claude)."""
     assert not gc.MEASURE_OUT_OF_SCOPE
-    assert len(gc.MEASURE_UNCONDITIONAL) == 8
-    assert "exocortex" in gc.MEASURE_UNCONDITIONAL
+    assert len(gc.MEASURE_UNCONDITIONAL) == 10
+    assert {"exocortex", "даю бок", "положить бок"} <= gc.MEASURE_UNCONDITIONAL
+    assert gc.MEASURE_CONDITIONAL == {"кладе", "install cloud"}
 
 
 # ---------------------------------------------------------------------------
@@ -140,17 +147,71 @@ def test_protected_never_wins_over_replace(glossary):
 
 def test_protected_window_is_sentence(glossary):
     """Условие из соседнего предложения не действует: окно — предложение."""
-    phrase = "Мы говорили про install и npm. Потом заболел бок."
+    phrase = "Мы говорили про install и npm. Потом пришёл cloud."
     corrected, report = gc.correct_text(phrase, glossary)
     assert corrected == phrase
     assert not report["replacements"]
 
 
-def test_protect_beats_variant_listing(glossary):
-    """Форма из protect не правится даже при пустом контексте предложения."""
+def test_bok_replaced_by_default(glossary):
+    """org/bok-homonym-replaced-by-default: «бок» без идиомы — обычный вариант,
+    заменяется по умолчанию (146:1 по корпусу), в любом падеже."""
     corrected, report = gc.correct_text("Просто бок.", glossary)
-    assert corrected == "Просто бок."
-    assert report["protected_kept"][0]["form"] == "бок"
+    assert corrected == "Просто BoK."
+    assert report["replacements"][0]["rule"] == "variant"
+    corrected, _ = gc.correct_text("Разложить по бокам знаний.", glossary)
+    assert corrected == "Разложить по бокам знаний.", \
+        "идиома «по бокам» защищена точной последовательностью"
+
+
+# ---------------------------------------------------------------------------
+# 2а. Приоритет protect: внутри термина, не через границу терминов
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_multiword_beats_single_protect(glossary):
+    """Находка ретро-прогона: protect «cloud» термина Claude не должен гасить
+    точную последовательность «Cloud Code» ЧУЖОГО термина Claude Code."""
+    phrase = "Запусти Cloud Code и посмотри логи."
+    corrected, report = gc.correct_text(phrase, glossary)
+    assert corrected == "Запусти Claude Code и посмотри логи."
+    assert report["replacements"][0]["rule"] == "multiword"
+    assert report["replacements"][0]["matched"] == "Cloud Code"
+
+
+def test_single_protected_cloud_still_guarded(glossary):
+    """Негатив: одиночный «cloud» без триггеров по-прежнему не заменяется."""
+    phrase = "Смотри, cloud тут просто упомянут."
+    corrected, report = gc.correct_text(phrase, glossary)
+    assert corrected == phrase
+    assert not report["replacements"]
+    assert report["protected_kept"][0]["form"] == "cloud"
+
+
+def test_multiword_protect_idiom_bok_o_bok(glossary):
+    """«бок о бок» — многословный protect: точная последовательность сильнее
+    одиночного варианта «бок» своего же термина, ни один «бок» не заменяется."""
+    phrase = "Мы работали бок о бок весь день."
+    corrected, report = gc.correct_text(phrase, glossary)
+    assert corrected == phrase
+    assert not report["replacements"]
+    assert any(k["form"] == "бок о бок" for k in report["protected_kept"])
+
+
+def test_multiword_protect_corpus_phrase_s_boku(glossary):
+    """Единственное прямое значение «бок» на весь корпус 700 (S20260605):
+    при «бок» в variants и идиоме «с боку» в protect — ни одной замены."""
+    phrase = "сидит этих человек с боку с рукой"
+    corrected, report = gc.correct_text(phrase, glossary)
+    assert corrected == phrase
+    assert not report["replacements"]
+    assert any(k["form"] == "с боку" for k in report["protected_kept"])
+
+
+def test_single_bok_outside_idiom_replaced(glossary):
+    corrected, report = gc.correct_text("Я даю бок.", glossary)
+    assert corrected == "Я даю BoK."
+    assert report["replacements"][0]["rule"] == "variant"
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +297,7 @@ TRANSCRIPT_MD = (
     "## Session Transcript\n"
     "\n"
     "[00:01:00] SPEAKER_01: тебе нужен полноценный хармнес, какой-то экзопортекс.\n"
-    "[00:02:00] SPEAKER_02: Цепь за кортексом. Просто бок.\n"
+    "[00:02:00] SPEAKER_02: Цепь за кортексом. Мы работали бок о бок.\n"
 )
 
 
@@ -257,7 +318,7 @@ def test_retro_source_preserved_variant_separate(tmp_path, glossary):
     variant_text = variant.read_text(encoding="utf-8")
     assert "harness" in variant_text and "экзокортекс" in variant_text
     assert "экзокортексом" in variant_text  # многословная с окончанием
-    assert "Просто бок." in variant_text  # protect без условия не тронут
+    assert "бок о бок" in variant_text  # идиома из protect не тронута
     assert f"asr_variant_id: {json.dumps(vid)}" in variant_text, \
         "frontmatter варианта различим по asr_variant_id"
 
@@ -293,7 +354,8 @@ def test_measure_cli_green(capsys):
                   "--golden", str(GOLDEN_PATH)])
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert "итог: 8 из 8" in out
+    assert "итог: 10 из 10" in out
+    assert "итог: 2 из 2" in out
     assert "ИТОГ ЗАМЕРА: ПРОЙДЕН" in out
 
 
@@ -345,8 +407,8 @@ def test_initial_prompt_natural_line_weight_order(glossary):
     terms = prompt[len("Обсуждение: "):-1].split(", ")
     assert terms[0] == "экзокортекс", "наибольший weight — первым"
     assert terms[1] == "Claude"
-    assert set(terms) == {"экзокортекс", "Claude", "скилл", "harness",
-                          "shared space", "Obsidian", "BoK"}
+    assert set(terms) == {"экзокортекс", "Claude", "Claude Code", "скилл",
+                          "harness", "shared space", "Obsidian", "BoK"}
 
 
 def test_initial_prompt_token_limit():

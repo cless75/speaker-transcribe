@@ -311,7 +311,10 @@ class GlossaryCorrector:
         self.case_policy = str(rules.get("case_policy") or "preserve-sentence-case")
         # rules.min_confidence зарезервировано в v1 и намеренно игнорируется.
 
-        self.protect: dict[str, dict] = {}          # форма -> {"term":, "rules": []}
+        self.protect: dict[str, dict] = {}          # одиночная форма -> {"term":, "rules": []}
+        # Многословный protect: ТОЧНАЯ последовательность токенов (идиомы
+        # «бок о бок», «под боком» — org/bok-homonym-replaced-by-default).
+        self.protect_multiword: list[tuple[tuple[str, ...], dict]] = []
         self.variants: dict[str, dict] = {}         # одиночный вариант -> term
         self.multiword: list[tuple[tuple[str, ...], dict]] = []
         self.candidate_variants: dict[str, dict] = {}
@@ -321,14 +324,20 @@ class GlossaryCorrector:
             is_approved = str(term.get("status") or "") == "approved"
             if is_approved:
                 for form in term.get("protect") or []:
-                    form_l = str(form).strip().lower()
-                    if not form_l or " " in form_l:
-                        continue  # v1: защищаются одиночные формы
+                    form_l = " ".join(str(form).strip().lower().split())
+                    if not form_l:
+                        continue
                     frules = [
                         r for r in (term.get("context_rules") or [])
-                        if isinstance(r, dict) and str(r.get("form") or "").strip().lower() == form_l
+                        if isinstance(r, dict)
+                        and " ".join(str(r.get("form") or "").strip().lower().split()) == form_l
                     ]
-                    self.protect[form_l] = {"term": term, "rules": frules}
+                    if " " in form_l:
+                        self.protect_multiword.append(
+                            (tuple(form_l.split()),
+                             {"term": term, "rules": frules, "form": form_l}))
+                    else:
+                        self.protect[form_l] = {"term": term, "rules": frules}
             var_map = self.variants if is_approved else self.candidate_variants
             mw_list = self.multiword if is_approved else self.candidate_multiword
             for variant in term.get("variants") or []:
@@ -346,6 +355,7 @@ class GlossaryCorrector:
         # Длинные последовательности первыми: точное совпадение большего окна сильнее.
         self.multiword.sort(key=lambda item: -len(item[0]))
         self.candidate_multiword.sort(key=lambda item: -len(item[0]))
+        self.protect_multiword.sort(key=lambda item: -len(item[0]))
 
     # -- контекст ------------------------------------------------------------
 
@@ -383,31 +393,74 @@ class GlossaryCorrector:
 
     # -- сопоставление -------------------------------------------------------
 
+    @staticmethod
+    def _match_sequence(tokens: list[tuple[str, int, int]], i: int,
+                        vt: tuple[str, ...]):
+        """Точная последовательность токенов; окончание — только у последнего.
+        Возвращает (span, ending, consumed) либо None."""
+        n = len(vt)
+        if i + n > len(tokens):
+            return None
+        window = tokens[i: i + n]
+        if any(window[j][0].lower() != vt[j] for j in range(n - 1)):
+            return None
+        last = window[-1][0].lower()
+        ending = None
+        if last == vt[-1]:
+            ending = ""
+        else:
+            for stem, end in _split_ending(last):
+                if end and stem == vt[-1]:
+                    ending = end
+                    break
+        if ending is None:
+            return None
+        return (window[0][1], window[-1][2]), ending, n
+
     def _try_multiword(self, tokens: list[tuple[str, int, int]], i: int,
                        table: list[tuple[tuple[str, ...], dict]]):
         for vt, term in table:
-            n = len(vt)
-            if i + n > len(tokens):
+            found = self._match_sequence(tokens, i, vt)
+            if found is None:
                 continue
-            window = tokens[i: i + n]
-            if any(window[j][0].lower() != vt[j] for j in range(n - 1)):
-                continue
-            last = window[-1][0].lower()
-            ending = None
-            if last == vt[-1]:
-                ending = ""
-            else:
-                for stem, end in _split_ending(last):
-                    if end and stem == vt[-1]:
-                        ending = end
-                        break
-            if ending is None:
-                continue
+            span, ending, consumed = found
             return {
                 "term": term, "ending": ending, "rule": "multiword",
-                "span": (window[0][1], window[-1][2]), "consumed": n,
+                "span": span, "consumed": consumed,
             }
         return None
+
+    def _try_protect_multiword(self, tokens: list[tuple[str, int, int]], i: int):
+        """Многословный protect: идиома защищается как точная последовательность
+        и сильнее одиночного варианта своего же термина («бок о бок» не трогает
+        ни один «бок», даже когда «бок» лежит в variants)."""
+        for vt, entry in self.protect_multiword:
+            found = self._match_sequence(tokens, i, vt)
+            if found is None:
+                continue
+            span, ending, consumed = found
+            return {
+                "term": entry["term"], "ending": ending, "rule": "context",
+                "span": span, "consumed": consumed,
+                "rules": entry["rules"], "form": entry["form"],
+            }
+        return None
+
+    def _own_protect_blocks(self, match: dict,
+                            tokens: list[tuple[str, int, int]], i: int) -> bool:
+        """Гасит ли одиночный protect СВОЕГО термина эту многословную замену.
+
+        Приоритет «protect сильнее variants» действует внутри термина: точную
+        последовательность ЧУЖОГО термина одиночная защищённая форма не
+        подавляет (находка ретро-прогона: protect «cloud» термина Claude гасил
+        «cloud code» термина Claude Code — 4 незаменённых вхождения).
+        """
+        for j in range(i, i + match["consumed"]):
+            for stem, _ in _split_ending(tokens[j][0].lower()):
+                entry = self.protect.get(stem)
+                if entry is not None and entry["term"] is match["term"]:
+                    return True
+        return False
 
     def _try_single(self, tokens: list[tuple[str, int, int]], i: int,
                     table: dict[str, dict]):
@@ -464,8 +517,20 @@ class GlossaryCorrector:
         cursor = 0
         i = 0
         while i < len(tokens):
-            match = self._try_protect(tokens, i)
-            if match is not None:
+            # Порядок силы: многословный protect (точная последовательность,
+            # идиомы) → многословный вариант (чужую последовательность одиночный
+            # protect не гасит — только своего термина) → одиночный protect →
+            # одиночный вариант.
+            match = self._try_protect_multiword(tokens, i)
+            if match is None:
+                mw = self._try_multiword(tokens, i, self.multiword)
+                if mw is not None and not self._own_protect_blocks(mw, tokens, i):
+                    match = mw
+                else:
+                    match = self._try_protect(tokens, i)
+                    if match is None:
+                        match = self._try_single(tokens, i, self.variants)
+            if match is not None and match["rule"] == "context":
                 span = match["span"]
                 sent_start, sent_end = sentence_of(span[0])
                 allowed = self._context_allows(
@@ -481,9 +546,6 @@ class GlossaryCorrector:
                     })
                     i += match["consumed"]
                     continue
-            else:
-                match = (self._try_multiword(tokens, i, self.multiword)
-                         or self._try_single(tokens, i, self.variants))
             if match is None:
                 cand = (self._try_multiword(tokens, i, self.candidate_multiword)
                         or self._try_single(tokens, i, self.candidate_variants))
@@ -661,22 +723,31 @@ def run_retro(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 # Классы кейсов — из приёмки 801-o11 (замер 1). Ключ — observed в нижнем регистре.
-# Вердикт владельца org/term-canon-by-nature-cyrillic-concepts (22.08.2026): канон
-# определяется природой термина, латиница exocortex — обычный заменяемый вариант
-# «экзокортекса». Кейс ушёл из «вне замера» в безусловный класс: порог 8 из 8.
+# Переразметки по вердиктам владельца:
+# - org/term-canon-by-nature-cyrillic-concepts (22.08): латиница exocortex —
+#   обычный заменяемый вариант «экзокортекса», кейс в безусловном классе;
+# - org/bok-homonym-replaced-by-default (24.08): «бок» заменяется по умолчанию
+#   (146:1 по корпусу), context_rules у BoK сняты — «даю бок» и «положить бок»
+#   стали безусловными. Условными остались только омонимы Claude.
+# Смысл замера — показать, КАКИМ механизмом сработал каждый кейс: вывод
+# печатает правило (variant/multiword/context) по каждой правке.
 MEASURE_UNCONDITIONAL = {
     "экзопортексом", "экокордекс", "за кортексом", "хармнес",
     "chart space", "клода", "обсидиант", "exocortex",
+    "даю бок", "положить бок",
 }
-MEASURE_CONDITIONAL = {"кладе", "install cloud", "даю бок", "положить бок"}
+MEASURE_CONDITIONAL = {"кладе", "install cloud"}
 MEASURE_OUT_OF_SCOPE: set[str] = set()
 
-# Контроль «защищённые формы не тронуты»: фразы без выполненного условия.
-# Синтетика объявлена в выводе — в контрольном наборе таких фраз нет.
+# Контроль «защищённые формы не тронуты»: одиночный protect без выполненного
+# условия и многословный protect (идиомы — точные последовательности).
+# Последняя фраза — единственное прямое значение «бок» на весь корпус 700
+# (S20260605, довод вердикта 146:1). Синтетика объявлена в выводе.
 PROTECTED_CONTROL_PHRASES = [
     "Cloud EMD стоит в каждом проекте компании.",
     "Сессия пишет логи в Google Cloud.",
-    "У меня после тренировки болит правый бок.",
+    "Мы работали бок о бок весь день.",
+    "сидит этих человек с боку с рукой",
 ]
 
 
@@ -749,11 +820,11 @@ def run_measure(args: argparse.Namespace) -> int:
 
     n_uncond = len(classes["unconditional"])
     n_cond = len(classes["conditional"])
-    print(f"Безусловная замена (variants + multiword_variants), порог 8 из 8:")
+    print(f"Безусловная замена (variants + multiword_variants), порог 10 из 10:")
     print("\n".join(classes["unconditional"]))
     print(f"  итог: {passed['unconditional']} из {n_uncond}")
     print()
-    print(f"Условная замена (context_rules, омонимы и protect), порог не ниже 3 из 4:")
+    print(f"Условная замена (context_rules, омонимы и protect), порог 2 из 2:")
     print("\n".join(classes["conditional"]))
     print(f"  итог: {passed['conditional']} из {n_cond}")
     print()
@@ -770,8 +841,8 @@ def run_measure(args: argparse.Namespace) -> int:
     print("Правки прослеживаются (что, где, из чего):",
           "да" if not trace_violations else f"НЕТ: {trace_violations}")
 
-    ok_all = (passed["unconditional"] == n_uncond == 8
-              and passed["conditional"] >= 3
+    ok_all = (passed["unconditional"] == n_uncond == 10
+              and passed["conditional"] == n_cond == 2
               and not protect_violations
               and not trace_violations)
     print()

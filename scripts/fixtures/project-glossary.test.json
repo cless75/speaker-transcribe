@@ -49,6 +49,17 @@
       ]
     },
     {
+      "canonical": "Claude Code",
+      "weight": 8,
+      "status": "approved",
+      "approved_by": "cless75",
+      "approved_at": "2026-08-24",
+      "variants": [],
+      "multiword_variants": ["cloud code", "клод код"],
+      "protect": [],
+      "note": "точная последовательность чужого термина сильнее одиночного protect «cloud» термина Claude — находка ретро-прогона 24.08"
+    },
+    {
       "canonical": "harness",
       "weight": 8,
       "status": "approved",
@@ -82,20 +93,9 @@
       "status": "approved",
       "approved_by": "cless75",
       "approved_at": "2026-08-22",
-      "variants": [],
-      "protect": ["бок", "боков"],
-      "context_rules": [
-        {
-          "form": "бок",
-          "replace_if_near": ["даю", "положить", "база", "знаний", "skill", "скилл", "эксперт", "кейс"],
-          "never_if_near": ["болит", "правый", "левый", "бок о бок"]
-        },
-        {
-          "form": "боков",
-          "replace_if_near": ["база", "знаний", "skill", "эксперт", "публикац"],
-          "never_if_near": ["болит", "правый", "левый"]
-        }
-      ]
+      "variants": ["бок", "бока", "боку", "боком", "боке", "боки", "боков", "бокам", "боками", "боках"],
+      "protect": ["бок о бок", "с боку", "под боком", "на боку", "по бокам"],
+      "note": "org/bok-homonym-replaced-by-default (146:1): «бок» во всех падежах заменяется по умолчанию, protect сжат до идиом точными последовательностями, context_rules сняты"
     },
     {
       "canonical": "скилл",
