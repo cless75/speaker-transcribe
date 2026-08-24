@@ -214,6 +214,44 @@ def test_single_bok_outside_idiom_replaced(glossary):
     assert report["replacements"][0]["rule"] == "variant"
 
 
+def test_own_multiword_beats_own_protect_regression(glossary):
+    """Регрессия боевого прогона 24.08: protect «кортекс» у «экзокортекса»
+    гасил СОБСТВЕННУЮ последовательность «за кортексом». Многословный контекст
+    сам снимает неоднозначность — замена обязана сработать."""
+    corrected, report = gc.correct_text("Цепь за кортексом.", glossary)
+    assert corrected == "Цепь экзокортексом."
+    assert report["replacements"][0]["rule"] == "multiword"
+    assert report["replacements"][0]["matched"] == "за кортексом"
+
+
+def test_bare_kortex_protected(glossary):
+    """Голое «кортекс» вне последовательности — одиночная защита действует:
+    не заменяется и фиксируется в protected_kept."""
+    phrase = "Моторная кора, то есть кортекс, отвечает за движение."
+    corrected, report = gc.correct_text(phrase, glossary)
+    assert corrected == phrase
+    assert not report["replacements"]
+    assert any(k["form"] == "кортекс" for k in report["protected_kept"])
+
+
+def test_fixture_matches_combat_layout(glossary):
+    """Указание владельца потока (24.08): приёмка — только боевой глоссарий с
+    Хаба; фикстура — для юнит-тестов, и её расхождение с боевой раскладкой
+    ключевых терминов — само по себе дефект. Тест пинит контракт раскладки."""
+    terms = {t["canonical"]: t for t in glossary["terms"]}
+    assert "кортекс" in terms["экзокортекс"]["protect"], \
+        "у экзокортекса непустой protect (боевой файл: кортекс)"
+    bok = terms["BoK"]
+    assert {"бок", "бока", "боку", "боком", "боков"} <= set(bok["variants"]), \
+        "падежи «бок*» в variants"
+    assert set(bok["protect"]) == {"бок о бок", "с боку", "под боком",
+                                   "на боку", "по бокам"}, \
+        "protect BoK — ровно пять идиом строками"
+    assert "context_rules" not in bok, "context_rules у BoK сняты вердиктом"
+    assert "cloud" in terms["Claude"]["protect"]
+    assert "cloud code" in terms["Claude Code"]["multiword_variants"]
+
+
 # ---------------------------------------------------------------------------
 # 3. Многословная замена: точная последовательность токенов
 # ---------------------------------------------------------------------------

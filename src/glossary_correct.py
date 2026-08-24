@@ -446,21 +446,17 @@ class GlossaryCorrector:
             }
         return None
 
-    def _own_protect_blocks(self, match: dict,
-                            tokens: list[tuple[str, int, int]], i: int) -> bool:
-        """Гасит ли одиночный protect СВОЕГО термина эту многословную замену.
-
-        Приоритет «protect сильнее variants» действует внутри термина: точную
-        последовательность ЧУЖОГО термина одиночная защищённая форма не
-        подавляет (находка ретро-прогона: protect «cloud» термина Claude гасил
-        «cloud code» термина Claude Code — 4 незаменённых вхождения).
-        """
-        for j in range(i, i + match["consumed"]):
-            for stem, _ in _split_ending(tokens[j][0].lower()):
-                entry = self.protect.get(stem)
-                if entry is not None and entry["term"] is match["term"]:
-                    return True
-        return False
+# Замечание к приоритету (две находки ретро-прогона, 24.08):
+# 1) protect «cloud» термина Claude гасил «cloud code» ЧУЖОГО термина
+#    Claude Code — 4 незаменённых вхождения;
+# 2) первая починка (блок только «своего» термина) дала регрессию на боевом
+#    глоссарии: protect «кортекс» у «экзокортекса» гасил СОБСТВЕННУЮ
+#    последовательность «за кортексом».
+# Итоговое правило: одиночный protect многословную замену не гасит ВООБЩЕ —
+# точная многословная последовательность сама снимает неоднозначность, ради
+# которой форма защищалась. Одиночная защита действует ровно там, где форма
+# стоит ВНЕ последовательности: голое «кортекс» ловится одиночным шагом
+# прохода и уходит в protected_kept.
 
     def _try_single(self, tokens: list[tuple[str, int, int]], i: int,
                     table: dict[str, dict]):
@@ -518,18 +514,18 @@ class GlossaryCorrector:
         i = 0
         while i < len(tokens):
             # Порядок силы: многословный protect (точная последовательность,
-            # идиомы) → многословный вариант (чужую последовательность одиночный
-            # protect не гасит — только своего термина) → одиночный protect →
-            # одиночный вариант.
+            # идиомы) → многословный вариант (одиночный protect его не гасит
+            # НИКОГДА — ни чужой, ни свой: точная последовательность сама
+            # снимает неоднозначность, см. замечание к приоритету выше) →
+            # одиночный protect (форма ВНЕ последовательности) → одиночный
+            # вариант.
             match = self._try_protect_multiword(tokens, i)
             if match is None:
-                mw = self._try_multiword(tokens, i, self.multiword)
-                if mw is not None and not self._own_protect_blocks(mw, tokens, i):
-                    match = mw
-                else:
-                    match = self._try_protect(tokens, i)
-                    if match is None:
-                        match = self._try_single(tokens, i, self.variants)
+                match = self._try_multiword(tokens, i, self.multiword)
+            if match is None:
+                match = self._try_protect(tokens, i)
+            if match is None:
+                match = self._try_single(tokens, i, self.variants)
             if match is not None and match["rule"] == "context":
                 span = match["span"]
                 sent_start, sent_end = sentence_of(span[0])
@@ -748,6 +744,7 @@ PROTECTED_CONTROL_PHRASES = [
     "Сессия пишет логи в Google Cloud.",
     "Мы работали бок о бок весь день.",
     "сидит этих человек с боку с рукой",
+    "Моторная кора, то есть кортекс, отвечает за движение.",
 ]
 
 
