@@ -2676,12 +2676,21 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
 
         # Extra declarative work is considered before ordinary inbox files on every
         # tick. At most one job runs, then control returns to the existing flow.
-        jobs_queue.process_next_job(
-            cfg, config_path,
-            claim_job=try_claim_file,
-            retire_job=retire_claim,
-            heartbeat_factory=_ClaimHeartbeat,
-        )
+        # The queue may NEVER take the ordinary flow down with it: the hub is a
+        # cloud-synced drive that disappears mid-sweep, and a failure to read or
+        # journal a job must cost the job, not the inbox. Same stance as the
+        # CloudStorage and ASR-environment guards below — log and carry on.
+        try:
+            jobs_queue.process_next_job(
+                cfg, config_path,
+                claim_job=try_claim_file,
+                retire_job=retire_claim,
+                heartbeat_factory=_ClaimHeartbeat,
+                claim_is_stale=claim_is_dead,
+            )
+        except Exception as exc:
+            log(f"jobs queue skipped this sweep ({type(exc).__name__}: {exc}); "
+                f"continuing with the ordinary inbox flow")
 
         # ASR interpreter preflight — a missing/garbled transcribe_python would fail
         # every file and quarantine the whole inbox. Check once up front; abort the

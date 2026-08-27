@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import collections
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
@@ -27,6 +28,7 @@ EXECUTABLE_PARAMS = {
     "slide_dedupe_visual",
 }
 READY_STATUSES = {"pending", "ready"}
+ORPHANABLE_STATUSES = {"claimed", "running"}
 TERMINAL_STATUSES = {"done", "failed"}
 DEFAULT_RUN_LOG_RETENTION_DAYS = 90
 DEFAULT_TAIL_LINES = 80
@@ -66,7 +68,7 @@ def _write_json(path: pathlib.Path, value: dict) -> None:
 
 def _append_log(path: pathlib.Path, stage: str, message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = dt.datetime.now().isoformat(timespec="seconds")
+    timestamp = _utcnow().isoformat(timespec="seconds").replace("+00:00", "Z")
     with path.open("a", encoding="utf-8", newline="\n") as stream:
         for line in (str(message).splitlines() or [""]):
             stream.write(f"{timestamp} stage={stage} {line}\n")
@@ -109,6 +111,13 @@ def rotate_run_logs(cfg: dict, now: dt.datetime | None = None) -> list[pathlib.P
         except OSError:
             continue
     return removed
+
+
+def _claim_cfg(cfg: dict) -> dict:
+    """Jobs are shared across nodes, so claiming is always multi-machine."""
+    claim_cfg = dict(cfg)
+    claim_cfg["enable_multi_machine"] = True
+    return claim_cfg
 
 
 def _read_job(path: pathlib.Path) -> dict:
@@ -170,9 +179,27 @@ def _eligibility(job: dict, cfg: dict,
     return None
 
 
-def _journal_skip(cfg: dict, job_path: pathlib.Path, job: dict, reason: str) -> dict:
+def _skip_paths(cfg: dict, job_id: str, reason: str) -> tuple[str, pathlib.Path, pathlib.Path]:
+    """Deterministic per (node, job, reason) — the dedupe key of the skip journal."""
+    digest = hashlib.sha256(reason.encode("utf-8")).hexdigest()[:8]
+    run_id = f"skip-{_safe_token(job_id)}-{digest}"
+    root = _hub(cfg) / "_runs" / _safe_token(_host(cfg), "unknown-host") / "skips"
+    return run_id, root / f"{run_id}.log", root / f"{run_id}.json"
+
+
+def _journal_skip(cfg: dict, job_path: pathlib.Path, job: dict, reason: str) -> dict | None:
+    """Record why this node passed a job over — ONCE per (node, job, reason).
+
+    A skip repeats on every sweep by nature: an unsupported param or a capability
+    mismatch does not change between ticks. Journalling it each time buried the real
+    runs under hundreds of identical summaries a day and, since summaries are kept
+    forever by design, grew without bound on the cloud-synced hub. The reason is still
+    on record — it is simply written once, and again only if the reason changes.
+    """
     job_id = str(job.get("job_id") or job_path.stem)
-    run_id, log_path, summary_path = _run_paths(cfg, job_id)
+    run_id, log_path, summary_path = _skip_paths(cfg, job_id, reason)
+    if summary_path.exists():
+        return None
     _append_log(log_path, "selection", f"SKIPPED job={job_id}: {reason}")
     summary = {
         "run_id": run_id, "status": "skipped", "node": _host(cfg),
@@ -287,7 +314,8 @@ def _build_command(job: dict, cfg: dict, input_path: pathlib.Path,
     command = [
         python, cli, "--config", str(temp_path), "--input", str(input_path),
         "--output-dir", str(output_dir), "--project-id", str(target.get("project_id") or ""),
-        "--output-base-name", str(params.get("asr_variant_id") or input_path.stem),
+        "--output-base-name", _safe_token(params.get("asr_variant_id") or input_path.stem,
+                                          _safe_token(input_path.stem, "job-output")),
         "--quality-preset", str(params.get("quality_preset") or cfg.get("quality_preset", "medium")),
         "--speaker-mode", str(params.get("speaker_mode") or cfg.get("speaker_mode", "diarize")),
         "--timestamps", str(timestamps),
@@ -352,6 +380,7 @@ def process_next_job(
     claim_job: Callable[[pathlib.Path, dict], bool],
     retire_job: Callable[[pathlib.Path, dict], None],
     heartbeat_factory: Callable[[pathlib.Path, dict], object],
+    claim_is_stale: Callable[[pathlib.Path, dict], bool] | None = None,
     preflight: Callable[[str, str, float], dict] = run_preflight,
     cli_executor: Callable[[list[str], pathlib.Path, int], tuple[int, str]] = execute_cli,
     vram_probe: Callable[[], float] = probe_free_vram_gb,
@@ -371,8 +400,18 @@ def process_next_job(
             _journal_skip(cfg, path, {"job_id": path.stem}, f"invalid job JSON: {exc}")
             continue
         status = job.get("status")
-        if status == "blocked" or status in TERMINAL_STATUSES or status not in READY_STATUSES:
+        if status == "blocked" or status in TERMINAL_STATUSES:
             continue
+        if status not in READY_STATUSES:
+            # A job stamped claimed/running by a node that then died stays stamped: the
+            # claim lease frees the file, but the status alone would keep every node off
+            # it forever. Liveness is decided by the lease, not by the stamp — the same
+            # rule the inbox flow uses for an in-progress file.
+            if status not in ORPHANABLE_STATUSES or claim_is_stale is None:
+                continue
+            if not claim_is_stale(path, _claim_cfg(cfg)):
+                continue
+            job = dict(job, status="pending", reclaimed_from=status)
         reason = _eligibility(job, cfg, vram_probe)
         if reason:
             _journal_skip(cfg, path, job, reason)
@@ -382,22 +421,31 @@ def process_next_job(
         return None
 
     job_path, job = sorted(candidates, key=_sort_key)[0]
-    claim_cfg = dict(cfg)
-    claim_cfg["enable_multi_machine"] = True
+    reclaimed_from = job.get("reclaimed_from")
+    claim_cfg = _claim_cfg(cfg)
     if not claim_job(job_path, claim_cfg):
         return None
     job = _read_job(job_path)
     if job.get("status") not in READY_STATUSES:
-        retire_job(job_path, claim_cfg)
-        return None
+        stale = (job.get("status") in ORPHANABLE_STATUSES and claim_is_stale is not None
+                 and claim_is_stale(job_path, claim_cfg))
+        if not stale:
+            retire_job(job_path, claim_cfg)
+            return None
+        reclaimed_from = job.get("status")
 
     job_id = str(job.get("job_id") or job_path.stem)
     run_id, log_path, summary_path = _run_paths(cfg, job_id)
     started = time.monotonic()
     started_at = _utc_iso()
     job.update({"status": "claimed", "claimed_by": _host(cfg), "claimed_at": started_at})
+    job.pop("reclaimed_from", None)
     _write_json(job_path, job)
     _append_log(log_path, "claim", f"claimed job={job_id} node={_host(cfg)}")
+    if reclaimed_from:
+        _append_log(log_path, "claim",
+                    f"reclaimed orphaned job={job_id} from status={reclaimed_from} "
+                    f"(claim lease expired)")
 
     summary: dict = {}
     temp_config: pathlib.Path | None = None

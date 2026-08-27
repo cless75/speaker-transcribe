@@ -310,3 +310,118 @@ def test_rotation_deletes_old_logs_but_keeps_json(tmp_path):
     removed = jobs_queue.rotate_run_logs({"hub_root": str(tmp_path), "run_log_retention_days": 90}, now)
     assert old_log in removed and not old_log.exists()
     assert old_json.exists() and fresh_log.exists()
+
+
+# --- находки ревью 2026-08-27 --------------------------------------------------
+
+def test_repeated_skip_is_journalled_once_per_reason(tmp_path):
+    """F1: неподходящее задание не плодит сводку на каждом свипе."""
+    job = base_job(params={"quality_preset": "medium", "glossary": "project"})
+    prepare(tmp_path, job)
+    for _ in range(3):
+        jobs_queue.process_next_job(
+            cfg_for(tmp_path), pathlib.Path("node.json"),
+            claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+            heartbeat_factory=FakeHeartbeat, preflight=environment,
+            cli_executor=lambda *a: (0, ""),
+        )
+    summaries = [p for p in all_run_files(tmp_path) if p.suffix == ".json"]
+    assert len(summaries) == 1, summaries
+    recorded = json.loads(summaries[0].read_text(encoding="utf-8"))
+    assert recorded["status"] == "skipped"
+    assert "glossary" in recorded["reason"]
+
+    # причина сменилась — появляется вторая запись, старая остаётся
+    write_json(tmp_path / "_jobs" / f"{job['job_id']}.json",
+               base_job(type="no-such-type", params={"quality_preset": "medium"}))
+    jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *a: (0, ""),
+    )
+    assert len([p for p in all_run_files(tmp_path) if p.suffix == ".json"]) == 2
+
+
+def test_queue_failure_does_not_stop_the_inbox_sweep(tmp_path, monkeypatch):
+    """F2: падение очереди стоит задания, а не свипа."""
+    (tmp_path / "_jobs").mkdir()
+    source = tmp_path / "inbox"
+    source.mkdir()
+    cfg = {"hub_root": str(tmp_path), "sources": [{"root": str(source)}],
+           "write_session_index": False, "status_page": False}
+    calls = []
+    monkeypatch.setattr(watcher, "acquire_watcher_lock", lambda: tmp_path / "lock")
+    monkeypatch.setattr(watcher, "release_watcher_lock", lambda lock: None)
+    monkeypatch.setattr(watcher, "load_mapper", lambda cfg: {})
+    monkeypatch.setattr(watcher, "apply_bundle_metadata", lambda files, cfg, mapper: files)
+    monkeypatch.setattr(watcher, "find_audio_files",
+                        lambda cfg: calls.append("inbox-scan") or [])
+
+    def explode(*args, **kwargs):
+        raise OSError("hub went away mid-sweep")
+
+    monkeypatch.setattr(jobs_queue, "process_next_job", explode)
+    watcher.run_once(cfg, tmp_path / "node.json")
+    assert calls == ["inbox-scan"]
+
+
+def test_orphaned_running_job_is_reclaimed_after_lease_expires(tmp_path):
+    """F3: задание умершего узла возвращается в работу, а не виснет навсегда."""
+    job = base_job(status="running", claimed_by="DEAD-NODE",
+                   claimed_at="2026-08-21T13:40:00Z")
+    path = prepare(tmp_path, job)
+    calls = []
+
+    def fake_executor(command, log_path, tail_lines):
+        calls.append(command)
+        out = pathlib.Path(command[command.index("--output-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "result-transcript.md").write_text("ok", encoding="utf-8")
+        return 0, "tail"
+
+    common = dict(claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+                  heartbeat_factory=FakeHeartbeat, preflight=environment,
+                  cli_executor=fake_executor)
+
+    # живой владелец — не трогаем
+    summary = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_is_stale=lambda p, cfg: False, **common)
+    assert summary is None and calls == []
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "running"
+
+    # лизинг истёк — задание подбирается и доводится
+    summary = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_is_stale=lambda p, cfg: True, **common)
+    assert summary and summary["status"] == "done"
+    assert len(calls) == 1
+    finished = json.loads(path.read_text(encoding="utf-8"))
+    assert finished["status"] == "done" and "reclaimed_from" not in finished
+    log_text = chr(10).join(p.read_text(encoding="utf-8") for p in all_run_files(tmp_path)
+                            if p.suffix == ".log")
+    assert "reclaimed orphaned job" in log_text
+
+
+def test_output_base_name_is_normalised(tmp_path):
+    """F4: описательный asr_variant_id не уходит в имя файла как есть."""
+    job = base_job(params={"quality_preset": "medium", "speaker_mode": "diarize",
+                           "asr_variant_id": "auto ({base}-gloss-{sha8} from feat/project-glossary)"})
+    _, calls, summary = run(tmp_path, job)
+    assert summary["status"] == "done"
+    name = calls[0][calls[0].index("--output-base-name") + 1]
+    assert name == "auto-base--gloss--sha8-from-feat-project-glossary"
+    assert " " not in name and "(" not in name and "/" not in name
+
+
+def test_journal_timestamps_are_utc(tmp_path):
+    """F5: время в .log и в сводке — одно и то же, в UTC."""
+    run(tmp_path, base_job())
+    logs = [p for p in all_run_files(tmp_path) if p.suffix == ".log"]
+    stamp = logs[0].read_text(encoding="utf-8").splitlines()[0].split(" ")[0]
+    assert stamp.endswith("Z"), stamp
+    parsed = dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    assert abs((now - parsed).total_seconds()) < 300
+
