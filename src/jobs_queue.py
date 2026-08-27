@@ -22,11 +22,20 @@ from typing import Callable
 
 JOB_TYPES = {"asr-revariant", "word-timestamps", "slide-frames", "rediarize"}
 EXECUTABLE_PARAMS = {
-    "quality_preset", "speaker_mode", "asr_variant_id", "timestamps",
+    "quality_preset", "speaker_mode", "asr_variant_id", "timestamps", "glossary",
     "slide_frames", "slide_ocr", "slide_ocr_engine", "slide_interval_sec",
     "scene_threshold", "slide_min_ocr_chars", "slide_dedupe",
     "slide_dedupe_visual",
 }
+# params.glossary names a LEVEL, not a file. "project" (the default) means "pass no
+# flag at all — the engine resolves {hub_root}/{pid}/_PROJECT-glossary.json itself".
+# Passing "project" through as --glossary would be read as a path, fail to load, and
+# switch hints OFF: the run level outranks the project level. That inversion is the
+# whole reason these jobs were held back.
+GLOSSARY_PROJECT_LEVEL = {"project", "", "auto", "default"}
+GLOSSARY_OFF = {"off", "none", "false", "0"}
+HINTS_CONFIRMATION = "glossary prompts on"
+
 READY_STATUSES = {"pending", "ready"}
 ORPHANABLE_STATUSES = {"claimed", "running"}
 TERMINAL_STATUSES = {"done", "failed"}
@@ -187,6 +196,22 @@ def _skip_paths(cfg: dict, job_id: str, reason: str) -> tuple[str, pathlib.Path,
     return run_id, root / f"{run_id}.log", root / f"{run_id}.json"
 
 
+def _hints_expected(job: dict) -> bool:
+    """True when the job explicitly asked for glossary hints (any level but off)."""
+    params = job.get("params") or {}
+    if "glossary" not in params:
+        return False
+    return str(params.get("glossary")).strip().lower() not in GLOSSARY_OFF
+
+
+def _log_mentions(log_path: pathlib.Path, needle: str) -> bool:
+    try:
+        return needle in log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+
 def _journal_skip(cfg: dict, job_path: pathlib.Path, job: dict, reason: str) -> dict | None:
     """Record why this node passed a job over — ONCE per (node, job, reason).
 
@@ -341,6 +366,13 @@ def _build_command(job: dict, cfg: dict, input_path: pathlib.Path,
         command += ["--execution-mode", "speaker_pass"]
     if job.get("type") == "slide-frames":
         command += ["--slide-frames", str(params.get("slide_frames", "interval"))]
+    glossary = params.get("glossary")
+    if glossary is not None:
+        level = str(glossary).strip().lower()
+        if level in GLOSSARY_OFF:
+            command += ["--glossary", "off"]
+        elif level not in GLOSSARY_PROJECT_LEVEL:
+            command += ["--glossary", str(glossary)]
     option_map = {
         "slide_ocr": "--slide-ocr", "slide_ocr_engine": "--slide-ocr-engine",
         "slide_interval_sec": "--slide-interval-sec", "scene_threshold": "--scene-threshold",
@@ -490,6 +522,17 @@ def process_next_job(
         status = "done" if return_code == 0 and output_paths else "failed"
         if return_code == 0 and not output_paths:
             tail = (tail + "\n" if tail else "") + "CLI returned 0 but produced no output files"
+        # A job that asked for hints and got none produced an ordinary re-run, not the
+        # thing it was created for. Scoring such output as success is how 90 minutes of
+        # GPU were spent measuring nothing on 27.08
+        # (org/measurement-invalid-without-confirmed-hints). The engine announces hints
+        # early in the run, so the journal - not the bounded tail - is where to look.
+        if status == "done" and _hints_expected(job) and not _log_mentions(log_path, HINTS_CONFIRMATION):
+            status = "failed"
+            tail = ((tail + chr(10)) if tail else "") + (
+                "hints were requested but the engine never reported "
+                f"'{HINTS_CONFIRMATION}' - this output is a plain re-run, "
+                "not a hinted variant; not scored")
         summary = {
             "run_id": run_id, "status": status, "node": _host(cfg), "job_id": job_id,
             "job_type": job.get("type"), "job_file": str(job_path), "input_file": str(input_path),

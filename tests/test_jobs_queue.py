@@ -82,13 +82,19 @@ def environment(*args) -> dict:
     }
 
 
-def run(hub: pathlib.Path, job: dict, *, capabilities=("gpu-cuda",), executor=None):
+def run(hub: pathlib.Path, job: dict, *, capabilities=("gpu-cuda",), executor=None,
+        hints_confirmed=False):
     path = prepare(hub, job)
     calls = []
 
     def fake_executor(command, log_path, tail_lines):
         calls.append(command)
         jobs_queue._append_log(log_path, "worker", "FIRST_CHUNK")
+        if hints_confirmed:
+            # Exactly what the engine prints when project hints resolve.
+            jobs_queue._append_log(
+                log_path, "worker",
+                "glossary prompts on: source=project terms=23 fp=a1b2c3d4e5f60718")
         out = pathlib.Path(command[command.index("--output-dir") + 1])
         out.mkdir(parents=True, exist_ok=True)
         (out / "result-transcript.md").write_text("ok", encoding="utf-8")
@@ -154,24 +160,20 @@ def test_gpu_with_insufficient_vram_skips_before_claim(tmp_path):
     assert any("free VRAM 4.00 GB is below 6.00 GB" in text for text in logs)
 
 
-def test_fixture_matches_combat_layout_and_glossary_is_explicitly_skipped(tmp_path):
+def test_fixture_matches_combat_layout_and_glossary_is_a_level(tmp_path):
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     # Exact field contract observed in all five Hub/_jobs files on 2026-08-27.
     assert set(fixture) == {
         "job_id", "type", "created_at", "created_by", "reason", "requires", "priority",
         "target", "params", "status", "blocked_by", "notes", "runner", "updated_at", "updated_note",
     }
-    path = prepare(tmp_path, fixture)
-    calls = []
-    result = jobs_queue.process_next_job(
-        cfg_for(tmp_path), pathlib.Path("node.json"), claim_job=lambda *_: calls.append("claim") or True,
-        retire_job=lambda *_: None, heartbeat_factory=FakeHeartbeat, preflight=environment,
-        cli_executor=lambda *_: calls.append("cli") or (0, ""),
-    )
-    assert result is None and calls == []
-    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "ready"
-    logs = [p.read_text(encoding="utf-8") for p in all_run_files(tmp_path) if p.suffix == ".log"]
-    assert any("unsupported params" in text and "glossary" in text for text in logs)
+    assert fixture["params"]["glossary"] == "project"
+    # Combat job now runs: "project" is a level, and the level's meaning is to pass
+    # no flag at all - the engine resolves the project glossary itself.
+    path, calls, summary = run(tmp_path, fixture, hints_confirmed=True)
+    assert summary["status"] == "done"
+    assert "--glossary" not in calls[0]
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "done"
 
 
 def test_unknown_top_level_combat_fields_are_ignored(tmp_path):
@@ -316,7 +318,7 @@ def test_rotation_deletes_old_logs_but_keeps_json(tmp_path):
 
 def test_repeated_skip_is_journalled_once_per_reason(tmp_path):
     """F1: неподходящее задание не плодит сводку на каждом свипе."""
-    job = base_job(params={"quality_preset": "medium", "glossary": "project"})
+    job = base_job(params={"quality_preset": "medium", "no_such_param": 1})
     prepare(tmp_path, job)
     for _ in range(3):
         jobs_queue.process_next_job(
@@ -329,7 +331,7 @@ def test_repeated_skip_is_journalled_once_per_reason(tmp_path):
     assert len(summaries) == 1, summaries
     recorded = json.loads(summaries[0].read_text(encoding="utf-8"))
     assert recorded["status"] == "skipped"
-    assert "glossary" in recorded["reason"]
+    assert "no_such_param" in recorded["reason"]
 
     # причина сменилась — появляется вторая запись, старая остаётся
     write_json(tmp_path / "_jobs" / f"{job['job_id']}.json",
@@ -443,4 +445,50 @@ def test_unknown_shaped_job_type_still_has_a_home(tmp_path):
         "project_id": "700", "session_id": "S20260810T2110-platforma"}},
         {"hub_root": str(tmp_path)})
     assert out.name == "transcripts-rediarized"
+
+
+# --- уровни глоссария и гейт подтверждения (восстановление skipped) ------------
+
+def test_glossary_project_level_passes_no_flag(tmp_path):
+    job = base_job(params={"quality_preset": "medium", "glossary": "project"})
+    _, calls, summary = run(tmp_path, job, hints_confirmed=True)
+    assert summary["status"] == "done"
+    assert "--glossary" not in calls[0]
+
+
+def test_glossary_off_is_passed_through(tmp_path):
+    job = base_job(params={"quality_preset": "medium", "glossary": "off"})
+    _, calls, summary = run(tmp_path, job)
+    assert summary["status"] == "done"
+    assert calls[0][calls[0].index("--glossary") + 1] == "off"
+
+
+def test_glossary_path_is_passed_as_path(tmp_path):
+    custom = str(tmp_path / "custom-glossary.json")
+    job = base_job(params={"quality_preset": "medium", "glossary": custom})
+    _, calls, summary = run(tmp_path, job, hints_confirmed=True)
+    assert calls[0][calls[0].index("--glossary") + 1] == custom
+
+
+def test_requested_hints_without_confirmation_is_not_scored(tmp_path):
+    """Прогон без подтверждения подсказок — обычное перераспознавание, не вариант."""
+    job = base_job(params={"quality_preset": "medium", "glossary": "project"})
+    path, calls, summary = run(tmp_path, job, hints_confirmed=False)
+    assert summary["status"] == "failed"
+    assert "never reported" in summary["tail_output"]
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "failed"
+    assert summary["output_paths"], "продукт остаётся на месте — его просто не зачли"
+
+
+def test_job_without_glossary_is_not_gated(tmp_path):
+    """Задание, которое подсказок не просило, гейт не трогает."""
+    job = base_job(params={"quality_preset": "medium", "speaker_mode": "diarize"})
+    _, _, summary = run(tmp_path, job, hints_confirmed=False)
+    assert summary["status"] == "done"
+
+
+def test_off_is_not_gated_either(tmp_path):
+    job = base_job(params={"quality_preset": "medium", "glossary": "off"})
+    _, _, summary = run(tmp_path, job, hints_confirmed=False)
+    assert summary["status"] == "done"
 
