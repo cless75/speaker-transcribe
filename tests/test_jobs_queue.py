@@ -425,3 +425,22 @@ def test_journal_timestamps_are_utc(tmp_path):
     now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     assert abs((now - parsed).total_seconds()) < 300
 
+
+def test_revariant_lands_beside_session_transcripts(tmp_path):
+    """F6: перегонка кладёт продукт в transcripts-hints, как временный раннер."""
+    _, calls, summary = run(tmp_path, base_job())
+    out = pathlib.Path(calls[0][calls[0].index("--output-dir") + 1])
+    expected = (tmp_path / "700" / "sessions" / "2026-08"
+                / "S20260810T2110-platforma" / "transcripts-hints")
+    assert out == expected, out
+    assert summary["output_paths"] and all(
+        "transcripts-hints" in path for path in summary["output_paths"])
+
+
+def test_unknown_shaped_job_type_still_has_a_home(tmp_path):
+    """Тип из словаря без своей папки не теряет выход."""
+    out = jobs_queue._output_dir({"type": "rediarize", "target": {
+        "project_id": "700", "session_id": "S20260810T2110-platforma"}},
+        {"hub_root": str(tmp_path)})
+    assert out.name == "transcripts-rediarized"
+

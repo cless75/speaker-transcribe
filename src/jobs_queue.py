@@ -230,6 +230,20 @@ def _resolve_input(job: dict, cfg: dict) -> pathlib.Path:
     return resolved
 
 
+# Where a job's product lands, by job type. A re-run belongs BESIDE the session's
+# own transcripts, in the same folder the stop-gap runner used
+# (org/jobs-queue-writes-beside-session-transcripts) — otherwise the acceptance of
+# measurement 2, written against transcripts-hints, stops matching the moment the
+# queue replaces the runner. Provenance moves to the journal, not the path: which
+# job produced a file is read from _runs/** and the job's own result.output_paths.
+OUTPUT_SUBDIR = {
+    "asr-revariant": "transcripts-hints",
+    "word-timestamps": "transcripts-words",
+    "rediarize": "transcripts-rediarized",
+    "slide-frames": "slides",
+}
+
+
 def _output_dir(job: dict, cfg: dict) -> pathlib.Path:
     target = job.get("target") or {}
     pid = _safe_token(target.get("project_id"), "_unknown")
@@ -239,6 +253,9 @@ def _output_dir(job: dict, cfg: dict) -> pathlib.Path:
         root = _hub(cfg) / pid / "sessions" / f"{month_match.group(1)}-{month_match.group(2)}" / sid
     else:
         root = _hub(cfg) / pid / "_job-results" / sid
+    subdir = OUTPUT_SUBDIR.get(str(job.get("type")))
+    if subdir:
+        return root / subdir
     return root / "jobs" / _safe_token(job.get("job_id"))
 
 
