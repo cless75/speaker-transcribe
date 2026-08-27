@@ -1,0 +1,29 @@
+{
+  "job_id": "2026-08-22-801o11-hints-s20260810t2110",
+  "type": "asr-revariant",
+  "created_at": "2026-08-22T00:00:00Z",
+  "created_by": "cless75 (оформлено оркестратором Fable, пакет 801-o11)",
+  "reason": "замер 2 приёмки 801-o11",
+  "requires": {
+    "capabilities": ["gpu-cuda"],
+    "min_vram_gb": 6
+  },
+  "priority": 1,
+  "target": {
+    "project_id": "700",
+    "session_id": "S20260810T2110-platforma",
+    "input": "700/_700_inbox/Платформа 260810_211003.m4a"
+  },
+  "params": {
+    "quality_preset": "medium",
+    "speaker_mode": "diarize",
+    "glossary": "project",
+    "asr_variant_id": "auto ({base}-gloss-{sha8} от механизма feat/project-glossary)"
+  },
+  "status": "ready",
+  "blocked_by": [],
+  "notes": "снимок боевой раскладки Hub/_jobs от 2026-08-27",
+  "runner": "_jobs/run-801o11-hints.ps1",
+  "updated_at": "2026-08-25",
+  "updated_note": "очередь 801-o13 ещё не реализована"
+}
