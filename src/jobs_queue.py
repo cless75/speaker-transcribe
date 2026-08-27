@@ -22,7 +22,7 @@ from typing import Callable
 
 JOB_TYPES = {"asr-revariant", "word-timestamps", "slide-frames", "rediarize"}
 EXECUTABLE_PARAMS = {
-    "quality_preset", "speaker_mode", "asr_variant_id", "timestamps", "glossary",
+    "model", "quality_preset", "speaker_mode", "asr_variant_id", "timestamps", "glossary",
     "slide_frames", "slide_ocr", "slide_ocr_engine", "slide_interval_sec",
     "scene_threshold", "slide_min_ocr_chars", "slide_dedupe",
     "slide_dedupe_visual",
@@ -32,6 +32,14 @@ EXECUTABLE_PARAMS = {
 # Passing "project" through as --glossary would be read as a path, fail to load, and
 # switch hints OFF: the run level outranks the project level. That inversion is the
 # whole reason these jobs were held back.
+# params.model names the faster-whisper WEIGHTS; params.quality_preset is only a LABEL.
+# They are separate on purpose: the CLI picks weights from selected_model/requested_model/
+# model and ignores quality_preset entirely, so a job that sets the preset alone runs on
+# whatever the node defaults to. That is exactly what happened on 22.08: a run labelled
+# large-v3 executed on medium and the measurement compared medium with medium
+# (org/preset-measure-2026-08-22-invalid). A job that asks for weights must say so here.
+MODEL_LABEL_MISMATCH = "requested model {requested!r} but run-meta reports {actual!r}"
+
 GLOSSARY_PROJECT_LEVEL = {"project", "", "auto", "default"}
 GLOSSARY_OFF = {"off", "none", "false", "0"}
 HINTS_CONFIRMATION = "glossary prompts on"
@@ -204,6 +212,19 @@ def _hints_expected(job: dict) -> bool:
     return str(params.get("glossary")).strip().lower() not in GLOSSARY_OFF
 
 
+def _model_in_outputs(output_dir: pathlib.Path) -> str | None:
+    """Weights actually used, as the engine recorded them in *-run-meta.json."""
+    for meta_path in sorted(output_dir.rglob("*run-meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        model = meta.get("model") or (meta.get("asr_variant") or {}).get("model")
+        if model:
+            return str(model)
+    return None
+
+
 def _log_mentions(log_path: pathlib.Path, needle: str) -> bool:
     try:
         return needle in log_path.read_text(encoding="utf-8", errors="replace")
@@ -278,6 +299,12 @@ def _output_dir(job: dict, cfg: dict) -> pathlib.Path:
         root = _hub(cfg) / pid / "sessions" / f"{month_match.group(1)}-{month_match.group(2)}" / sid
     else:
         root = _hub(cfg) / pid / "_job-results" / sid
+    # A re-run on different weights is a different product from a hints re-run: it is
+    # compared against the baseline side by side, so it gets its own folder
+    # (transcripts-large-v3), same spirit as F6 — like beside like.
+    model = ((job.get("params") or {}).get("model") or "").strip()
+    if model and str(job.get("type")) == "asr-revariant":
+        return root / f"transcripts-{_safe_token(model, 'model')}"
     subdir = OUTPUT_SUBDIR.get(str(job.get("type")))
     if subdir:
         return root / subdir
@@ -322,10 +349,16 @@ def run_preflight(python: str, preset: str, min_vram_gb: float) -> dict:
         raise RuntimeError(f"invalid preflight output: {proc.stdout[-1000:]}") from exc
 
 
+def _requested_model(job: dict, cfg: dict) -> str:
+    """Weights the job asks for: run level, then node, then the engine default."""
+    params = job.get("params") or {}
+    return str(params.get("model") or _node_value(cfg, "model", None) or "medium")
+
+
 def _payload_config(job: dict, cfg: dict) -> dict:
     payload = dict(cfg)
     params = job.get("params") or {}
-    for key in ("quality_preset", "speaker_mode", "asr_variant_id", "timestamps"):
+    for key in ("model", "quality_preset", "speaker_mode", "asr_variant_id", "timestamps"):
         if key in params:
             payload[key] = params[key]
     if job.get("type") == "rediarize":
@@ -362,6 +395,10 @@ def _build_command(job: dict, cfg: dict, input_path: pathlib.Path,
         "--speaker-mode", str(params.get("speaker_mode") or cfg.get("speaker_mode", "diarize")),
         "--timestamps", str(timestamps),
     ]
+    # Weights before anything optional: without this flag the CLI falls back to "medium"
+    # no matter what the preset label says (org/preset-measure-2026-08-22-invalid).
+    if params.get("model"):
+        command += ["--model", str(params["model"])]
     if job.get("type") == "rediarize":
         command += ["--execution-mode", "speaker_pass"]
     if job.get("type") == "slide-frames":
@@ -503,7 +540,10 @@ def process_next_job(
         output_dir = _output_dir(job, cfg)
         output_dir.mkdir(parents=True, exist_ok=True)
         params = job.get("params") or {}
-        preset = str(params.get("quality_preset") or cfg.get("quality_preset", "medium"))
+        # Preflight resolves weights by name (snapshot_download of faster-whisper-<name>),
+        # so it must be handed the model, not the label — otherwise a job asking for
+        # large-v3 is cleared by the presence of medium.
+        preset = _requested_model(job, cfg)
         min_vram = float((job.get("requires") or {}).get("min_vram_gb") or 0)
         python = str(_node_value(cfg, "transcribe_python", None) or sys.executable).strip(' "\'')
 
@@ -533,8 +573,22 @@ def process_next_job(
                 "hints were requested but the engine never reported "
                 f"'{HINTS_CONFIRMATION}' - this output is a plain re-run, "
                 "not a hinted variant; not scored")
+        # Same stance as the hints gate above, for weights. A run that asked for large-v3
+        # and quietly executed on medium is not the thing the job was created for: on
+        # 22.08 exactly that produced a measurement comparing medium with medium, and it
+        # stood as fact for five days (org/preset-measure-2026-08-22-invalid). The engine
+        # writes the weights it used into run-meta, so the answer is on disk, not in a tail.
+        actual_model = _model_in_outputs(output_dir) if status == "done" else None
+        if status == "done" and (job.get("params") or {}).get("model") and actual_model:
+            requested = str((job.get("params") or {})["model"])
+            if actual_model != requested:
+                status = "failed"
+                tail = ((tail + chr(10)) if tail else "") + MODEL_LABEL_MISMATCH.format(
+                    requested=requested, actual=actual_model
+                ) + " - this output is not the variant the job asked for; not scored"
         summary = {
             "run_id": run_id, "status": status, "node": _host(cfg), "job_id": job_id,
+            "model_requested": (job.get("params") or {}).get("model"), "model_used": actual_model,
             "job_type": job.get("type"), "job_file": str(job_path), "input_file": str(input_path),
             "engine_version": _engine_version(), "preset": preset, "environment": environment,
             "duration_sec": duration, "return_code": return_code, "output_paths": output_paths,
