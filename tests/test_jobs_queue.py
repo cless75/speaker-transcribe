@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+import contextlib
+import datetime as dt
+import json
+import os
+import pathlib
+import time
+
+import audio_inbox_watch as watcher
+import jobs_queue
+
+
+FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "801o11-real-job.json"
+
+
+def write_json(path: pathlib.Path, value: dict) -> pathlib.Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def base_job(**overrides) -> dict:
+    job = {
+        "job_id": "2026-08-21-700o27-revariant-platforma",
+        "type": "asr-revariant",
+        "created_at": "2026-08-21T13:40:00Z",
+        "created_by": "test",
+        "reason": "acceptance",
+        "requires": {"capabilities": ["gpu-cuda"], "min_vram_gb": 6},
+        "priority": 1,
+        "target": {
+            "project_id": "700",
+            "session_id": "S20260810T2110-platforma",
+            "input": "700/_700_inbox/input.m4a",
+        },
+        "params": {
+            "quality_preset": "medium", "speaker_mode": "diarize",
+            "asr_variant_id": "medium-700o27",
+        },
+        "status": "pending",
+    }
+    job.update(overrides)
+    return job
+
+
+def cfg_for(hub: pathlib.Path, capabilities=("gpu-cuda",)) -> dict:
+    return {
+        "hub_root": str(hub),
+        "node": {"host_label": "TEST-NODE", "capabilities": list(capabilities), "free_vram_gb": 8},
+        "enable_multi_machine": True,
+        "claim_sync_wait_seconds": 0,
+        "claim_lease_minutes": 30,
+        "quality_preset": "medium",
+        "speaker_mode": "diarize",
+        "timestamps": "both",
+    }
+
+
+def prepare(hub: pathlib.Path, job: dict) -> pathlib.Path:
+    input_path = hub / job["target"]["input"]
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"fixture media")
+    return write_json(hub / "_jobs" / f"{job['job_id']}.json", job)
+
+
+class FakeHeartbeat:
+    def __init__(self, path, cfg):
+        self.path = path
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def environment(*args) -> dict:
+    return {
+        "python": args[0], "faster_whisper": "1.2.1", "ctranslate2": "4.6.0",
+        "model": "cached/medium", "preset": args[1], "free_vram_gb": 8.0,
+    }
+
+
+def run(hub: pathlib.Path, job: dict, *, capabilities=("gpu-cuda",), executor=None):
+    path = prepare(hub, job)
+    calls = []
+
+    def fake_executor(command, log_path, tail_lines):
+        calls.append(command)
+        jobs_queue._append_log(log_path, "worker", "FIRST_CHUNK")
+        out = pathlib.Path(command[command.index("--output-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "result-transcript.md").write_text("ok", encoding="utf-8")
+        return (executor or (lambda: (0, "worker tail")))()
+
+    summary = jobs_queue.process_next_job(
+        cfg_for(hub, capabilities), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment, cli_executor=fake_executor,
+    )
+    return path, calls, summary
+
+
+def all_run_files(hub: pathlib.Path) -> list[pathlib.Path]:
+    return [path for path in (hub / "_runs").rglob("*") if path.is_file()]
+
+
+def test_gpu_node_executes_once_and_job_remains_traceable(tmp_path):
+    path, calls, summary = run(tmp_path, base_job())
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert len(calls) == 1
+    assert summary["status"] == "done" and summary["return_code"] == 0
+    assert saved["status"] == "done"
+    assert saved["result"]["run_log"] and saved["result"]["run_summary"]
+    assert saved["result"]["output_paths"]
+    assert path.exists()
+    claim = json.loads(path.with_suffix(".json.claim.json").read_text(encoding="utf-8"))
+    assert claim["claim"]["claimed_by"] == "TEST-NODE"
+    assert claim["claim"]["claim_phase"] == "done"
+
+    # A terminal job cannot create a second claim/run.
+    again = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"), claim_job=lambda *_: (_ for _ in ()).throw(AssertionError()),
+        retire_job=lambda *_: None, heartbeat_factory=FakeHeartbeat,
+        preflight=environment, cli_executor=lambda *_: (_ for _ in ()).throw(AssertionError()),
+    )
+    assert again is None
+
+
+def test_cpu_skips_gpu_job_without_claim_or_execution_and_logs_reason(tmp_path):
+    path, calls, summary = run(tmp_path, base_job(), capabilities=("cpu",))
+    assert calls == [] and summary is None
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "pending"
+    assert not path.with_suffix(".json.claim.json").exists()
+    logs = [p.read_text(encoding="utf-8") for p in all_run_files(tmp_path) if p.suffix == ".log"]
+    assert any("missing capabilities" in text and "gpu-cuda" in text for text in logs)
+
+
+def test_gpu_with_insufficient_vram_skips_before_claim(tmp_path):
+    job = base_job()
+    path = prepare(tmp_path, job)
+    cfg = cfg_for(tmp_path)
+    cfg["node"]["free_vram_gb"] = 4
+    claims = []
+    result = jobs_queue.process_next_job(
+        cfg, pathlib.Path("node.json"), claim_job=lambda *_: claims.append("claim") or True,
+        retire_job=lambda *_: None, heartbeat_factory=FakeHeartbeat,
+        preflight=environment, cli_executor=lambda *_: (0, ""),
+    )
+    assert result is None and claims == []
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "pending"
+    logs = [p.read_text(encoding="utf-8") for p in all_run_files(tmp_path) if p.suffix == ".log"]
+    assert any("free VRAM 4.00 GB is below 6.00 GB" in text for text in logs)
+
+
+def test_fixture_matches_combat_layout_and_glossary_is_explicitly_skipped(tmp_path):
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    # Exact field contract observed in all five Hub/_jobs files on 2026-08-27.
+    assert set(fixture) == {
+        "job_id", "type", "created_at", "created_by", "reason", "requires", "priority",
+        "target", "params", "status", "blocked_by", "notes", "runner", "updated_at", "updated_note",
+    }
+    path = prepare(tmp_path, fixture)
+    calls = []
+    result = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"), claim_job=lambda *_: calls.append("claim") or True,
+        retire_job=lambda *_: None, heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *_: calls.append("cli") or (0, ""),
+    )
+    assert result is None and calls == []
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "ready"
+    logs = [p.read_text(encoding="utf-8") for p in all_run_files(tmp_path) if p.suffix == ".log"]
+    assert any("unsupported params" in text and "glossary" in text for text in logs)
+
+
+def test_unknown_top_level_combat_fields_are_ignored(tmp_path):
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    fixture["params"].pop("glossary")
+    path, calls, summary = run(tmp_path, fixture)
+    assert calls and summary["status"] == "done"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["runner"].endswith(".ps1") and saved["updated_note"]
+
+
+def test_unknown_type_is_skipped_and_blocked_is_never_claimed(tmp_path):
+    unknown = base_job(job_id="unknown", type="arbitrary-script")
+    blocked = base_job(job_id="blocked", status="blocked")
+    prepare(tmp_path, unknown)
+    blocked_path = prepare(tmp_path, blocked)
+    claims = []
+    result = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_job=lambda *_: claims.append("claim") or True,
+        retire_job=lambda *_: None, heartbeat_factory=FakeHeartbeat,
+        preflight=environment, cli_executor=lambda *_: (0, ""),
+    )
+    assert result is None and claims == []
+    assert json.loads(blocked_path.read_text(encoding="utf-8"))["status"] == "blocked"
+    logs = [p.read_text(encoding="utf-8") for p in all_run_files(tmp_path) if p.suffix == ".log"]
+    assert any("unsupported job type" in text for text in logs)
+
+
+def test_variant_is_passed_via_utf8_payload_without_adding_cli_flag(tmp_path):
+    job = base_job()
+    path = prepare(tmp_path, job)
+    observed = {}
+
+    def execute(command, log_path, tail_lines):
+        assert "--asr-variant-id" not in command
+        config = pathlib.Path(command[command.index("--config") + 1])
+        observed.update(json.loads(config.read_text(encoding="utf-8")))
+        assert not config.read_bytes().startswith(b"\xef\xbb\xbf")
+        out = pathlib.Path(command[command.index("--output-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "variant-transcript.md").write_text("ok", encoding="utf-8")
+        return 0, ""
+
+    jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"), claim_job=watcher.try_claim_file,
+        retire_job=watcher.retire_claim, heartbeat_factory=FakeHeartbeat,
+        preflight=environment, cli_executor=execute,
+    )
+    assert observed["asr_variant_id"] == "medium-700o27"
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "done"
+
+
+def test_failed_run_has_tail_and_shared_summary(tmp_path):
+    path, calls, summary = run(tmp_path, base_job(), executor=lambda: (17, "fatal line\nlast detail"))
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert summary["status"] == "failed" and summary["return_code"] == 17
+    assert "last detail" in summary["tail_output"]
+    assert "last detail" in pathlib.Path(saved["result"]["run_log"]).read_text(encoding="utf-8")
+
+
+def test_preflight_is_logged_before_first_chunk_and_files_have_no_bom(tmp_path):
+    path, calls, summary = run(tmp_path, base_job())
+    log_path = pathlib.Path(summary["log_path"])
+    text = log_path.read_text(encoding="utf-8")
+    assert text.index("faster_whisper") < text.index("FIRST_CHUNK")
+    assert "ctranslate2" in text and "cached/medium" in text and "free_vram_gb" in text
+    for artifact in [path, *all_run_files(tmp_path)]:
+        assert not artifact.read_bytes().startswith(b"\xef\xbb\xbf"), artifact
+
+
+def test_priority_then_created_at_and_ready_alias(tmp_path):
+    newer = base_job(job_id="newer", created_at="2026-08-22T00:00:00Z", status="ready")
+    older = base_job(job_id="older", created_at="2026-08-20T00:00:00Z", status="ready")
+    prepare(tmp_path, newer)
+    prepare(tmp_path, older)
+    called = []
+
+    def execute(command, log_path, tail_lines):
+        called.append(command)
+        out = pathlib.Path(command[command.index("--output-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "priority-transcript.md").write_text("ok", encoding="utf-8")
+        return 0, ""
+
+    jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"), claim_job=watcher.try_claim_file,
+        retire_job=watcher.retire_claim, heartbeat_factory=FakeHeartbeat,
+        preflight=environment, cli_executor=execute,
+    )
+    assert json.loads((tmp_path / "_jobs" / "older.json").read_text(encoding="utf-8"))["status"] == "done"
+    assert json.loads((tmp_path / "_jobs" / "newer.json").read_text(encoding="utf-8"))["status"] == "ready"
+
+
+def test_zero_exit_without_outputs_is_not_false_done(tmp_path):
+    job = base_job(job_id="zero-without-output")
+    path = prepare(tmp_path, job)
+    summary = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"), claim_job=watcher.try_claim_file,
+        retire_job=watcher.retire_claim, heartbeat_factory=FakeHeartbeat,
+        preflight=environment, cli_executor=lambda *_: (0, "worker said success"),
+    )
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert summary["status"] == "failed" and saved["status"] == "failed"
+    assert "produced no output" in summary["tail_output"]
+
+
+def test_empty_queue_does_nothing_and_watcher_continues_to_inbox(tmp_path, monkeypatch):
+    (tmp_path / "_jobs").mkdir()
+    source = tmp_path / "inbox"
+    source.mkdir()
+    cfg = {"hub_root": str(tmp_path), "sources": [{"root": str(source)}],
+           "write_session_index": False, "status_page": False}
+    calls = []
+    monkeypatch.setattr(watcher, "acquire_watcher_lock", lambda: tmp_path / "lock")
+    monkeypatch.setattr(watcher, "release_watcher_lock", lambda lock: None)
+    monkeypatch.setattr(watcher, "find_audio_files", lambda cfg: calls.append("inbox-scan") or [])
+    monkeypatch.setattr(watcher, "load_mapper", lambda cfg: {})
+    monkeypatch.setattr(watcher, "apply_bundle_metadata", lambda files, cfg, mapper: files)
+    watcher.run_once(cfg, tmp_path / "node.json")
+    assert calls == ["inbox-scan"]
+
+
+def test_rotation_deletes_old_logs_but_keeps_json(tmp_path):
+    root = tmp_path / "_runs" / "node" / "2026-01-01"
+    old_log = root / "old.log"
+    old_json = root / "old.json"
+    fresh_log = root / "fresh.log"
+    for path in (old_log, old_json, fresh_log):
+        write_json(path, {}) if path.suffix == ".json" else (path.parent.mkdir(parents=True, exist_ok=True), path.write_text("x", encoding="utf-8"))
+    old = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+    os.utime(old_log, (old, old))
+    os.utime(old_json, (old, old))
+    now = dt.datetime(2026, 8, 27, tzinfo=dt.timezone.utc)
+    os.utime(fresh_log, (now.timestamp(), now.timestamp()))
+    removed = jobs_queue.rotate_run_logs({"hub_root": str(tmp_path), "run_log_retention_days": 90}, now)
+    assert old_log in removed and not old_log.exists()
+    assert old_json.exists() and fresh_log.exists()

@@ -53,6 +53,8 @@ import threading
 import time
 import unicodedata
 
+import jobs_queue
+
 try:
     import node_status  # optional: publishes a human-readable node page to the hub
 except Exception:  # pragma: no cover - the watcher must run without it
@@ -2671,6 +2673,15 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 marker_processed_asr(audio).touch()
                 log(f"caught-up: {audio.name}")
             return
+
+        # Extra declarative work is considered before ordinary inbox files on every
+        # tick. At most one job runs, then control returns to the existing flow.
+        jobs_queue.process_next_job(
+            cfg, config_path,
+            claim_job=try_claim_file,
+            retire_job=retire_claim,
+            heartbeat_factory=_ClaimHeartbeat,
+        )
 
         # ASR interpreter preflight — a missing/garbled transcribe_python would fail
         # every file and quarantine the whole inbox. Check once up front; abort the

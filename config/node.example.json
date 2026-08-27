@@ -116,6 +116,10 @@
   "claim_heartbeat_minutes": 5,
   "claim_sync_wait_seconds": 8,
 
+  "_jobs_queue_note": "Declarative extra jobs live in {hub_root}/_jobs. Run .log files are rotated; JSON summaries remain permanently.",
+  "run_log_retention_days": 90,
+  "job_output_tail_lines": 80,
+
   "_secrets_note": "ОТКУДА брать секрет, а не сам секрет. env:ИМЯ = переменная окружения этой машины (ставь её на уровне Machine, иначе scheduled task её не увидит). file:путь = читать из файла; {hub_root}/{config_dir} резолвятся, так что file:{hub_root}/_meta/.hf-token = ОДИН источник на все узлы — новый узел не надо снабжать токеном отдельно. ВНИМАНИЕ: файл на общем диске виден всем, у кого есть доступ к Hub — держи там токен только с правами Read и не расшаривай _meta наружу. Вотчер кладёт значение в окружение подпроцесса движка; сам секрет никогда не логируется.",
   "secrets": { "hf_token": "env:HF_TOKEN" }
 }
