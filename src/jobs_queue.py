@@ -39,6 +39,16 @@ EXECUTABLE_PARAMS = {
 # large-v3 executed on medium and the measurement compared medium with medium
 # (org/preset-measure-2026-08-22-invalid). A job that asks for weights must say so here.
 MODEL_LABEL_MISMATCH = "requested model {requested!r} but run-meta reports {actual!r}"
+# Names faster-whisper resolves to weights. A quality_preset holding one of these is a
+# job asking for those weights - and, without params.model, asking in a way the CLI does
+# not honour. Before params.model existed such a job at least died in preflight (no
+# faster-whisper-large-v3 cached); keeping that barrier explicit is the point of the
+# check in _eligibility (review F5, 28.08).
+KNOWN_MODEL_NAMES = {
+    "tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en",
+    "large", "large-v1", "large-v2", "large-v3", "large-v3-turbo", "turbo",
+    "distil-small.en", "distil-medium.en", "distil-large-v2", "distil-large-v3",
+}
 
 GLOSSARY_PROJECT_LEVEL = {"project", "", "auto", "default"}
 GLOSSARY_OFF = {"off", "none", "false", "0"}
@@ -173,6 +183,22 @@ def _eligibility(job: dict, cfg: dict,
     unsupported = sorted(set(params) - EXECUTABLE_PARAMS)
     if unsupported:
         return f"unsupported params for this node CLI: {unsupported}"
+    model = str(params.get("model") or "").strip()
+    if model:
+        # Weights are a NAME, not a path: a path lands in the output folder name and can
+        # never equal what run-meta reports, so such a job is unrunnable by construction
+        # (review F9, 28.08).
+        if any(sep in model for sep in ("/", "\\", ":")):
+            return (f"params.model must be a model name, not a path: {model!r}; "
+                    "point the node config at a model_root instead")
+    preset = str(params.get("quality_preset") or "").strip()
+    if preset in KNOWN_MODEL_NAMES and preset != _requested_model(job, cfg):
+        # The preset is a label the CLI ignores when picking weights. Asking for large-v3
+        # this way is how 22.08 ran on medium and measured nothing
+        # (org/preset-measure-2026-08-22-invalid).
+        return (f"quality_preset {preset!r} names weights but params.model resolves to "
+                f"{_requested_model(job, cfg)!r}: set params.model explicitly - the preset "
+                "alone does not select weights")
     requires = job.get("requires") or {}
     if not isinstance(requires, dict):
         return "requires must be an object"
@@ -212,17 +238,29 @@ def _hints_expected(job: dict) -> bool:
     return str(params.get("glossary")).strip().lower() not in GLOSSARY_OFF
 
 
-def _model_in_outputs(output_dir: pathlib.Path) -> str | None:
-    """Weights actually used, as the engine recorded them in *-run-meta.json."""
-    for meta_path in sorted(output_dir.rglob("*run-meta.json")):
+def _model_in_outputs(output_dir: pathlib.Path, since: float) -> str | None:
+    """Weights of THIS run, from the run-meta this run wrote.
+
+    Never "the first run-meta in the folder": a variant folder accumulates outputs of
+    earlier runs, and the boldest example lives in the combat hub - a 22.08 file under
+    transcripts-large-v3/asr/ saying model=medium sorts ahead of everything and would
+    fail an honest large-v3 run after 110 GPU minutes (review F1, 28.08). Only files
+    this run touched count, newest first; nothing older is evidence about it.
+    """
+    fresh = []
+    for meta_path in output_dir.rglob("*run-meta.json"):
         try:
+            if meta_path.stat().st_mtime + 1 < since:
+                continue
             meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         model = meta.get("model") or (meta.get("asr_variant") or {}).get("model")
         if model:
-            return str(model)
-    return None
+            fresh.append((meta_path.stat().st_mtime, str(model)))
+    if not fresh:
+        return None
+    return max(fresh)[1]
 
 
 def _log_mentions(log_path: pathlib.Path, needle: str) -> bool:
@@ -299,12 +337,16 @@ def _output_dir(job: dict, cfg: dict) -> pathlib.Path:
         root = _hub(cfg) / pid / "sessions" / f"{month_match.group(1)}-{month_match.group(2)}" / sid
     else:
         root = _hub(cfg) / pid / "_job-results" / sid
-    # A re-run on different weights is a different product from a hints re-run: it is
-    # compared against the baseline side by side, so it gets its own folder
-    # (transcripts-large-v3), same spirit as F6 — like beside like.
+    # Like beside like, the F6 rule of the previous review, extended rather than
+    # overwritten: hints keep transcripts-hints, other weights get their own folder, and
+    # a run that changes BOTH says so in the name instead of silently claiming one of the
+    # two homes (review F10, 28.08).
     model = ((job.get("params") or {}).get("model") or "").strip()
     if model and str(job.get("type")) == "asr-revariant":
-        return root / f"transcripts-{_safe_token(model, 'model')}"
+        name = f"transcripts-{_safe_token(model, 'model')}"
+        if _hints_expected(job):
+            name += "-hints"
+        return root / name
     subdir = OUTPUT_SUBDIR.get(str(job.get("type")))
     if subdir:
         return root / subdir
@@ -523,6 +565,7 @@ def process_next_job(
     job_id = str(job.get("job_id") or job_path.stem)
     run_id, log_path, summary_path = _run_paths(cfg, job_id)
     started = time.monotonic()
+    run_started_at = time.time()
     started_at = _utc_iso()
     job.update({"status": "claimed", "claimed_by": _host(cfg), "claimed_at": started_at})
     job.pop("reclaimed_from", None)
@@ -543,7 +586,8 @@ def process_next_job(
         # Preflight resolves weights by name (snapshot_download of faster-whisper-<name>),
         # so it must be handed the model, not the label — otherwise a job asking for
         # large-v3 is cleared by the presence of medium.
-        preset = _requested_model(job, cfg)
+        preset = str(params.get("quality_preset") or cfg.get("quality_preset", "medium"))
+        weights = _requested_model(job, cfg)
         min_vram = float((job.get("requires") or {}).get("min_vram_gb") or 0)
         python = str(_node_value(cfg, "transcribe_python", None) or sys.executable).strip(' "\'')
 
@@ -551,7 +595,7 @@ def process_next_job(
                     "run_log": str(log_path), "run_summary": str(summary_path)})
         _write_json(job_path, job)
         with heartbeat_factory(job_path, claim_cfg):
-            environment = preflight(python, preset, min_vram)
+            environment = preflight(python, weights, min_vram)
             _append_log(log_path, "preflight", "environment=" + json.dumps(environment, ensure_ascii=False))
             command, temp_config = _build_command(job, cfg, input_path, output_dir)
             _append_log(log_path, "cli", f"start type={job.get('type')} input={input_path}")
@@ -578,19 +622,29 @@ def process_next_job(
         # 22.08 exactly that produced a measurement comparing medium with medium, and it
         # stood as fact for five days (org/preset-measure-2026-08-22-invalid). The engine
         # writes the weights it used into run-meta, so the answer is on disk, not in a tail.
-        actual_model = _model_in_outputs(output_dir) if status == "done" else None
-        if status == "done" and (job.get("params") or {}).get("model") and actual_model:
-            requested = str((job.get("params") or {})["model"])
-            if actual_model != requested:
+        requested_model = (job.get("params") or {}).get("model")
+        actual_model = _model_in_outputs(output_dir, run_started_at) if status == "done" else None
+        if status == "done" and requested_model:
+            requested = str(requested_model)
+            if actual_model is None:
+                # Symmetry with the hints gate: absence of proof is not proof of the
+                # right weights. An unverifiable run is exactly the 22.08 shape - it
+                # looked finished and measured nothing (review F4, 28.08).
+                status = "failed"
+                tail = ((tail + chr(10)) if tail else "") + (
+                    f"requested model {requested!r} but no run-meta from this run was "
+                    "found in the output - weights unverifiable; not scored")
+            elif actual_model != requested:
                 status = "failed"
                 tail = ((tail + chr(10)) if tail else "") + MODEL_LABEL_MISMATCH.format(
                     requested=requested, actual=actual_model
                 ) + " - this output is not the variant the job asked for; not scored"
         summary = {
             "run_id": run_id, "status": status, "node": _host(cfg), "job_id": job_id,
-            "model_requested": (job.get("params") or {}).get("model"), "model_used": actual_model,
+            "model_requested": requested_model, "model_used": actual_model,
             "job_type": job.get("type"), "job_file": str(job_path), "input_file": str(input_path),
-            "engine_version": _engine_version(), "preset": preset, "environment": environment,
+            "engine_version": _engine_version(), "preset": preset, "weights": weights,
+            "environment": environment,
             "duration_sec": duration, "return_code": return_code, "output_paths": output_paths,
             "tail_output": tail, "log_path": str(log_path), "started_at": started_at,
             "finished_at": _utc_iso(),
