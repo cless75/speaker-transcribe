@@ -714,3 +714,76 @@ def test_snapshot_carries_commit_and_jobs():
     assert snap["jobs"]["checked_at"] == "2026-08-29T17:00:00Z"
     assert snap["jobs"] is not snap["queue"], "очередь заданий и очередь файлов — разные поля"
 
+
+# --- fetch-model: веса приезжают заданием, код — релизом -----------------------
+
+def fetch_job(**overrides) -> dict:
+    job = {
+        "job_id": "2026-08-29-fetch-large-v3",
+        "type": "fetch-model",
+        "created_at": "2026-08-29T14:30:00Z",
+        "created_by": "test",
+        "reason": "large-v3 отсутствует в кеше узла",
+        "requires": {"capabilities": ["gpu-cuda"]},
+        "priority": 1,
+        "params": {"model": "large-v3"},
+        "status": "pending",
+    }
+    job.update(overrides)
+    return job
+
+
+def run_fetch(hub: pathlib.Path, job: dict, fetcher):
+    path = write_json(hub / "_jobs" / f"{job['job_id']}.json", job)
+    summary = jobs_queue.process_next_job(
+        cfg_for(hub), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *a: (0, "must not be called"), fetcher=fetcher)
+    return path, summary
+
+
+def test_fetch_model_downloads_and_records_the_path(tmp_path):
+    calls = []
+
+    def fake_fetch(python, repo, timeout):
+        calls.append((repo, timeout))
+        return {"repo": repo, "path": r"C:\cache\models--Systran--faster-whisper-large-v3"}
+
+    path, summary = run_fetch(tmp_path, fetch_job(), fake_fetch)
+    assert summary["status"] == "done"
+    assert calls == [("Systran/faster-whisper-large-v3", 3600)]
+    assert "large-v3" in summary["output_paths"][0]
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["status"] == "done" and stored["result"]["return_code"] == 0
+    log = [p for p in all_run_files(tmp_path) if p.suffix == ".log"][0]
+    assert "downloading Systran/faster-whisper-large-v3" in log.read_text(encoding="utf-8")
+
+
+def test_unknown_model_is_never_fetched(tmp_path):
+    """Имя репозитория берётся из кода, а не из файла в общей папке."""
+    calls = []
+    path, summary = run_fetch(tmp_path, fetch_job(params={"model": "../evil/repo"}),
+                              lambda *a: calls.append(a) or {})
+    assert summary is None and calls == []
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "pending"
+    logs = [p.read_text(encoding="utf-8") for p in all_run_files(tmp_path) if p.suffix == ".log"]
+    assert any("unknown model" in text for text in logs)
+
+
+def test_fetch_model_without_name_is_skipped(tmp_path):
+    path, summary = run_fetch(tmp_path, fetch_job(params={}), lambda *a: {})
+    assert summary is None
+    logs = [p.read_text(encoding="utf-8") for p in all_run_files(tmp_path) if p.suffix == ".log"]
+    assert any("requires params.model" in text for text in logs)
+
+
+def test_failed_download_is_failed_not_done(tmp_path):
+    def boom(python, repo, timeout):
+        raise RuntimeError("network unreachable")
+
+    path, summary = run_fetch(tmp_path, fetch_job(), boom)
+    assert summary["status"] == "failed"
+    assert "network unreachable" in summary["tail_output"]
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "failed"
+
