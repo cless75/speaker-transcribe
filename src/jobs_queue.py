@@ -20,7 +20,23 @@ import time
 from typing import Callable
 
 
-JOB_TYPES = {"asr-revariant", "word-timestamps", "slide-frames", "rediarize"}
+JOB_TYPES = {"asr-revariant", "word-timestamps", "slide-frames", "rediarize",
+             "fetch-model"}
+
+# fetch-model возит на узел ВЕСА, а не код: задание называет модель, загрузку выполняет
+# этот модуль, приехавший релизным каналом (org/node-autorun-via-jobs-queue-not-scripts).
+# Имя репозитория берётся из белого списка, а не из задания как есть: иначе файл в общей
+# папке Хаба становится каналом «скачай на боевой узел что угодно» — ровно то, что
+# запрещало решение о канале автозапуска.
+MODEL_REPOS = {
+    "tiny": "Systran/faster-whisper-tiny",
+    "base": "Systran/faster-whisper-base",
+    "small": "Systran/faster-whisper-small",
+    "medium": "Systran/faster-whisper-medium",
+    "large-v2": "Systran/faster-whisper-large-v2",
+    "large-v3": "Systran/faster-whisper-large-v3",
+}
+# Параметры, исполнимые для перегонки. У fetch-model свой набор — см. _eligibility.
 EXECUTABLE_PARAMS = {
     "model", "quality_preset", "speaker_mode", "asr_variant_id", "timestamps", "glossary",
     "slide_frames", "slide_ocr", "slide_ocr_engine", "slide_interval_sec",
@@ -180,6 +196,14 @@ def _eligibility(job: dict, cfg: dict,
     params = job.get("params") or {}
     if not isinstance(params, dict):
         return "params must be an object"
+    if job_type == "fetch-model":
+        name = str(params.get("model") or "").strip()
+        if not name:
+            return "fetch-model requires params.model"
+        if name not in MODEL_REPOS:
+            return (f"unknown model {name!r}; allowed={sorted(MODEL_REPOS)} "
+                    "(the list lives in the code, not in the job)")
+        return None
     unsupported = sorted(set(params) - EXECUTABLE_PARAMS)
     if unsupported:
         return f"unsupported params for this node CLI: {unsupported}"
@@ -494,6 +518,32 @@ def execute_cli(command: list[str], log_path: pathlib.Path, tail_lines: int) -> 
     return return_code, "\n".join(tail)
 
 
+_FETCH_CODE = r'''
+import json, sys
+from huggingface_hub import snapshot_download
+repo = sys.argv[1]
+path = snapshot_download(repo, local_files_only=False)
+print(json.dumps({"repo": repo, "path": path}, ensure_ascii=False))
+'''
+
+
+def fetch_model(python: str, repo: str, timeout_sec: int = 3600) -> dict:
+    """Скачать веса в локальный кеш узла. Возвращает путь снапшота.
+
+    Отдельный процесс тем же интерпретатором, что гоняет ASR: кеш HuggingFace
+    привязан к окружению, и скачанное «куда-то ещё» движку не поможет.
+    """
+    proc = subprocess.run([python, "-c", _FETCH_CODE, repo], text=True, encoding="utf-8",
+                          errors="replace", capture_output=True, check=False,
+                          timeout=timeout_sec)
+    if proc.returncode:
+        raise RuntimeError((proc.stderr or proc.stdout or "fetch failed")[-4000:])
+    try:
+        return json.loads(proc.stdout.splitlines()[-1])
+    except Exception as exc:
+        raise RuntimeError(f"invalid fetch output: {proc.stdout[-1000:]}") from exc
+
+
 def _engine_version() -> str:
     try:
         return (pathlib.Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
@@ -511,6 +561,7 @@ def process_next_job(
     claim_is_stale: Callable[[pathlib.Path, dict], bool] | None = None,
     log: Callable[[str], None] | None = None,
     preflight: Callable[[str, str, float], dict] = run_preflight,
+    fetcher: Callable[[str, str, int], dict] = fetch_model,
     cli_executor: Callable[[list[str], pathlib.Path, int], tuple[int, str]] = execute_cli,
     vram_probe: Callable[[], float] = probe_free_vram_gb,
 ) -> dict | None:
@@ -601,6 +652,36 @@ def process_next_job(
     summary: dict = {}
     temp_config: pathlib.Path | None = None
     try:
+        if job.get("type") == "fetch-model":
+            params = job.get("params") or {}
+            name = str(params.get("model")).strip()
+            repo = MODEL_REPOS[name]
+            python = str(_node_value(cfg, "transcribe_python", None) or sys.executable).strip(' "\'')
+            job.update({"status": "running", "started_at": _utc_iso(), "run_id": run_id,
+                        "run_log": str(log_path), "run_summary": str(summary_path)})
+            _write_json(job_path, job)
+            _append_log(log_path, "fetch", f"downloading {repo} into the node cache")
+            with heartbeat_factory(job_path, claim_cfg):
+                fetched = fetcher(python, repo,
+                                  int(cfg.get("model_fetch_timeout_sec", 3600)))
+            duration = round(time.monotonic() - started, 3)
+            _append_log(log_path, "result", f"status=done path={fetched.get('path')}")
+            summary = {
+                "run_id": run_id, "status": "done", "node": _host(cfg), "job_id": job_id,
+                "job_type": "fetch-model", "job_file": str(job_path),
+                "input_file": None, "engine_version": _engine_version(),
+                "preset": name, "environment": fetched, "duration_sec": duration,
+                "return_code": 0, "output_paths": [str(fetched.get("path") or "")],
+                "tail_output": "", "log_path": str(log_path),
+                "started_at": started_at, "finished_at": _utc_iso(),
+            }
+            job["status"] = "done"
+            job["finished_at"] = summary["finished_at"]
+            job["result"] = {"run_id": run_id, "return_code": 0,
+                             "output_paths": summary["output_paths"],
+                             "run_log": str(log_path), "run_summary": str(summary_path),
+                             "tail_output": ""}
+            return summary
         input_path = _resolve_input(job, cfg)
         output_dir = _output_dir(job, cfg)
         output_dir.mkdir(parents=True, exist_ok=True)
