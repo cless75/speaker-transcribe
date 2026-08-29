@@ -787,3 +787,47 @@ def test_failed_download_is_failed_not_done(tmp_path):
     assert "network unreachable" in summary["tail_output"]
     assert json.loads(path.read_text(encoding="utf-8"))["status"] == "failed"
 
+
+# --- самодиагностика узла ------------------------------------------------------
+
+def test_self_diagnose_job_runs_the_collector(tmp_path):
+    seen = []
+    job = {"job_id": "2026-08-29-diag", "type": "self-diagnose",
+           "created_at": "2026-08-29T15:00:00Z", "created_by": "test",
+           "reason": "по требованию", "requires": {"capabilities": ["gpu-cuda"]},
+           "priority": 1, "params": {}, "status": "pending"}
+    path = write_json(tmp_path / "_jobs" / f"{job['job_id']}.json", job)
+    summary = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *a: (0, "must not be called"),
+        diagnose=lambda cfg, cp, reason: seen.append(reason) or "report on the hub")
+    assert summary["status"] == "done"
+    assert seen and "2026-08-29-diag" in seen[0]
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "done"
+
+
+def test_boot_change_triggers_diagnostics_once(tmp_path, monkeypatch):
+    """После перезагрузки — один раз, а не на каждом свипе."""
+    calls = []
+    config_path = tmp_path / "config" / "node.local.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(watcher, "system_boot_id", lambda: "2026-08-29T10:00Z")
+    monkeypatch.setattr(watcher, "run_self_diagnostics",
+                        lambda cfg, cp, reason: calls.append(reason))
+
+    assert watcher.maybe_diagnose_after_boot({}, config_path) is True
+    assert watcher.maybe_diagnose_after_boot({}, config_path) is False
+    assert len(calls) == 1
+
+    monkeypatch.setattr(watcher, "system_boot_id", lambda: "2026-08-29T18:30Z")
+    assert watcher.maybe_diagnose_after_boot({}, config_path) is True
+    assert len(calls) == 2 and "after boot" in calls[1]
+
+
+def test_boot_id_is_stable_within_a_run():
+    a, b = watcher.system_boot_id(), watcher.system_boot_id()
+    assert a == b and a and a.endswith("Z")
+

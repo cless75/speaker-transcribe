@@ -21,7 +21,7 @@ from typing import Callable
 
 
 JOB_TYPES = {"asr-revariant", "word-timestamps", "slide-frames", "rediarize",
-             "fetch-model"}
+             "fetch-model", "self-diagnose"}
 
 # fetch-model возит на узел ВЕСА, а не код: задание называет модель, загрузку выполняет
 # этот модуль, приехавший релизным каналом (org/node-autorun-via-jobs-queue-not-scripts).
@@ -196,6 +196,10 @@ def _eligibility(job: dict, cfg: dict,
     params = job.get("params") or {}
     if not isinstance(params, dict):
         return "params must be an object"
+    if job_type == "self-diagnose":
+        # Диагностика по требованию: параметров нет, вход не нужен, запускается тот же
+        # collect-diag, что и после перезагрузки.
+        return None
     if job_type == "fetch-model":
         name = str(params.get("model") or "").strip()
         if not name:
@@ -562,6 +566,7 @@ def process_next_job(
     log: Callable[[str], None] | None = None,
     preflight: Callable[[str, str, float], dict] = run_preflight,
     fetcher: Callable[[str, str, int], dict] = fetch_model,
+    diagnose: Callable[[dict, pathlib.Path, str], object] | None = None,
     cli_executor: Callable[[list[str], pathlib.Path, int], tuple[int, str]] = execute_cli,
     vram_probe: Callable[[], float] = probe_free_vram_gb,
 ) -> dict | None:
@@ -652,6 +657,30 @@ def process_next_job(
     summary: dict = {}
     temp_config: pathlib.Path | None = None
     try:
+        if job.get("type") == "self-diagnose":
+            job.update({"status": "running", "started_at": _utc_iso(), "run_id": run_id,
+                        "run_log": str(log_path), "run_summary": str(summary_path)})
+            _write_json(job_path, job)
+            _append_log(log_path, "diagnose", "running collect-diag on request")
+            with heartbeat_factory(job_path, claim_cfg):
+                detail = diagnose(cfg, config_path, f"job {job_id}") if diagnose else None
+            duration = round(time.monotonic() - started, 3)
+            _append_log(log_path, "result", f"status=done detail={detail}")
+            summary = {
+                "run_id": run_id, "status": "done", "node": _host(cfg), "job_id": job_id,
+                "job_type": "self-diagnose", "job_file": str(job_path), "input_file": None,
+                "engine_version": _engine_version(), "preset": None,
+                "environment": {"detail": detail}, "duration_sec": duration,
+                "return_code": 0, "output_paths": [], "tail_output": str(detail or ""),
+                "log_path": str(log_path), "started_at": started_at,
+                "finished_at": _utc_iso(),
+            }
+            job["status"] = "done"
+            job["finished_at"] = summary["finished_at"]
+            job["result"] = {"run_id": run_id, "return_code": 0, "output_paths": [],
+                             "run_log": str(log_path), "run_summary": str(summary_path),
+                             "tail_output": str(detail or "")}
+            return summary
         if job.get("type") == "fetch-model":
             params = job.get("params") or {}
             name = str(params.get("model")).strip()
