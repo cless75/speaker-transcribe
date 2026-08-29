@@ -492,3 +492,166 @@ def test_off_is_not_gated_either(tmp_path):
     _, _, summary = run(tmp_path, job, hints_confirmed=False)
     assert summary["status"] == "done"
 
+
+
+# --- веса прогона: params.model (org/preset-measure-2026-08-22-invalid) ---------
+
+def run_with_meta(hub: pathlib.Path, job: dict, meta_model: str, *, capabilities=("gpu-cuda",)):
+    """Прогон, в котором движок записывает в run-meta заданную модель."""
+    prepare(hub, job)
+    calls = []
+    seen = {}
+
+    def execute(command, log_path, tail_lines):
+        calls.append(command)
+        jobs_queue._append_log(log_path, "worker", "FIRST_CHUNK")
+        out = pathlib.Path(command[command.index("--output-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "result-transcript.md").write_text("ok", encoding="utf-8")
+        write_json(out / "result-run-meta.json", {"model": meta_model, "quality_preset": "large-v3"})
+        return 0, ""
+
+    def preflight(python, preset, min_vram):
+        seen["preset"] = preset
+        return environment(python, preset)
+
+    summary = jobs_queue.process_next_job(
+        cfg_for(hub, capabilities), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=preflight, cli_executor=execute,
+    )
+    return calls, summary, seen
+
+
+def test_model_param_reaches_the_cli_because_preset_never_picks_weights(tmp_path):
+    """Пресет — только ярлык: без --model движок берёт дефолт medium."""
+    job = base_job(params={"model": "large-v3", "quality_preset": "large-v3",
+                           "speaker_mode": "diarize"})
+    calls, summary, _ = run_with_meta(tmp_path, job, "large-v3")
+    command = calls[0]
+    assert "--model" in command
+    assert command[command.index("--model") + 1] == "large-v3"
+    assert summary["status"] == "done"
+    assert summary["model_requested"] == "large-v3" and summary["model_used"] == "large-v3"
+
+
+def test_job_without_model_passes_no_flag_and_keeps_the_hints_folder(tmp_path):
+    """Прежние задания (пять боевых) ведут себя ровно как раньше."""
+    _, calls, summary = run(tmp_path, base_job())
+    assert "--model" not in calls[0]
+    out = pathlib.Path(calls[0][calls[0].index("--output-dir") + 1])
+    assert out.name == "transcripts-hints"
+    assert summary["status"] == "done"
+
+
+def test_model_run_lands_in_its_own_folder_beside_the_baseline(tmp_path):
+    """Перегонка на других весах сравнивается с medium — значит лежит отдельно."""
+    job = base_job(params={"model": "large-v3", "quality_preset": "large-v3"})
+    calls, _, _ = run_with_meta(tmp_path, job, "large-v3")
+    out = pathlib.Path(calls[0][calls[0].index("--output-dir") + 1])
+    assert out == (tmp_path / "700" / "sessions" / "2026-08"
+                   / "S20260810T2110-platforma" / "transcripts-large-v3"), out
+
+
+def test_preflight_checks_the_requested_weights_not_the_label(tmp_path):
+    """Иначе наличие medium зачитывает готовность к large-v3."""
+    # Ярлык, который не называет модель, — барьер согласованности молчит, веса свои.
+    job = base_job(params={"model": "large-v3", "quality_preset": "fast"})
+    _, _, seen = run_with_meta(tmp_path, job, "large-v3")
+    assert seen["preset"] == "large-v3"
+
+
+def test_silent_fallback_to_other_weights_is_not_scored_as_done(tmp_path):
+    """22.08: прогон назывался large-v3, run-meta показал medium — это не тот вариант."""
+    job = base_job(params={"model": "large-v3", "quality_preset": "large-v3"})
+    _, summary, _ = run_with_meta(tmp_path, job, "medium")
+    assert summary["status"] == "failed"
+    assert "large-v3" in summary["tail_output"] and "medium" in summary["tail_output"]
+    assert summary["model_used"] == "medium"
+
+
+# --- находки ревью 28.08 -------------------------------------------------------
+
+def test_stale_run_meta_from_an_earlier_run_is_not_evidence(tmp_path):
+    """F1: в боевой папке варианта лежит run-meta от 22.08 с model=medium."""
+    job = base_job(params={"model": "large-v3", "quality_preset": "large-v3"})
+    prepare(tmp_path, job)
+    out = (tmp_path / "700" / "sessions" / "2026-08" / "S20260810T2110-platforma"
+           / "transcripts-large-v3" / "asr")
+    out.mkdir(parents=True)
+    stale = write_json(out / "large-v3-700o27-run-meta.json", {"model": "medium"})
+    old = time.time() - 6 * 24 * 3600
+    os.utime(stale, (old, old))
+
+    def execute(command, log_path, tail_lines):
+        jobs_queue._append_log(log_path, "worker", "FIRST_CHUNK")
+        target = pathlib.Path(command[command.index("--output-dir") + 1])
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "fresh-transcript.md").write_text("ok", encoding="utf-8")
+        write_json(target / "fresh-run-meta.json", {"model": "large-v3"})
+        return 0, ""
+
+    summary = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"), claim_job=watcher.try_claim_file,
+        retire_job=watcher.retire_claim, heartbeat_factory=FakeHeartbeat,
+        preflight=environment, cli_executor=execute,
+    )
+    assert summary["status"] == "done", summary["tail_output"]
+    assert summary["model_used"] == "large-v3"
+
+
+def test_run_without_any_run_meta_is_not_scored_when_weights_were_asked(tmp_path):
+    """F4: нет свидетельства — нет зачёта, как у гейта подсказок."""
+    job = base_job(params={"model": "large-v3", "quality_preset": "large-v3"})
+    prepare(tmp_path, job)
+
+    def execute(command, log_path, tail_lines):
+        jobs_queue._append_log(log_path, "worker", "FIRST_CHUNK")
+        out = pathlib.Path(command[command.index("--output-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "only-transcript.md").write_text("ok", encoding="utf-8")
+        return 0, ""
+
+    summary = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"), claim_job=watcher.try_claim_file,
+        retire_job=watcher.retire_claim, heartbeat_factory=FakeHeartbeat,
+        preflight=environment, cli_executor=execute,
+    )
+    assert summary["status"] == "failed"
+    assert "unverifiable" in summary["tail_output"]
+
+
+def test_preset_naming_weights_without_model_is_refused_not_run_quietly(tmp_path):
+    """F5: барьер, который до params.model держался случайно — на preflight."""
+    job = base_job(params={"quality_preset": "large-v3", "speaker_mode": "diarize"})
+    reason = jobs_queue._eligibility(job, cfg_for(tmp_path))
+    assert reason and "does not select weights" in reason
+
+
+def test_preset_equal_to_the_node_default_stays_runnable(tmp_path):
+    """Пять боевых заданий несут quality_preset: medium — они обязаны идти как шли."""
+    assert jobs_queue._eligibility(base_job(), cfg_for(tmp_path)) is None
+
+
+def test_model_as_a_path_is_refused_before_the_gpu_is_taken(tmp_path):
+    """F9: путь в весах даёт папку transcripts-C-models-… и вечный mismatch."""
+    job = base_job(params={"model": "C:/models/large-v3", "quality_preset": "large-v3"})
+    reason = jobs_queue._eligibility(job, cfg_for(tmp_path))
+    assert reason and "not a path" in reason
+
+
+def test_weights_plus_hints_names_both_instead_of_claiming_one_home(tmp_path):
+    """F10: договорённость F6 расширена, а не переписана молча."""
+    out = jobs_queue._output_dir(
+        {"type": "asr-revariant", "params": {"model": "large-v3", "glossary": "project"},
+         "target": {"project_id": "700", "session_id": "S20260810T2110-platforma"}},
+        {"hub_root": str(tmp_path)})
+    assert out.name == "transcripts-large-v3-hints"
+
+
+def test_summary_keeps_preset_a_label_and_reports_weights_separately(tmp_path):
+    """F6: смысл существующего поля не меняется задним числом."""
+    job = base_job(params={"model": "large-v3", "quality_preset": "fast"})
+    _, summary, _ = run_with_meta(tmp_path, job, "large-v3")
+    assert summary["preset"] == "fast"
+    assert summary["weights"] == "large-v3"
