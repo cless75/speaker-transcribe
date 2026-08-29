@@ -1842,6 +1842,93 @@ def _status_dir(cfg: dict) -> pathlib.Path | None:
     return node_status.status_dir_for(resolve_template(hub, base_placeholder_ctx(cfg)))
 
 
+def system_boot_id() -> str | None:
+    """Момент загрузки системы — устойчивый признак «это другой запуск машины».
+
+    Считается из uptime, а не спрашивается у ОС отдельной командой: на узле нет
+    гарантии ни git, ни wmic в PATH, а лишний subprocess на каждом тике не нужен.
+    Округление до минуты гасит дрожь тиков таймера.
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+            up = ctypes.windll.kernel32.GetTickCount64() / 1000.0
+        else:
+            with open("/proc/uptime", encoding="utf-8") as fh:
+                up = float(fh.read().split()[0])
+    except Exception:
+        return None
+    boot = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=up)
+    return boot.strftime("%Y-%m-%dT%H:%MZ")
+
+
+def _boot_state_path(config_path: pathlib.Path) -> pathlib.Path:
+    """Рядом с логами узла, а не на Хабе: признак нужен и тогда, когда Диск не поднялся."""
+    return config_path.resolve().parent.parent / "logs" / ".boot-state.json"
+
+
+def run_self_diagnostics(cfg: dict, config_path: pathlib.Path, reason: str) -> str | None:
+    """Запустить collect-diag и оставить отчёт на Хабе. Никогда не роняет свип.
+
+    Диагностика после перезагрузки нужна ровно в тот момент, когда человека у машины
+    нет: 28.08 узел ушёл в ребут, вернулся через сутки, и причину пришлось добывать
+    отдельным заходом. Скрипт наш и приезжает релизным каналом, поэтому узел вправе
+    запускать его сам (org/node-autorun-via-jobs-queue-not-scripts запрещает код с Хаба,
+    а не собственный код узла).
+    """
+    repo = config_path.resolve().parent.parent
+    script = repo / "scripts" / "collect-diag.ps1"
+    if not script.is_file():
+        log(f"self-diagnostics: {script.name} not found — skipped")
+        return None
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if not shell:
+        log("self-diagnostics: no PowerShell on this node — skipped")
+        return None
+    log(f"self-diagnostics: running collect-diag ({reason})")
+    try:
+        proc = subprocess.run(
+            [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=int(cfg.get("self_diagnostics_timeout_sec", 600)), cwd=str(repo))
+    except Exception as exc:
+        log(f"self-diagnostics failed: {type(exc).__name__}: {exc}")
+        status_event(cfg, {"type": "self_diagnostics", "reason": reason,
+                           "status": "failed", "detail": f"{type(exc).__name__}: {exc}"})
+        return None
+    tail = (proc.stdout or "").strip().splitlines()[-1:] or [""]
+    status_event(cfg, {"type": "self_diagnostics", "reason": reason,
+                       "status": "ok" if proc.returncode == 0 else "failed",
+                       "return_code": proc.returncode, "detail": tail[0][:300]})
+    log(f"self-diagnostics: done rc={proc.returncode}")
+    return tail[0]
+
+
+def maybe_diagnose_after_boot(cfg: dict, config_path: pathlib.Path) -> bool:
+    """Первый свип после перезагрузки собирает диагностику сам. True, если собрал."""
+    boot = system_boot_id()
+    if not boot:
+        return False
+    state_path = _boot_state_path(config_path)
+    previous = None
+    try:
+        previous = (json.loads(state_path.read_text(encoding="utf-8")) or {}).get("boot_id")
+    except Exception:
+        previous = None
+    if previous == boot:
+        return False
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({"boot_id": boot, "seen_at": utcnow().isoformat()},
+                                         ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        log(f"self-diagnostics: cannot remember boot id ({exc}) — running anyway")
+    reason = "first sweep after boot" if previous else "first sweep on this node"
+    log(f"self-diagnostics: boot changed {previous!r} -> {boot!r}")
+    run_self_diagnostics(cfg, config_path, reason)
+    return True
+
+
 def status_event(cfg: dict, event: dict) -> None:
     """Record one event in this node's history log (best-effort)."""
     if node_status is None:
@@ -2681,6 +2768,14 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
         # cloud-synced drive that disappears mid-sweep, and a failure to read or
         # journal a job must cost the job, not the inbox. Same stance as the
         # CloudStorage and ASR-environment guards below — log and carry on.
+        # Перезагрузка — единственный момент, когда причина ещё восстановима: события
+        # Windows живут, а человека у машины нет. Делается до очереди и до инбоксов,
+        # чтобы отчёт не зависел от того, найдётся ли работа.
+        try:
+            maybe_diagnose_after_boot(cfg, config_path)
+        except Exception as exc:
+            log(f"self-diagnostics skipped ({type(exc).__name__}: {exc})")
+
         jobs_report: dict = {}
         try:
             jobs_summary = jobs_queue.process_next_job(
@@ -2690,6 +2785,7 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 heartbeat_factory=_ClaimHeartbeat,
                 claim_is_stale=claim_is_dead,
                 log=log,
+                diagnose=run_self_diagnostics,
             )
             jobs_report = {"checked_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                            "took": (jobs_summary or {}).get("job_id"),
