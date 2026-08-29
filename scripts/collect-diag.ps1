@@ -174,7 +174,89 @@ Probe "node_diagnostics.py --auto" {
     else { & $venv $diag --repo $Repo --auto }
 }
 
+# Why the node came back at all. A sweep that "started and took nothing" reads very
+# differently depending on whether the machine rebooted on purpose, lost power, or
+# bugchecked: 1074 names the process that asked for the restart, 6008 marks an
+# unexpected shutdown, 41 is Kernel-Power (power loss / hard reset), 6005 is the
+# first entry after boot - the moment services, including the cloud drive, begin
+# coming up.
+Probe "reboot history (last 14 days)" {
+    $since = (Get-Date).AddDays(-14)
+    $ids = 1074, 6008, 41, 6005, 6006
+    $ev = Get-WinEvent -FilterHashtable @{LogName='System'; Id=$ids; StartTime=$since} -ErrorAction SilentlyContinue
+    if (-not $ev) { "no reboot-related events in the window (or access denied)" }
+    else {
+        foreach ($e in ($ev | Sort-Object TimeCreated -Descending | Select-Object -First 20)) {
+            $what = switch ($e.Id) {
+                1074 { "planned restart requested" }
+                6008 { "UNEXPECTED shutdown (previous one was dirty)" }
+                41   { "Kernel-Power: rebooted without a clean shutdown" }
+                6005 { "event log started = system boot" }
+                6006 { "event log stopped = clean shutdown" }
+                default { "id " + $e.Id }
+            }
+            ("{0:yyyy-MM-dd HH:mm:ss}  id={1,-4} {2}" -f $e.TimeCreated, $e.Id, $what)
+            $line = ($e.Message -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+            if ($line) { "        " + $line.Trim() }
+        }
+    }
+}
+
+# The cloud drive is the queue. If the watcher sweeps before it is mounted, the queue
+# is invisible and the sweep ends quietly - the exact shape of "started, took nothing".
+# Comparing boot time with the drive's own first appearance shows that race.
+Probe "hub readiness vs boot" {
+    $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+    "last boot : " + $boot
+    "uptime    : " + [string]::Format("{0:N1} h", ((Get-Date) - $boot).TotalHours)
+    if ($hubRoot) {
+        if (Test-Path $hubRoot) {
+            $jobs = Join-Path $hubRoot "_jobs"
+            "hub_root  : reachable"
+            if (Test-Path $jobs) {
+                $n = @(Get-ChildItem $jobs -Filter *.json -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -notlike "*.claim.json" }).Count
+                "_jobs     : present, " + $n + " job file(s)"
+            } else { "_jobs     : MISSING under a mounted hub" }
+        } else {
+            "hub_root  : NOT reachable right now - a sweep in this state sees no queue"
+        }
+    }
+}
+
 $watchLog = Join-Path $Repo "logs\watch.log"
+
+# The queue guard logs to the node, not to the Hub: a failure there is invisible from
+# any other machine, so it has to be lifted into this report explicitly.
+Probe "watch.log: queue and sweep lines" {
+    if (Test-Path $watchLog) {
+        $pat = 'jobs queue|run_once|no sources|CloudStorage|ASR environment|Traceback|ERROR|abort'
+        $hits = Select-String -Path $watchLog -Pattern $pat -ErrorAction SilentlyContinue |
+                Select-Object -Last 40
+        if ($hits) { $hits | ForEach-Object { $_.Line } }
+        else { "no queue/sweep lines matched - the watcher may be running code without the queue" }
+    } else { "NOT FOUND: " + $watchLog }
+}
+
+# Selection is explained by the same functions the sweep uses. A hand-rolled guess here
+# would confidently name a cause that does not exist.
+Probe "jobs queue diagnosis" {
+    $djq = Join-Path $Repo "scripts\diag_jobs_queue.py"
+    if (-not (Test-Path $djq)) { "NOT FOUND: " + $djq + " (git pull needed)" }
+    else {
+        # This probe only reads JSON - it needs an interpreter, not THE interpreter.
+        # Falling back keeps the most informative check alive on a node whose venv is
+        # exactly what broke.
+        $py = if ($venv -and (Test-Path $venv)) { $venv }
+              else { (Get-Command python -ErrorAction SilentlyContinue).Source }
+        if (-not $py) { "skipped: no python at all (venv missing and none on PATH)" }
+        else {
+            if ($py -ne $venv) { "NB: venv unavailable, using " + $py }
+            & $py $djq --config $cfgPath
+        }
+    }
+}
+
 Probe ("watch.log tail " + $WatchLogTail) {
     if (Test-Path $watchLog) {
         $st = Get-Item $watchLog
