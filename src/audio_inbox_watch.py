@@ -1853,7 +1853,8 @@ def status_event(cfg: dict, event: dict) -> None:
 
 
 def publish_status(cfg: dict, phase: str, *, current: dict | None = None,
-                   queue: dict | None = None, note: str | None = None) -> None:
+                   queue: dict | None = None, note: str | None = None,
+                   jobs: dict | None = None) -> None:
     """Refresh this node's page on the hub (best-effort)."""
     if node_status is None:
         return
@@ -1864,7 +1865,7 @@ def publish_status(cfg: dict, phase: str, *, current: dict | None = None,
         host = host_label_of(cfg)
         snapshot = node_status.build_snapshot(
             host=host, phase=phase, cfg=cfg, current=current, queue=queue,
-            events=node_status.read_history(sd, host), note=note)
+            events=node_status.read_history(sd, host), note=note, jobs=jobs)
         node_status.publish(sd, snapshot)
     except Exception:
         pass
@@ -2680,17 +2681,24 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
         # cloud-synced drive that disappears mid-sweep, and a failure to read or
         # journal a job must cost the job, not the inbox. Same stance as the
         # CloudStorage and ASR-environment guards below — log and carry on.
+        jobs_report: dict = {}
         try:
-            jobs_queue.process_next_job(
+            jobs_summary = jobs_queue.process_next_job(
                 cfg, config_path,
                 claim_job=try_claim_file,
                 retire_job=retire_claim,
                 heartbeat_factory=_ClaimHeartbeat,
                 claim_is_stale=claim_is_dead,
+                log=log,
             )
+            jobs_report = {"checked_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           "took": (jobs_summary or {}).get("job_id"),
+                           "status": (jobs_summary or {}).get("status")}
         except Exception as exc:
             log(f"jobs queue skipped this sweep ({type(exc).__name__}: {exc}); "
                 f"continuing with the ordinary inbox flow")
+            jobs_report = {"checked_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           "error": f"{type(exc).__name__}: {exc}"}
 
         # ASR interpreter preflight — a missing/garbled transcribe_python would fail
         # every file and quarantine the whole inbox. Check once up front; abort the
@@ -2824,7 +2832,7 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
         log(f"run_once done: processed={processed} in {(time.time()-start_time)/60:.1f}m")
         status_event(cfg, {"type": "sweep_end", "processed": processed,
                            "elapsed_sec": round(time.time() - start_time, 1)})
-        publish_status(cfg, "idle", queue=last_queue)
+        publish_status(cfg, "idle", queue=last_queue, jobs=jobs_report)
     finally:
         release_watcher_lock(lock)
 

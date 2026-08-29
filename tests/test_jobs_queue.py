@@ -655,3 +655,62 @@ def test_summary_keeps_preset_a_label_and_reports_weights_separately(tmp_path):
     _, summary, _ = run_with_meta(tmp_path, job, "large-v3")
     assert summary["preset"] == "fast"
     assert summary["weights"] == "large-v3"
+
+
+# --- наблюдаемость свипа -------------------------------------------------------
+
+def test_queue_reports_every_sweep_even_when_it_takes_nothing(tmp_path):
+    """Молчащий свип неотличим от невыполненного — очередь обязана отчитаться."""
+    said = []
+    (tmp_path / "_jobs").mkdir()
+    # пусто
+    jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *a: (0, ""), log=said.append)
+    assert any("0 runnable" in line for line in said), said
+
+    # готовое к работе
+    said.clear()
+    prepare(tmp_path, base_job())
+    jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *a: (0, "tail"), log=said.append)
+    assert any("1 runnable" in line for line in said), said
+    assert any("taking" in line for line in said), said
+
+
+def test_missing_jobs_dir_is_reported_not_silent(tmp_path):
+    """Хаб не смонтирован — это диагноз, а не повод молчать."""
+    said = []
+    jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *a: (0, ""), log=said.append)
+    assert any("not present" in line for line in said), said
+
+
+def test_skip_reason_reaches_the_node_log(tmp_path):
+    said = []
+    prepare(tmp_path, base_job(params={"quality_preset": "medium", "no_such": 1}))
+    jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *a: (0, ""), log=said.append)
+    assert any("skip" in line and "no_such" in line for line in said), said
+
+
+def test_snapshot_carries_commit_and_jobs():
+    """VERSION не отличает обновившийся узел от застрявшего — нужен коммит."""
+    import node_status
+    snap = node_status.build_snapshot(host="T", phase="idle", cfg={},
+                                      jobs={"checked_at": "2026-08-29T17:00:00Z"})
+    assert "commit" in snap["runtime"]
+    assert snap["jobs"]["checked_at"] == "2026-08-29T17:00:00Z"
+    assert snap["jobs"] is not snap["queue"], "очередь заданий и очередь файлов — разные поля"
+
