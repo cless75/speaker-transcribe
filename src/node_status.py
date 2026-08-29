@@ -65,6 +65,33 @@ def engine_version() -> str | None:
         return None
 
 
+def engine_commit() -> str | None:
+    """Короткий sha текущего HEAD репозитория узла.
+
+    VERSION отвечает на вопрос «какой релиз», но не на вопрос «дошёл ли до узла
+    сегодняшний выкат»: 27–29.08 файл не менялся ни разу, хотя код уехал вперёд
+    четырьмя мержами, и отличить обновившийся узел от застрявшего было нечем.
+    Читаем .git напрямую — git в PATH на узле не гарантирован.
+    """
+    try:
+        git = _repo_root() / ".git"
+        head = (git / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head[:12] or None
+        ref = head.split(" ", 1)[1].strip()
+        direct = git / ref
+        if direct.is_file():
+            return direct.read_text(encoding="utf-8").strip()[:12] or None
+        packed = git / "packed-refs"
+        if packed.is_file():
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                if line.endswith(" " + ref):
+                    return line.split(" ", 1)[0][:12] or None
+    except OSError:
+        return None
+    return None
+
+
 def engine_branch() -> str | None:
     """Текущая ветка репозитория узла — тот самый канал, откуда идёт self-update.
 
@@ -341,7 +368,7 @@ def _esc(value) -> str:
 def build_snapshot(*, host: str, phase: str, cfg: dict | None = None,
                    current: dict | None = None, queue: dict | None = None,
                    sweep: dict | None = None, events: list[dict] | None = None,
-                   note: str | None = None) -> dict:
+                   note: str | None = None, jobs: dict | None = None) -> dict:
     cfg = cfg or {}
     runtime = cfg.get("runtime") or {}
     node = cfg.get("node") or {}
@@ -366,8 +393,13 @@ def build_snapshot(*, host: str, phase: str, cfg: dict | None = None,
             # Так уже было — узел месяцами работал на старом коде незамеченно.
             "branch": engine_branch(),
             "version": engine_version(),
+            "commit": engine_commit(),
         },
         "current": current,
+        # "queue" — это очередь ФАЙЛОВ инбокса; "jobs" — очередь заданий в _jobs.
+        # Разные вещи с похожими именами: в логе они уже спутались и стоили лишнего
+        # круга диагностики.
+        "jobs": jobs or {},
         "queue": queue or {},
         "sweep": sweep or {},
         "today": summarize_day(events, _now().date()),

@@ -509,26 +509,41 @@ def process_next_job(
     retire_job: Callable[[pathlib.Path, dict], None],
     heartbeat_factory: Callable[[pathlib.Path, dict], object],
     claim_is_stale: Callable[[pathlib.Path, dict], bool] | None = None,
+    log: Callable[[str], None] | None = None,
     preflight: Callable[[str, str, float], dict] = run_preflight,
     cli_executor: Callable[[list[str], pathlib.Path, int], tuple[int, str]] = execute_cli,
     vram_probe: Callable[[], float] = probe_free_vram_gb,
 ) -> dict | None:
-    """Process at most one eligible job, then return control to ordinary inboxes."""
+    """Process at most one eligible job, then return control to ordinary inboxes.
+
+    Every sweep says what it saw, even when it saw nothing. Silence here cost a whole
+    diagnosis round: the node log says "queue empty" about INBOX files, the jobs queue
+    said nothing at all, and from the outside an unrun queue step looked exactly like
+    a queue that ran and found no work.
+    """
+    say = log or (lambda _message: None)
     rotate_run_logs(cfg)
     jobs_dir = _hub(cfg) / "_jobs"
     if not jobs_dir.is_dir():
+        say(f"jobs queue: {jobs_dir} not present — nothing to read this sweep")
         return None
     candidates: list[tuple[pathlib.Path, dict]] = []
+    total = skipped = finished = blocked = 0
     for path in sorted(jobs_dir.glob("*.json")):
         if path.name.endswith(".claim.json"):
             continue
+        total += 1
         try:
             job = _read_job(path)
         except Exception as exc:
             _journal_skip(cfg, path, {"job_id": path.stem}, f"invalid job JSON: {exc}")
             continue
         status = job.get("status")
-        if status == "blocked" or status in TERMINAL_STATUSES:
+        if status == "blocked":
+            blocked += 1
+            continue
+        if status in TERMINAL_STATUSES:
+            finished += 1
             continue
         if status not in READY_STATUSES:
             # A job stamped claimed/running by a node that then died stays stamped: the
@@ -542,13 +557,20 @@ def process_next_job(
             job = dict(job, status="pending", reclaimed_from=status)
         reason = _eligibility(job, cfg, vram_probe)
         if reason:
+            skipped += 1
+            say(f"jobs queue: skip {path.name}: {reason}")
             _journal_skip(cfg, path, job, reason)
             continue
         candidates.append((path, job))
     if not candidates:
+        say(f"jobs queue: {total} file(s), 0 runnable here "
+            f"({skipped} skipped, {finished} finished, {blocked} blocked)")
         return None
+    say(f"jobs queue: {total} file(s), {len(candidates)} runnable "
+        f"({skipped} skipped, {finished} finished, {blocked} blocked)")
 
     job_path, job = sorted(candidates, key=_sort_key)[0]
+    say(f"jobs queue: taking {job_path.name}")
     reclaimed_from = job.get("reclaimed_from")
     claim_cfg = _claim_cfg(cfg)
     if not claim_job(job_path, claim_cfg):
