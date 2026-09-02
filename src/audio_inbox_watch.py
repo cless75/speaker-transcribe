@@ -2284,6 +2284,16 @@ def _log_result_summary(audio: pathlib.Path, pid: str | None, proc_sec: float,
         else:
             log(f"  speakers: {diar.get('speakers_detected') or 0} via {src}{note} | "
                 f"segments {assigned}/{total_seg} labeled{share}")
+    quality = meta.get("quality") or {}
+    if meta.get("status") == "degraded":
+        # Файл прошёл, расшифровка есть — но минуты в ней потеряны. Строка стоит
+        # рядом с «DONE», потому что именно молчаливое «готово» и оставило потерю
+        # 02.09 незамеченной сутки (801-o15).
+        log(f"  QUALITY: degraded | подозрительно {_fmt_dur(quality.get('suspect_sec') or 0)} "
+            f"({quality.get('suspect_ratio')}) | пропуски {_fmt_dur(quality.get('gaps_sec') or 0)} "
+            f"| зон {len(quality.get('loops') or [])}")
+    elif quality.get("loops"):
+        log(f"  quality: восстановлено зон {len(quality['loops'])}, потерь не осталось")
     if transcript:
         log(f"  transcript: {transcript.name}")
     log("=" * 60)

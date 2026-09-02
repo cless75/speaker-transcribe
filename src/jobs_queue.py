@@ -73,6 +73,12 @@ HINTS_CONFIRMATION = "glossary prompts on"
 READY_STATUSES = {"pending", "ready"}
 ORPHANABLE_STATUSES = {"claimed", "running"}
 TERMINAL_STATUSES = {"done", "failed"}
+# Прогон, потерявший минуты речи на залипании модели, не принят и не повторён:
+# повтор сжёг бы GPU на том же материале, а «принят» скрыл бы потерю — ровно то,
+# что 02.09 дало двое суток тишины над 15 потерянными минутами (801-o15).
+DEGRADED_STATUS = "degraded"
+DEGRADED_WARNING = ("run quality gate: status=degraded suspect_ratio={ratio} "
+                    "gaps_sec={gaps} - выход неполон, задание не принято")
 DEFAULT_RUN_LOG_RETENTION_DAYS = 90
 DEFAULT_TAIL_LINES = 80
 
@@ -266,8 +272,8 @@ def _hints_expected(job: dict) -> bool:
     return str(params.get("glossary")).strip().lower() not in GLOSSARY_OFF
 
 
-def _model_in_outputs(output_dir: pathlib.Path, since: float) -> str | None:
-    """Weights of THIS run, from the run-meta this run wrote.
+def _fresh_run_metas(output_dir: pathlib.Path, since: float) -> list[dict]:
+    """run-meta, написанные ЭТИМ прогоном, — новыми вперёд.
 
     Never "the first run-meta in the folder": a variant folder accumulates outputs of
     earlier runs, and the boldest example lives in the combat hub - a 22.08 file under
@@ -275,7 +281,7 @@ def _model_in_outputs(output_dir: pathlib.Path, since: float) -> str | None:
     fail an honest large-v3 run after 110 GPU minutes (review F1, 28.08). Only files
     this run touched count, newest first; nothing older is evidence about it.
     """
-    fresh = []
+    fresh: list[tuple[float, dict]] = []
     for meta_path in output_dir.rglob("*run-meta.json"):
         try:
             if meta_path.stat().st_mtime + 1 < since:
@@ -283,12 +289,32 @@ def _model_in_outputs(output_dir: pathlib.Path, since: float) -> str | None:
             meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
+        if isinstance(meta, dict):
+            fresh.append((meta_path.stat().st_mtime, meta))
+    return [meta for _, meta in sorted(fresh, key=lambda item: -item[0])]
+
+
+def _model_in_outputs(output_dir: pathlib.Path, since: float) -> str | None:
+    """Weights of THIS run, from the run-meta this run wrote."""
+    for meta in _fresh_run_metas(output_dir, since):
         model = meta.get("model") or (meta.get("asr_variant") or {}).get("model")
         if model:
-            fresh.append((meta_path.stat().st_mtime, str(model)))
-    if not fresh:
-        return None
-    return max(fresh)[1]
+            return str(model)
+    return None
+
+
+def _quality_in_outputs(output_dir: pathlib.Path, since: float) -> tuple[str | None, dict]:
+    """Статус гейта покрытия и блок quality из run-meta этого прогона.
+
+    Старый run-meta без этих полей читается как «гейта не было»: узел с прежней
+    версией движка не должен объявлять свои прогоны деградировавшими.
+    """
+    for meta in _fresh_run_metas(output_dir, since):
+        quality = meta.get("quality")
+        if meta.get("status") or isinstance(quality, dict):
+            return (str(meta.get("status")) if meta.get("status") else None,
+                    quality if isinstance(quality, dict) else {})
+    return None, {}
 
 
 def _log_mentions(log_path: pathlib.Path, needle: str) -> bool:
@@ -584,7 +610,7 @@ def process_next_job(
         say(f"jobs queue: {jobs_dir} not present — nothing to read this sweep")
         return None
     candidates: list[tuple[pathlib.Path, dict]] = []
-    total = skipped = finished = blocked = 0
+    total = skipped = finished = blocked = degraded = 0
     for path in sorted(jobs_dir.glob("*.json")):
         if path.name.endswith(".claim.json"):
             continue
@@ -600,6 +626,11 @@ def process_next_job(
             continue
         if status in TERMINAL_STATUSES:
             finished += 1
+            continue
+        if status == DEGRADED_STATUS:
+            # Не принято и не переоткрыто: задание ждёт человека, а не второго
+            # прогона на том же материале.
+            degraded += 1
             continue
         if status not in READY_STATUSES:
             # A job stamped claimed/running by a node that then died stays stamped: the
@@ -620,10 +651,12 @@ def process_next_job(
         candidates.append((path, job))
     if not candidates:
         say(f"jobs queue: {total} file(s), 0 runnable here "
-            f"({skipped} skipped, {finished} finished, {blocked} blocked)")
+            f"({skipped} skipped, {finished} finished, {blocked} blocked, "
+            f"{degraded} degraded)")
         return None
     say(f"jobs queue: {total} file(s), {len(candidates)} runnable "
-        f"({skipped} skipped, {finished} finished, {blocked} blocked)")
+        f"({skipped} skipped, {finished} finished, {blocked} blocked, "
+        f"{degraded} degraded)")
 
     job_path, job = sorted(candidates, key=_sort_key)[0]
     say(f"jobs queue: taking {job_path.name}")
@@ -771,9 +804,23 @@ def process_next_job(
                 tail = ((tail + chr(10)) if tail else "") + MODEL_LABEL_MISMATCH.format(
                     requested=requested, actual=actual_model
                 ) + " - this output is not the variant the job asked for; not scored"
+        # Гейт покрытия (801-o15). Прогон мог вернуть 0, написать все файлы и те
+        # самые веса — и при этом отдать минуты повторяющейся строки вместо речи.
+        # Ответ лежит в run-meta этого прогона, рядом с моделью; смотреть в него
+        # обязан тот же слой, что уже проверяет подсказки и веса.
+        run_status, quality = (
+            _quality_in_outputs(output_dir, run_started_at) if status == "done" else (None, {})
+        )
+        if status == "done" and run_status == DEGRADED_STATUS:
+            status = DEGRADED_STATUS
+            warning = DEGRADED_WARNING.format(
+                ratio=quality.get("suspect_ratio"), gaps=quality.get("gaps_sec"))
+            _append_log(log_path, "quality", warning)
+            tail = ((tail + chr(10)) if tail else "") + warning
         summary = {
             "run_id": run_id, "status": status, "node": _host(cfg), "job_id": job_id,
             "model_requested": requested_model, "model_used": actual_model,
+            "quality": quality,
             "job_type": job.get("type"), "job_file": str(job_path), "input_file": str(input_path),
             "engine_version": _engine_version(), "preset": preset, "weights": weights,
             "environment": environment,
@@ -788,7 +835,8 @@ def process_next_job(
         job["finished_at"] = summary["finished_at"]
         job["result"] = {"run_id": run_id, "return_code": return_code,
                          "output_paths": output_paths, "run_log": str(log_path),
-                         "run_summary": str(summary_path), "tail_output": tail if status == "failed" else ""}
+                         "run_summary": str(summary_path),
+                         "tail_output": tail if status != "done" else ""}
     except Exception as exc:
         duration = round(time.monotonic() - started, 3)
         reason = f"{type(exc).__name__}: {exc}"
