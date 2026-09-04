@@ -4032,6 +4032,60 @@ def write_asr_transcript_checkpoint(payload: dict, segments: list, language_dete
         log(payload, f"asr_transcript_checkpoint failed (non-fatal): {exc}")
 
 
+def build_run_meta(payload: dict, result: dict, asr_variant: dict,
+                   split_seg: bool, raw_body: dict | None) -> dict:
+    """Метаданные прогона — файл, по которому его читают все остальные.
+
+    Вынесено из ``write_outputs`` отдельной функцией не ради красоты: 04.09
+    перепрогон показал, что блок ``glossary`` лежал только в raw.json, а
+    искали его тут — и очередь заданий, и счётчик доли канона, и требование.
+    Набор ключей, которые читают снаружи, должен быть проверяем тестом, а не
+    глазами по длинному словарю внутри записи файлов.
+    """
+    return {
+        # Статус и quality идут в run-meta первыми строками: очередь заданий
+        # (801-o13) читает приёмку именно отсюда, а не из stdout прогона.
+        "status": result.get("status", "ok"),
+        "quality": result.get("quality", {}),
+        # Подсказка прогона — здесь, а не только в raw.json: признак B детектора
+        # сверяет выход с фактическим initial_prompt, и разбор чужого прогона
+        # начинается с run-meta. Проверено перепрогоном 04.09: блок лежал в
+        # raw.json, а искали его — и требование, и счётчик доли канона — тут.
+        "glossary": result.get("glossary", {}),
+        "source_file": result["source_file"],
+        "processing_input_path": result.get("processing_input_path"),
+        "work_root": result.get("work_root"),
+        "job_work_dir": result.get("job_work_dir"),
+        "engine": result["engine"],
+        "model": result["model"],
+        "quality_preset": result["quality_preset"],
+        "execution_profile": result["execution_profile"],
+        "asr_variant": asr_variant,
+        "language_detected": result["language_detected"],
+        "timestamps": payload.get("timestamps") or "hms",
+        "speaker_labels": payload.get("speaker_labels", payload.get("speaker_mode", "off") != "off"),
+        "warnings": result["warnings"],
+        "diarization": result.get("diarization", {}),
+        "speaker_turns": result.get("speaker_turns", {}),
+        "alignment": result.get("alignment", {}),
+        "speaker_map": result.get("speaker_map", {}),
+        "voiceprint": result.get("voiceprint", {}),
+        "zoom_vtt": result.get("zoom_vtt", {}),
+        "profile_updates": result.get("profile_updates", []),
+        "profile_sync": result.get("profile_sync", {}),
+        "project_registry": result.get("project_registry", {}),
+        "machine_local_store": result.get("machine_local_store", {}),
+        "speaker_clips": result.get("speaker_clips", []),
+        "speaker_review": result.get("speaker_review", {}),
+        "clip_generation": result.get("clip_generation", {}),
+        "environment": payload.get("environment", {}),
+        "split_raw_segments": split_seg,
+        "segments_ref": (raw_body.get("segments_ref") if raw_body else None),
+        "identification": payload.get("identification", {}),
+    }
+
+
+
 def write_outputs(payload: dict, result: dict) -> dict:
     output_dir = pathlib.Path(payload["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -4204,42 +4258,7 @@ def write_outputs(payload: dict, result: dict) -> dict:
     write_text_atomic(raw_path, raw_json_text, encoding="utf-8")
     log(payload, f"write_outputs: raw.json committed ok path={raw_path}", level="debug")
 
-    run_meta = {
-        # Статус и quality идут в run-meta первыми строками: очередь заданий
-        # (801-o13) читает приёмку именно отсюда, а не из stdout прогона.
-        "status": result.get("status", "ok"),
-        "quality": result.get("quality", {}),
-        "source_file": result["source_file"],
-        "processing_input_path": result.get("processing_input_path"),
-        "work_root": result.get("work_root"),
-        "job_work_dir": result.get("job_work_dir"),
-        "engine": result["engine"],
-        "model": result["model"],
-        "quality_preset": result["quality_preset"],
-        "execution_profile": result["execution_profile"],
-        "asr_variant": asr_variant,
-        "language_detected": result["language_detected"],
-        "timestamps": payload.get("timestamps") or "hms",
-        "speaker_labels": payload.get("speaker_labels", payload.get("speaker_mode", "off") != "off"),
-        "warnings": result["warnings"],
-        "diarization": result.get("diarization", {}),
-        "speaker_turns": result.get("speaker_turns", {}),
-        "alignment": result.get("alignment", {}),
-        "speaker_map": result.get("speaker_map", {}),
-        "voiceprint": result.get("voiceprint", {}),
-        "zoom_vtt": result.get("zoom_vtt", {}),
-        "profile_updates": result.get("profile_updates", []),
-        "profile_sync": result.get("profile_sync", {}),
-        "project_registry": result.get("project_registry", {}),
-        "machine_local_store": result.get("machine_local_store", {}),
-        "speaker_clips": result.get("speaker_clips", []),
-        "speaker_review": result.get("speaker_review", {}),
-        "clip_generation": result.get("clip_generation", {}),
-        "environment": payload.get("environment", {}),
-        "split_raw_segments": split_seg,
-        "segments_ref": (raw_body.get("segments_ref") if raw_body else None),
-        "identification": payload.get("identification", {}),
-    }
+    run_meta = build_run_meta(payload, result, asr_variant, split_seg, raw_body)
     log(payload, f"write_outputs: writing run-meta.json path={run_meta_path}", level="debug")
     if compact:
         run_meta_text = json.dumps(run_meta, ensure_ascii=False, separators=(",", ":"))

@@ -74,9 +74,11 @@ def run_prompt(path: pathlib.Path, glossary: dict | None) -> str | None:
 
     Прогоны до 801-o15 текст подсказки не писали — для них она восстанавливается
     из глоссария, и это верно ровно до тех пор, пока глоссарий тот же. Новые
-    прогоны пишут `glossary.initial_prompt` в run-meta, и гадать больше не нужно.
+    прогоны пишут `glossary.initial_prompt` сами; raw.json смотрится следом за
+    run-meta, потому что у прогонов 04.09 блок лёг только туда.
     """
-    for meta_path in sorted(path.parent.glob("*run-meta.json")):
+    candidates = sorted(path.parent.glob("*run-meta.json")) + sorted(path.parent.glob("*raw.json"))
+    for meta_path in candidates:
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):

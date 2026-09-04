@@ -135,3 +135,38 @@ def test_the_rescan_can_be_switched_off_while_the_gate_stays_on(tmp_path, monkey
                           loop_guard={"enabled": False})
     quality = mt.apply_loop_guard(payload, stuck_run(), "audio.wav", tmp_path, [])
     assert quality["rescan"] == "off" and quality["status"] == "degraded"
+
+
+# --- контракт run-meta: то, что читают снаружи ------------------------------
+
+def test_run_meta_carries_what_the_queue_and_the_measurements_read():
+    """04.09: блок glossary лежал только в raw.json, а искали его в run-meta.
+
+    Очередь заданий читает отсюда статус и quality, счётчик доли канона —
+    фактическую подсказку прогона. Ключ, который читают снаружи, не должен
+    зависеть от того, вспомнил ли о нём автор при правке длинного словаря.
+    """
+    result = {
+        "status": "degraded",
+        "quality": {"suspect_ratio": 0.14, "gaps_sec": 36.0, "loops": [{"kind": "prompt_loop"}]},
+        "glossary": {"enabled": True, "decided_by": "project", "prompt_terms": 23,
+                     "initial_prompt": PROMPT, "fingerprint": "abc"},
+        "source_file": "in.m4a", "engine": "faster-whisper", "model": "medium",
+        "quality_preset": "medium", "execution_profile": "default-medium",
+        "language_detected": "ru", "warnings": [],
+    }
+    meta = mt.build_run_meta({"timestamps": "both"}, result,
+                             {"variant_id": "medium-801o15"}, True, None)
+    assert meta["status"] == "degraded"
+    assert meta["quality"]["suspect_ratio"] == 0.14
+    assert meta["glossary"]["initial_prompt"] == PROMPT
+    assert meta["model"] == "medium" and meta["asr_variant"]["variant_id"] == "medium-801o15"
+
+
+def test_run_meta_of_a_run_without_the_guard_stays_readable():
+    """Прогон без блока quality (старый движок, speaker_pass) не должен падать."""
+    result = {"source_file": "in.m4a", "engine": "faster-whisper", "model": "medium",
+              "quality_preset": "medium", "execution_profile": "default-medium",
+              "language_detected": "ru", "warnings": []}
+    meta = mt.build_run_meta({}, result, {"variant_id": "x"}, False, None)
+    assert meta["status"] == "ok" and meta["quality"] == {} and meta["glossary"] == {}
