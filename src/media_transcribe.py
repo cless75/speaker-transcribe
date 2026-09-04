@@ -42,6 +42,12 @@ try:
 except Exception:  # pragma: no cover - module lives alongside this script
     glossary_correct = None
 
+try:
+    # Детектор залипания (801-o15): чистые функции над сегментами, без модели.
+    import loop_guard
+except Exception:  # pragma: no cover - module lives alongside this script
+    loop_guard = None
+
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".mpga", ".mpeg"}
 VOICEPRINT_SCHEMA_VERSION = "v3"
@@ -3488,14 +3494,172 @@ def apply_glossary_to_kwargs(payload: dict, kwargs: dict) -> dict:
 
 
 def build_glossary_meta(payload: dict) -> dict:
-    """Наблюдаемость глоссария в метаданных прогона: источник и объём подсказки."""
+    """Наблюдаемость глоссария в метаданных прогона: источник и объём подсказки.
+
+    ``initial_prompt`` записывается целиком, а не только отпечатком: признак B
+    детектора (801-o15) сверяет выход с **фактической** подсказкой прогона, и без
+    её текста разбор чужого прогона задним числом невозможен — отпечаток говорит
+    только, что подсказки были разные, а не какими они были.
+    """
     info = resolve_glossary_prompt(payload)
     return {
         "enabled": bool(info.get("initial_prompt") or info.get("hotwords")),
         "decided_by": info.get("source"),
         "prompt_terms": info.get("prompt_terms"),
+        "initial_prompt": info.get("initial_prompt"),
         "fingerprint": info.get("fingerprint"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Залипание модели: детектор, повторный проход зоны, гейт покрытия (801-o15)
+# ---------------------------------------------------------------------------
+
+
+def resolve_loop_guard_config(payload: dict) -> dict:
+    """Пороги детектора и гейта: умолчания модуля поверх блока ``loop_guard``."""
+    if loop_guard is None:
+        return {}
+    return loop_guard.resolve_config(payload)
+
+
+def loop_guard_enabled(payload: dict) -> bool:
+    """Выключается только явно: ``loop_guard.enabled = false`` в конфиге узла."""
+    block = payload.get("loop_guard")
+    if isinstance(block, dict) and block.get("enabled") is not None:
+        return bool(block["enabled"])
+    return True
+
+
+def cut_audio_span(audio_path: str, start: float, end: float, payload: dict,
+                   job_root: pathlib.Path, name: str) -> str:
+    """Вырезать участок записи в отдельный wav для повторного прохода."""
+    ffmpeg_bin = payload.get("ffmpeg_bin") or "ffmpeg"
+    out_file = pathlib.Path(stage_dir(job_root, "loop-guard")) / f"{name}.wav"
+    subprocess.run(
+        [
+            ffmpeg_bin, "-y",
+            "-ss", f"{start:.3f}",
+            "-t", f"{max(0.2, end - start):.3f}",
+            "-i", audio_path,
+            "-ac", "1", "-ar", "16000",
+            str(out_file),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return str(out_file)
+
+
+def rescan_zone(payload: dict, zone: dict, audio_path: str, job_root: pathlib.Path,
+                context: dict, config: dict) -> list[dict]:
+    """Переслушать зону тем же прогоном, но с разомкнутой обратной связью.
+
+    ``condition_on_previous_text=False`` — вывод модели перестаёт быть её входом;
+    ``initial_prompt`` не передаётся вовсе — именно он был аттрактором в трёх
+    зонах из четырёх. ``hotwords`` остаются: они не подаются модели как текст и
+    петли не порождают (801-o11 не отменяется).
+    """
+    pad = float(config.get("rescan_pad_sec", 5.0))
+    start = max(0.0, float(zone["start"]) - pad)
+    end = float(zone["end"]) + pad
+    duration = context.get("audio_duration")
+    if duration:
+        end = min(end, float(duration))
+    if end - start <= 0.2:
+        return []
+    kwargs = dict(context.get("kwargs") or {})
+    kwargs.pop("initial_prompt", None)
+    kwargs["condition_on_previous_text"] = False
+    name = f"zone_{int(round(start))}_{int(round(end))}"
+    job = {
+        "chunk_index": 0,
+        "chunk_start": round(start, 3),
+        "chunk_overlap_sec": 0,
+        "chunk_duration": round(end - start, 3),
+        "is_last_chunk": True,
+        "word_timestamps": bool(kwargs.get("word_timestamps")),
+        "audio_path": cut_audio_span(audio_path, start, end, payload, job_root, name),
+        "runtime_device": context.get("runtime_device", "cpu"),
+        "runtime_compute_type": context.get("runtime_compute_type", "int8"),
+        "model_path": context.get("model_path"),
+        "model_root": context.get("model_root"),
+        "cpu_threads": context.get("cpu_threads"),
+        "kwargs": kwargs,
+    }
+    # Модель этого же прогона припаркована в keepalive — переиспользуем её вместо
+    # повторной инициализации CUDA (та же причина, по которой её не удаляют).
+    model = _WHISPER_MODEL_KEEPALIVE[-1] if _WHISPER_MODEL_KEEPALIVE else None
+    result = transcribe_chunk_worker(job, model=model)
+    fresh = [
+        seg for seg in result.get("segments", [])
+        if float(seg["end"]) > float(zone["start"]) and float(seg["start"]) < float(zone["end"])
+    ]
+    for seg in fresh:
+        seg["recovered_by"] = "loop_guard_rescan"
+    return fresh
+
+
+def apply_loop_guard(payload: dict, collected: list[dict], audio_path: str,
+                     job_root: pathlib.Path, warnings: list[str]) -> dict:
+    """Найти зоны залипания, переслушать их и собрать блок ``quality``.
+
+    Работает после слияния чанков и **до** диаризации: спикеров незачем
+    раскладывать по строкам, которые сейчас будут заменены.
+
+    Зона, которую повторный проход вернул чистой, подставляется вместо прежней;
+    зона, которая залипла снова, остаётся помеченной, а текст в ней стирается.
+    Догадки не подставляются: пусть будет видно, что здесь неизвестно, а не мусор
+    (801-o15, граница «не правка текста внутри зоны»).
+    """
+    if loop_guard is None or not collected:
+        return {}
+    config = resolve_loop_guard_config(payload)
+    prompt = resolve_glossary_prompt(payload).get("initial_prompt")
+    zones = loop_guard.detect_zones(collected, prompt, config)
+    context = payload.get("_rescan_context") if loop_guard_enabled(payload) else None
+    gated = [z for z in zones if z["kind"] in loop_guard.GATED_KINDS]
+    if gated:
+        log(payload, f"phase=loop_guard zones={len(gated)} "
+                     f"kinds={','.join(sorted({z['kind'] for z in gated}))}")
+    for zone in sorted(gated, key=lambda z: z["segments"][0], reverse=True):
+        first, last = zone["segments"]
+        zone["recovered"] = False
+        if not context:
+            continue
+        try:
+            fresh = rescan_zone(payload, zone, audio_path, job_root, context, config)
+        except Exception as exc:
+            warnings.append(f"loop_guard_rescan_failed at {zone['start']}: {exc}")
+            log(payload, f"phase=loop_guard rescan_failed zone={zone['start']}-{zone['end']}: {exc}")
+            fresh = []
+        if fresh and not loop_guard.looks_stuck(fresh, prompt, config):
+            collected[first:last + 1] = fresh
+            zone["recovered"] = True
+            log(payload, f"phase=loop_guard recovered zone={zone['start']}-{zone['end']} "
+                         f"segments={len(fresh)}")
+            continue
+        for seg in collected[first:last + 1]:
+            seg["text"] = ""
+            seg["quality_flag"] = zone["kind"]
+        log(payload, f"phase=loop_guard blanked zone={zone['start']}-{zone['end']} "
+                     f"kind={zone['kind']} (повторный проход залип снова)")
+    collected.sort(key=lambda item: (item["start"], item["end"]))
+    duration = float(collected[-1]["end"]) if collected else 0.0
+    quality = loop_guard.quality_block(collected, zones, duration, config)
+    quality["rescan"] = "off" if not context else "on"
+    status = loop_guard.gate_status(quality, config)
+    quality["status"] = status
+    if status != "ok":
+        warnings.append(
+            f"quality_degraded: suspect_ratio={quality['suspect_ratio']} "
+            f"gaps_sec={quality['gaps_sec']}"
+        )
+    log(payload, f"phase=loop_guard done status={status} "
+                 f"suspect_sec={quality['suspect_sec']} ratio={quality['suspect_ratio']} "
+                 f"gaps_sec={quality['gaps_sec']}")
+    return quality
 
 
 def word_timestamps_decision(payload: dict) -> tuple[bool, str]:
@@ -4041,6 +4205,10 @@ def write_outputs(payload: dict, result: dict) -> dict:
     log(payload, f"write_outputs: raw.json committed ok path={raw_path}", level="debug")
 
     run_meta = {
+        # Статус и quality идут в run-meta первыми строками: очередь заданий
+        # (801-o13) читает приёмку именно отсюда, а не из stdout прогона.
+        "status": result.get("status", "ok"),
+        "quality": result.get("quality", {}),
         "source_file": result["source_file"],
         "processing_input_path": result.get("processing_input_path"),
         "work_root": result.get("work_root"),
@@ -4583,6 +4751,18 @@ def main() -> None:
             if payload.get("language_hint"):
                 kwargs["language"] = payload["language_hint"]
             max_parallel, cpu_threads = choose_parallelism(payload, runtime, len(chunks))
+            # Всё, что нужно повторному проходу зоны (801-o15): те же веса, тот же
+            # рантайм, те же kwargs. Собирается здесь, потому что ниже, после
+            # слияния чанков, ни kwargs, ни model_path уже не видны.
+            payload["_rescan_context"] = {
+                "kwargs": dict(kwargs),
+                "model_path": model_path,
+                "model_root": payload.get("model_root"),
+                "runtime_device": runtime.get("device", "cpu"),
+                "runtime_compute_type": runtime.get("compute_type", "int8"),
+                "cpu_threads": cpu_threads if runtime.get("device", "cpu") == "cpu" else None,
+                "audio_duration": probe_duration_seconds(audio_path, payload.get("ffprobe_bin") or "ffprobe"),
+            }
             last_index = max((c["index"] for c in chunks), default=0)
             jobs = [
                 {
@@ -4747,6 +4927,15 @@ def main() -> None:
         log(payload, "phase=sort_collected begin", level="debug")
         collected.sort(key=lambda item: (item["start"], item["end"]))
         log(payload, "phase=sort_collected done", level="debug")
+        # Детектор залипания и повторный проход зоны — после слияния чанков и до
+        # диаризации: раскладывать спикеров по строкам, которые сейчас будут
+        # заменены или стёрты, незачем (801-o15).
+        try:
+            quality_meta = apply_loop_guard(payload, collected, audio_path, job_root, warnings)
+        except Exception as exc:
+            quality_meta = {}
+            warnings.append(f"loop_guard_stage_failed: {exc}")
+            log(payload, f"phase=loop_guard error: {exc}")
         if payload.get("execution_mode") == "speaker_pass":
             log(
                 payload,
@@ -5227,7 +5416,9 @@ def main() -> None:
         log(payload, "phase=build_result begin", level="debug")
         duration = round(collected[-1]["end"], 3) if collected else 0.0
         result = {
-            "status": "ok",
+            # Прогон, потерявший минуты речи, больше не называется ok: именно
+            # молчаливое ok оставило потерю 02.09 незамеченной сутки (801-o15).
+            "status": quality_meta.get("status") or "ok",
             "engine": "faster-whisper",
             "source_file": str(pathlib.Path(payload.get("original_input_path") or payload["input_path"]).resolve()),
             "processing_input_path": str(pathlib.Path(payload["input_path"]).resolve()),
@@ -5271,6 +5462,7 @@ def main() -> None:
             "clip_generation": clip_generation_meta,
             "word_timestamps": build_word_timestamps_meta(payload, collected),
             "glossary": build_glossary_meta(payload),
+            "quality": quality_meta,
             "segments": collected,
         }
         result["speaker_review"] = build_speaker_review(result)

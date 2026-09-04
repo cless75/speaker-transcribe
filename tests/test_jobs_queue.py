@@ -831,3 +831,82 @@ def test_boot_id_is_stable_within_a_run():
     a, b = watcher.system_boot_id(), watcher.system_boot_id()
     assert a == b and a and a.endswith("Z")
 
+
+
+# --- гейт покрытия: прогон с degraded не принимается молча (801-o15) ---------
+
+def run_with_quality(hub: pathlib.Path, job: dict, run_meta: dict, *, return_code: int = 0):
+    """Прогон, в котором движок записывает в run-meta статус гейта покрытия."""
+    prepare(hub, job)
+
+    def execute(command, log_path, tail_lines):
+        jobs_queue._append_log(log_path, "worker", "FIRST_CHUNK")
+        out = pathlib.Path(command[command.index("--output-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "result-transcript.md").write_text("ok", encoding="utf-8")
+        write_json(out / "result-run-meta.json", run_meta)
+        return return_code, "worker tail"
+
+    summary = jobs_queue.process_next_job(
+        cfg_for(hub), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment, cli_executor=execute)
+    return summary
+
+
+DEGRADED_META = {
+    "model": "medium", "status": "degraded",
+    "quality": {"suspect_sec": 418.3, "suspect_ratio": 0.144, "gaps_sec": 36.0,
+                "loops": [{"start": 1443.9, "end": 1575.9, "kind": "prompt_loop"}]},
+}
+
+
+def test_degraded_run_is_not_marked_accepted(tmp_path):
+    """15 потерянных минут не имеют права закончиться словом done."""
+    summary = run_with_quality(tmp_path, base_job(), DEGRADED_META)
+    assert summary["status"] == "degraded"
+    job = json.loads((tmp_path / "_jobs" / f"{base_job()['job_id']}.json").read_text(encoding="utf-8"))
+    assert job["status"] == "degraded"
+    assert summary["quality"]["suspect_ratio"] == 0.144
+
+
+def test_degraded_run_writes_a_warning_into_the_run_journal(tmp_path):
+    summary = run_with_quality(tmp_path, base_job(), DEGRADED_META)
+    journal = pathlib.Path(summary["log_path"]).read_text(encoding="utf-8")
+    assert "stage=quality" in journal and "status=degraded" in journal
+    assert "suspect_ratio=0.144" in journal and "gaps_sec=36.0" in journal
+    # Причина видна и в задании, а не только в журнале на Хабе.
+    assert "degraded" in summary["tail_output"]
+
+
+def test_a_clean_run_still_finishes_as_done(tmp_path):
+    meta = {"model": "medium", "status": "ok",
+            "quality": {"suspect_sec": 0.0, "suspect_ratio": 0.0, "gaps_sec": 0.0, "loops": []}}
+    summary = run_with_quality(tmp_path, base_job(), meta)
+    assert summary["status"] == "done" and summary["quality"]["loops"] == []
+
+
+def test_run_meta_without_the_quality_block_is_not_called_degraded(tmp_path):
+    """Узел со старым движком не должен объявлять свои прогоны деградировавшими."""
+    summary = run_with_quality(tmp_path, base_job(), {"model": "medium"})
+    assert summary["status"] == "done" and summary["quality"] == {}
+
+
+def test_failed_run_stays_failed_and_the_gate_does_not_touch_it(tmp_path):
+    """Поведение при failed не меняется: гейт смотрит только на done."""
+    summary = run_with_quality(tmp_path, base_job(), DEGRADED_META, return_code=1)
+    assert summary["status"] == "failed"
+    assert "worker tail" in summary["tail_output"]
+
+
+def test_a_degraded_job_is_not_taken_again_and_the_sweep_says_so(tmp_path):
+    """Повтор сжёг бы GPU на том же материале: задание ждёт человека."""
+    run_with_quality(tmp_path, base_job(), DEGRADED_META)
+    said = []
+    again = jobs_queue.process_next_job(
+        cfg_for(tmp_path), pathlib.Path("node.json"),
+        claim_job=watcher.try_claim_file, retire_job=watcher.retire_claim,
+        heartbeat_factory=FakeHeartbeat, preflight=environment,
+        cli_executor=lambda *a: (0, ""), log=said.append)
+    assert again is None
+    assert any("1 degraded" in line for line in said), said
