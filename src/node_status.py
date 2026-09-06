@@ -239,8 +239,14 @@ def read_history(status_dir: pathlib.Path | None, host: str) -> list[dict]:
 
 
 def summarize_day(events: list[dict], day: dt.date) -> dict:
-    """Files finished on ``day`` with media seconds vs machine seconds."""
-    done, media_sec, proc_sec, frames = 0, 0.0, 0.0, 0
+    """Files finished on ``day`` with media seconds vs machine seconds.
+
+    ``degraded`` counts the files whose quality gate did not say ``ok``. A run that
+    lost minutes of speech still finishes as ``file_done``; without this counter the
+    node reports a clean day and the loss is found only by opening run-meta by hand
+    (801-a3, `org/quality-flag-travels-from-run-meta-to-queue`).
+    """
+    done, media_sec, proc_sec, frames, degraded = 0, 0.0, 0.0, 0, 0
     projects: dict[str, int] = {}
     for event in events:
         if event.get("type") != "file_done":
@@ -252,10 +258,12 @@ def summarize_day(events: list[dict], day: dt.date) -> dict:
         media_sec += float(event.get("media_sec") or 0)
         proc_sec += float(event.get("proc_sec") or 0)
         frames += int(event.get("frames") or 0)
+        if (event.get("quality") or {}).get("status") == "degraded":
+            degraded += 1
         pid = str(event.get("pid") or "?")
         projects[pid] = projects.get(pid, 0) + 1
     return {"done": done, "media_sec": media_sec, "proc_sec": proc_sec,
-            "frames": frames, "projects": projects}
+            "frames": frames, "degraded": degraded, "projects": projects}
 
 
 def detect_incident(events: list[dict]) -> dict | None:
@@ -511,6 +519,9 @@ def render_html(snap: dict) -> str:
     proj_line = ", ".join(f"{k} × {v}" for k, v in sorted(proj.items(), key=lambda kv: -kv[1])) or "—"
     media, proc = today.get("media_sec") or 0, today.get("proc_sec") or 0
     ratio = f"{proc / media:.1f}× к длительности" if media > 0 and proc > 0 else "—"
+    # Прогон с потерянными минутами заканчивается как обычный file_done: без этой
+    # цифры страница узла показывает чистый день, а потеря живёт только в run-meta.
+    degraded = today.get("degraded") or 0
     parts.append(f"""<div class="card">
 <h2>Сделано за сегодня</h2>
 <div class="grid">
@@ -520,6 +531,7 @@ def render_html(snap: dict) -> str:
 <div class="kv"><span class="k">Кадров слайдов</span><span class="v big">{_esc(today.get('frames', 0))}</span></div>
 </div>
 <div class="grid" style="margin-top:14px">
+<div class="kv"><span class="k">С деградацией</span><span class="v big" style="color:{'var(--warn)' if degraded else 'inherit'}">{_esc(degraded)}</span></div>
 <div class="kv"><span class="k">Скорость</span><span class="v">{_esc(ratio)}</span></div>
 <div class="kv"><span class="k">По проектам</span><span class="v">{_esc(proj_line)}</span></div>
 </div>

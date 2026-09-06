@@ -1234,12 +1234,18 @@ def existing_transcript(audio: pathlib.Path,
 
 def caught_up_state(transcript: pathlib.Path, pid: str | None, host_label: str) -> dict:
     mtime = dt.datetime.fromtimestamp(transcript.stat().st_mtime).isoformat(timespec="seconds")
-    return {
+    state = {
         "status": "asr-done", "pid": pid, "attempts": 1,
         "started_at": mtime, "finished_at": mtime,
         "transcript_path": str(transcript), "last_error": None,
         "host": f"{host_label}-CATCHUP", "duration_sec": None, "caught_up": True,
     }
+    # Adopting a finished run means adopting its verdict too: a degraded transcript
+    # must not become clean by the route it entered the state machine.
+    quality = quality_summary(run_meta_beside(transcript))
+    if quality:
+        state["quality"] = quality
+    return state
 
 
 def queued_state(pid: str | None, host_label: str) -> dict:
@@ -2201,6 +2207,7 @@ def _write_project_index(hub_root: pathlib.Path, pid: str, cfg: dict) -> None:
     except OSError:
         return
     done, pending, other = [], [], []
+    degraded = 0
     for sf in sidecars:
         try:
             st = json.loads(sf.read_text(encoding="utf-8"))
@@ -2209,9 +2216,12 @@ def _write_project_index(hub_root: pathlib.Path, pid: str, cfg: dict) -> None:
         name = sf.name[: -len(".state.json")]
         status = st.get("status", "?")
         sid = st.get("session_id", "") or ""
-        row = f"| `{name}` | {status} | {sid} |"
+        quality = quality_cell(st)
+        row = f"| `{name}` | {status} | {quality} | {sid} |"
         if status == "asr-done":
             done.append(row)
+            if (st.get("quality") or {}).get("status") == "degraded":
+                degraded += 1
         elif status in ("queued", "in-progress"):
             pending.append(row)
         else:
@@ -2219,11 +2229,15 @@ def _write_project_index(hub_root: pathlib.Path, pid: str, cfg: dict) -> None:
 
     def section(title, rows):
         uniq = sorted(set(rows))
-        return [f"## {title} ({len(uniq)})", "", "| Файл | Статус | SessionId |",
-                "|---|---|---|", *(uniq or ["| — | — | — |"]), ""]
+        return [f"## {title} ({len(uniq)})", "",
+                "| Файл | Статус | Качество | SessionId |",
+                "|---|---|---|---|", *(uniq or ["| — | — | — | — |"]), ""]
 
+    # «Обработано» без этой оговорки читается как «обработано хорошо»: прогон,
+    # потерявший минуты речи, стоит в той же строке, что и чистый (801-a3).
+    degraded_note = f" · из них с деградацией: {degraded}" if degraded else ""
     lines = [f"# {pid} — индекс сессий", "",
-             f"_Авто-обновление watcher'ом. Обработано: {len(set(done))} · "
+             f"_Авто-обновление watcher'ом. Обработано: {len(set(done))}{degraded_note} · "
              f"в очереди: {len(set(pending))} · прочее: {len(set(other))}._", ""]
     lines += section("Обработанные (asr-done)", done)
     lines += section("Необработанные (queued / in-progress)", pending)
@@ -2250,6 +2264,67 @@ def _parse_worker_result(stdout: str) -> dict | None:
         if isinstance(obj, dict) and "status" in obj:
             result = obj
     return result
+
+
+def run_meta_beside(transcript: pathlib.Path | None) -> dict | None:
+    """The ``*-run-meta.json`` written next to ``transcript``, or None."""
+    if not transcript:
+        return None
+    meta_path = transcript.with_name(
+        transcript.name.replace("-transcript.md", "-run-meta.json"))
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def quality_summary(meta: dict | None) -> dict | None:
+    """Compact quality verdict for the file state: the gate's status plus the numbers
+    behind it. None when the run carries no quality block at all (older runs).
+
+    The ``loops``/``warnings`` arrays stay in run-meta.json — this is a summary, not a
+    second copy of it (`org/quality-flag-travels-from-run-meta-to-queue`). Without it
+    a degraded run reaches every downstream reader as a plain ``asr-done``: 05.09 a
+    meeting lost 48 minutes of punctuation and 72s of speech, and state.json,
+    _sessions-index.md and _status all read "done" (801-a3).
+    """
+    meta = meta or {}
+    quality = meta.get("quality")
+    if not isinstance(quality, dict):
+        return None
+    status = meta.get("status") or quality.get("status")
+    summary = {
+        "status": status,
+        "suspect_sec": quality.get("suspect_sec"),
+        "suspect_ratio": quality.get("suspect_ratio"),
+        "gaps_sec": quality.get("gaps_sec"),
+        "loops": len(quality.get("loops") or []),
+        "warnings": len(quality.get("warnings") or []),
+        "rescan": quality.get("rescan"),
+        "model": meta.get("model") or meta.get("quality_preset"),
+    }
+    return {k: v for k, v in summary.items() if v is not None}
+
+
+def quality_cell(state: dict) -> str:
+    """One-line quality verdict for the project index: status + why, or ``—``."""
+    q = state.get("quality") or {}
+    status = q.get("status")
+    if not status:
+        return "—"
+    if status != "degraded":
+        return status
+    reasons = []
+    gaps = float(q.get("gaps_sec") or 0)
+    ratio = float(q.get("suspect_ratio") or 0)
+    if gaps > 0:
+        reasons.append(f"пропуски {gaps:.0f}s")
+    if ratio > 0:
+        reasons.append(f"залипание {ratio * 100:.1f}%")
+    if q.get("warnings"):
+        reasons.append(f"предупреждений {q['warnings']}")
+    return "degraded" + (" · " + " · ".join(reasons) if reasons else "")
 
 
 def _fmt_dur(sec: float) -> str:
@@ -2500,6 +2575,9 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
             state["started_at"] = state.get("started_at") or now_iso()
             state["finished_at"] = now_iso()
             state["reused_transcript"] = True
+            _quality = quality_summary(run_meta_beside(existing))
+            if _quality:
+                state["quality"] = _quality
             clear_retry_gate(state)
             atomic_write_json(state_file, state)
             retire_claim(audio, cfg)
@@ -2573,6 +2651,13 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
         state["transcript_path"] = str(transcript)
         state["last_error"] = None
         state["finished_at"] = now_iso()
+        # The gate's verdict travels with the state, not only with run-meta.json:
+        # every reader downstream (project index, node status, vault inbox queue)
+        # reads the sidecar, and a silent "asr-done" is what hid the loss (801-a3).
+        _quality = quality_summary(result_meta) or quality_summary(
+            run_meta_beside(transcript))
+        if _quality:
+            state["quality"] = _quality
         clear_retry_gate(state)
         if cfg.get("enable_multi_machine"):
             state["processed_by_host"] = host_label
@@ -2604,6 +2689,8 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
             "frames": len(_slides.get("slides") or []),
             "speaker_source": ((_meta.get("diarization") or {}).get("source")),
             "session_id": state.get("session_id"),
+            # summarize_day counts degraded runs off this field
+            "quality": state.get("quality"),
         })
         publish_status(cfg, "running", note=f"завершён {audio.name}")
         return
