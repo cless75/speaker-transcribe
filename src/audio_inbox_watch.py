@@ -64,8 +64,14 @@ DEFAULT_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "config" / "no
 
 # Default watcher knobs — overridable from the node config.
 DEFAULT_SCAN_EXTENSIONS = [".m4a", ".mp3", ".wav", ".oga", ".mp4", ".mov", ".webm", ".m4v"]
+# ``process``/``delivery`` — зеркало тяжёлого по канону Hub (ADR 258-a): туда кладут
+# исходники и выдачу, в том числе медиа с нашими расширениями. Это хранилище, а не вход.
+# Пока их не пропускали, перенос 574 МБ в ``Hub/PE45/process`` 18.09.2026 вернул зеркало
+# во вход: прогон LENOVO-AMD раздулся с 16 с до часа и дважды упал с OSError 22 на
+# dataless-поддереве Drive, а дроп в ``_PE45_inbox`` так и не был взят.
 DEFAULT_SKIP_FOLDERS = ["_failed", "_processed", "_archive", "sessions", "Audio Record",
-                        "Transcripts", "profiles", "Speakers", "recordings", "pipeline"]
+                        "Transcripts", "profiles", "Speakers", "recordings", "pipeline",
+                        "process", "delivery"]
 DEFAULT_SKIP_FOLDER_PREFIXES = ["_", "."]
 DEFAULT_SKIP_FILENAME_SUFFIXES = [
     "-transcript.md", "-transcript.txt", "_original.txt",
