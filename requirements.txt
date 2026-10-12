@@ -10,6 +10,15 @@
 #   pip install -r requirements.txt
 
 faster-whisper==1.2.1
+# PyAV намеренно ниже 18. faster-whisper 1.2.1 зовёт
+#   av.open(input_file, mode="r", metadata_errors="ignore")
+# а в PyAV 18 этот параметр удалён. С свежим av (19.0.1) ASR-путь падает на каждом
+# чанке: "open() got an unexpected keyword argument 'metadata_errors'" — и это тихо,
+# потому что диаризация при этом отрабатывает и итог выглядит «почти нормально»,
+# только segments=0 и пустой транскрипт. Узел на Windows спасло везение резолвера
+# (встал 17.0.0); на Python 3.14 pip берёт 19.0.1 и ломает ASR.
+# Колесо av 17 — abi3 (cp311-abi3), ставится на 3.11–3.14 одинаково.
+av<18
 ctranslate2==4.7.1
 pyannote.audio==4.0.4
 huggingface_hub<1.0
