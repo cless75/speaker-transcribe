@@ -590,7 +590,23 @@ def _scan_one_source(root: pathlib.Path, cfg: dict, *, recursive: bool) -> list[
     skip_suffixes = cfg.get("skip_filename_suffixes", DEFAULT_SKIP_FILENAME_SUFFIXES)
     skip_patterns = cfg.get("skip_filename_patterns", DEFAULT_SKIP_FILENAME_PATTERNS)
     found: list[pathlib.Path] = []
-    pattern = "**/*" if recursive else "*"
+
+    def candidates():
+        if not recursive:
+            yield from root.iterdir()
+            return
+        # glob("**/*") enters excluded subtrees before is_skipped_path can filter
+        # their files. On a remote FUSE mount that still costs a cloud listing for
+        # every sessions/process/delivery directory, even when none is actionable.
+        def onerror(exc):
+            log(f"scan interrupted on {exc.filename}: {exc}")
+
+        for base, dirs, files in os.walk(root, onerror=onerror):
+            dirs[:] = [name for name in dirs if name not in skip_folders and
+                       not any(prefix and name.startswith(prefix)
+                               for prefix in skip_prefixes)]
+            for name in files:
+                yield pathlib.Path(base) / name
     # macOS Google Drive (File Provider) can wedge a recursive listdir on a dataless
     # subtree with NO Errno 60 and no timeout of its own (observed: a full-Hub scan
     # hung 3h at 0% CPU). The per-entry OSError guard below only helps once the OS
@@ -601,7 +617,7 @@ def _scan_one_source(root: pathlib.Path, cfg: dict, *, recursive: bool) -> list[
     scan_timeout = int(cfg.get("scan_op_timeout_seconds", 90))
     try:
         with _cloud_watchdog(scan_timeout, f"scan {root.name}"):
-            for path in root.glob(pattern):
+            for path in candidates():
                 try:
                     if not path.is_file():
                         continue
@@ -2227,9 +2243,18 @@ def _write_project_index(hub_root: pathlib.Path, pid: str, cfg: dict) -> None:
     proj = hub_root / pid
     if not _safe_is_dir_bool(proj):
         return
+    # rglob traverses sessions/ before filtering results: a huge output tree
+    # generates remote listings despite being explicitly excluded from the index.
+    sidecars = []
+
+    def fail_on_error(exc):
+        raise exc  # do not overwrite an existing index with a partial cloud listing
+
     try:
-        sidecars = [p for p in proj.rglob("*.state.json")
-                    if "sessions" not in p.relative_to(proj).parts]
+        for base, dirs, files in os.walk(proj, onerror=fail_on_error):
+            dirs[:] = [name for name in dirs if name != "sessions"]
+            sidecars.extend(pathlib.Path(base) / name for name in files
+                            if name.endswith(".state.json"))
     except OSError:
         return
     done, pending, other = [], [], []
@@ -2931,6 +2956,7 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
         start_time = time.time()
         budget_sec = (time_budget_minutes * 60) if time_budget_minutes else None
         processed = 0
+        pickup_aborted = False
         # Process each file at most once per sweep. A transient defer or a retry rolls the
         # file back to `queued`; without this guard the re-scan re-picks it immediately, so
         # a persistently-failing input (corrupt / still-syncing) loops forever within one
@@ -3024,17 +3050,20 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 log(f"{exc} — CloudStorage wedged during pickup; aborting sweep "
                     f"(scheduler/launchd will retry next tick). If this recurs, make "
                     f"the Hub available-offline on this node.")
+                pickup_aborted = True
                 break
             except AsrEnvironmentError as exc:
                 log(f"ASR environment error — aborting sweep; no files quarantined. "
                     f"Fix the ASR env (transcribe_python/venv/deps), then re-run. Detail: {exc}")
+                pickup_aborted = True
                 break
             processed += 1
         # OPT-IN tidy: relocate asr-done sources into _processed/ (runs before the index
         # refresh so the index is written from the sidecars in their final location).
-        _sweep_processed_moves(cfg, mapper)
+        if not pickup_aborted:
+            _sweep_processed_moves(cfg, mapper)
         # Refresh per-project session index (processed vs pending) for the hub.
-        if cfg.get("write_session_index", True) and cfg.get("hub_root"):
+        if not pickup_aborted and cfg.get("write_session_index", True) and cfg.get("hub_root"):
             try:
                 hub_root = pathlib.Path(
                     resolve_template(cfg["hub_root"], base_placeholder_ctx(cfg))).expanduser()
