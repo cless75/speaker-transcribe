@@ -467,7 +467,7 @@ def extract_audio_if_needed(payload: dict, warnings: list[str], job_root: pathli
     if suffix not in VIDEO_EXTENSIONS and suffix == ".wav":
         if needs_ascii_copy:
             temp_audio = extract_root / "input.wav"
-            shutil.copy2(input_path, temp_audio)
+            copy2_tolerant(input_path, temp_audio)
             warnings.append("unicode_path_copied_to_ascii_temp")
             return str(temp_audio)
         return str(input_path)
@@ -484,7 +484,7 @@ def extract_audio_if_needed(payload: dict, warnings: list[str], job_root: pathli
             return str(temp_audio)
         if needs_ascii_copy:
             temp_audio = extract_root / f"input{suffix}"
-            shutil.copy2(input_path, temp_audio)
+            copy2_tolerant(input_path, temp_audio)
             warnings.append("unicode_path_copied_to_ascii_temp")
             return str(temp_audio)
         warnings.append("ffmpeg_not_found_audio_passed_directly")
@@ -1239,6 +1239,34 @@ def _stage_copy_with_retry(src: pathlib.Path, dst: pathlib.Path, timeout_sec: in
             except OSError:
                 pass
             time.sleep(pause)
+
+
+def copy2_tolerant(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """``shutil.copy2`` that survives cloud/FUSE mounts with no xattr support.
+
+    ``shutil.copy2`` -> ``copystat`` -> ``_copyxattr`` reads the source's
+    ``os.listxattr`` and re-raises anything but ``ENOTSUP``/``ENODATA``. On an rclone
+    mount of Google Drive the kernel replies ``EIO`` (errno 5) — copy2 then dies with
+    ``OSError [Errno 5] Input/output error`` even though the payload already landed.
+    This variant copies data + mode + times and treats an xattr-level failure as
+    non-fatal (the artifact itself is complete; only attrs are lost).
+    """
+    shutil.copyfile(src, dst)
+    try:
+        shutil.copystat(src, dst)
+    except OSError as exc:
+        if exc.errno not in (errno.EIO, errno.ENOTSUP, errno.EOPNOTSUPP,
+                             errno.ENODATA, errno.EPERM, errno.ENOSYS):
+            raise
+        # xattr unsupported on this mount — degrade to mode + times without xattr.
+        try:
+            shutil.copymode(src, dst)
+        except OSError:
+            pass
+        try:
+            shutil.copytime(src, dst)
+        except OSError:
+            pass
 
 
 def stage_ascii_input(payload: dict, warnings: list[str], job_root: pathlib.Path) -> None:
@@ -3277,7 +3305,7 @@ def write_chunk_asr_artifacts_to_output(payload: dict, job: dict, chunk_result: 
     wav_dst = output_dir / f"{base_name}-asr-chunk-{idx:03d}.wav"
     json_dst = output_dir / f"{base_name}-asr-chunk-{idx:03d}.json"
     try:
-        shutil.copy2(job["audio_path"], wav_dst)
+        copy2_tolerant(pathlib.Path(job["audio_path"]), wav_dst)
     except Exception as exc:
         log(payload, f"asr_chunk_artifacts copy wav failed chunk={idx}: {exc}")
     chunk_doc = {
@@ -4282,7 +4310,7 @@ def write_outputs(payload: dict, result: dict) -> dict:
     structured_raw_body = dict(raw_body) if isinstance(raw_body, dict) else None
     if split_seg:
         structured_jsonl_path = asr_dir / f"{asr_variant_id}-segments.jsonl"
-        shutil.copy2(jsonl_path, structured_jsonl_path)
+        copy2_tolerant(jsonl_path, structured_jsonl_path)
         structured_outputs["asr_segments_jsonl"] = str(structured_jsonl_path)
         if structured_raw_body is not None:
             structured_raw_body["segments_ref"] = {
@@ -4307,21 +4335,21 @@ def write_outputs(payload: dict, result: dict) -> dict:
 
     if "md" in want and md_path.exists():
         structured_md_path = asr_dir / f"{asr_variant_id}-transcript.md"
-        shutil.copy2(md_path, structured_md_path)
+        copy2_tolerant(md_path, structured_md_path)
         structured_outputs["asr_transcript_md"] = str(structured_md_path)
     else:
         structured_outputs["asr_transcript_md"] = None
 
     if "vtt" in want and vtt_path.exists():
         structured_vtt_path = asr_dir / f"{asr_variant_id}-segments.vtt"
-        shutil.copy2(vtt_path, structured_vtt_path)
+        copy2_tolerant(vtt_path, structured_vtt_path)
         structured_outputs["asr_segments_vtt"] = str(structured_vtt_path)
     else:
         structured_outputs["asr_segments_vtt"] = None
 
     if txt_written and txt_path.exists():
         structured_txt_path = asr_dir / f"{asr_variant_id}-transcript.txt"
-        shutil.copy2(txt_path, structured_txt_path)
+        copy2_tolerant(txt_path, structured_txt_path)
         structured_outputs["asr_transcript_txt"] = str(structured_txt_path)
     else:
         structured_outputs["asr_transcript_txt"] = None
@@ -4329,7 +4357,7 @@ def write_outputs(payload: dict, result: dict) -> dict:
     zoom_vtt_path = str(payload.get("zoom_vtt_path") or "").strip()
     if zoom_vtt_path:
         copied_source_vtt = source_dir / "source.vtt"
-        shutil.copy2(pathlib.Path(zoom_vtt_path), copied_source_vtt)
+        copy2_tolerant(pathlib.Path(zoom_vtt_path), copied_source_vtt)
         structured_outputs["source_vtt"] = str(copied_source_vtt)
     else:
         structured_outputs["source_vtt"] = None

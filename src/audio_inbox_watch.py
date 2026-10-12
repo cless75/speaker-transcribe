@@ -181,11 +181,31 @@ def atomic_write_json(path: pathlib.Path, data: dict) -> None:
 
 def _copy_with_edeadlk_retry(src: pathlib.Path, dst: pathlib.Path,
                              max_retries: int = 3, base_sleep: float = 2.0) -> None:
-    """shutil.copy2 with retry-on-EDEADLK for cloud-drive sync conflicts."""
+    """copy2 with retry-on-EDEADLK for cloud-drive sync conflicts — xattr-tolerant.
+
+    ``shutil.copy2`` re-raises a mount's xattr refusal (e.g. rclone/Google Drive answers
+    ``listxattr`` with EIO errno 5, which shutil's ``_copyxattr`` only skips for
+    ENOTSUP/ENODATA). The payload already landed by then; losing attrs must not fail
+    the copy. Data + mode + times are kept, xattr degradation is silent.
+    """
     last_exc: BaseException | None = None
     for attempt in range(max_retries):
         try:
-            shutil.copy2(src, dst)
+            shutil.copyfile(src, dst)
+            try:
+                shutil.copystat(src, dst)
+            except OSError as exc:
+                if exc.errno not in (errno.EIO, errno.ENOTSUP, errno.EOPNOTSUPP,
+                                     errno.ENODATA, errno.EPERM, errno.ENOSYS):
+                    raise
+                try:
+                    shutil.copymode(src, dst)
+                except OSError:
+                    pass
+                try:
+                    shutil.copytime(src, dst)
+                except OSError:
+                    pass
             return
         except OSError as exc:
             last_exc = exc
