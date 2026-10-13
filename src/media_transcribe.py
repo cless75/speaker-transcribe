@@ -1264,7 +1264,8 @@ def copy2_tolerant(src: pathlib.Path, dst: pathlib.Path) -> None:
         except OSError:
             pass
         try:
-            shutil.copytime(src, dst)
+            stat = src.stat()
+            os.utime(dst, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         except OSError:
             pass
 

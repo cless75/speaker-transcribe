@@ -203,7 +203,8 @@ def _copy_with_edeadlk_retry(src: pathlib.Path, dst: pathlib.Path,
                 except OSError:
                     pass
                 try:
-                    shutil.copytime(src, dst)
+                    stat = src.stat()
+                    os.utime(dst, ns=(stat.st_atime_ns, stat.st_mtime_ns))
                 except OSError:
                     pass
             return
@@ -2550,7 +2551,7 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     try:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
         )
     except Exception as exc:
@@ -2583,20 +2584,25 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     stderr_tail = "\n".join(full_stderr.splitlines()[-30:])
     result_meta = _parse_worker_result(full_stdout)
     _write_asr_log(audio, cmd, proc.returncode, full_stdout, full_stderr)
-    # Success criterion = a transcript was produced. output_dir is the session's
-    # own transcripts dir, so ANY top-level *-transcript.md in it is THIS file's
-    # result. The worker transliterates names unpredictably (spaces->_, lowercase),
-    # so name-based globs miss — the session-scoped fallback is the reliable signal.
+    # A transcript can land BEFORE write_outputs finishes. A failed worker must
+    # not become green just because that partial artifact exists (FUSE/xattr EIO).
+    # Retain the late/atexit-crash recovery only with the final result AND the
+    # post-write completion marker from this invocation.
     transcript = _discover_transcript(output_dir, audio.stem)
     stdout_json_ok = "phase=stdout_json ok" in full_stderr
-    if transcript is not None:
+    completed_outputs = (stdout_json_ok and result_meta is not None
+                         and result_meta.get("status") == "ok"
+                         and bool(result_meta.get("outputs")))
+    fatal = "fatal_error:" in full_stderr
+    if transcript is not None and not fatal and (proc.returncode == 0 or completed_outputs):
         if proc.returncode != 0:
-            log(f"exit={proc.returncode} but transcript present — treating as success "
-                f"(non-fatal/atexit crash; artifacts on disk)")
+            log(f"exit={proc.returncode} after confirmed output completion — "
+                f"accepting result (late/atexit crash)")
         return True, stderr_tail, transcript, result_meta
-    # No transcript produced -> genuine failure.
-    if proc.returncode != 0 and stdout_json_ok:
-        log(f"exit={proc.returncode}, stdout_json ok, but no transcript in {output_dir} — failing")
+    if transcript is not None:
+        log(f"exit={proc.returncode}, transcript present but worker did not complete — failing")
+    if not stderr_tail:
+        stderr_tail = f"worker exit={proc.returncode}; no confirmed complete transcript"
     return False, stderr_tail, None, result_meta
 
 
@@ -2660,7 +2666,10 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     vmode = cfg.get("voiceprint_mode", "off")
     need_vp = vmode != "off" and bool(pid) and not str(pid).startswith("_")
     existing = _discover_transcript(transcript_dir, audio.stem)
-    if existing is not None:
+    # Failed/interrupted output publication leaves a transcript too. Do not
+    # adopt it on the next sweep and silently turn a retry into asr-done.
+    if (existing is not None and state.get("worker_completed") is not False
+            and not state.get("last_error")):
         if not need_vp:
             state["status"] = "asr-done"
             state["transcript_path"] = str(existing)
@@ -2696,6 +2705,7 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
 
     # 4) queued -> in-progress -> ASR
     state["status"] = "in-progress"
+    state["worker_completed"] = False
     state["started_at"] = now_iso()
     state["host"] = host_label
     atomic_write_json(state_file, state)
@@ -2744,6 +2754,7 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
 
     if ok and transcript:
         state["status"] = "asr-done"
+        state["worker_completed"] = True
         state["transcript_path"] = str(transcript)
         state["last_error"] = None
         state["finished_at"] = now_iso()
