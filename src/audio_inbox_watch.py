@@ -1163,6 +1163,12 @@ def marker_processed_asr(audio: pathlib.Path) -> pathlib.Path:
 
 
 _SESSIONS_INDEX_CACHE: dict[str, dict[str, pathlib.Path]] = {}
+# Cost gate for the run-meta index (13.10, org/801-pickup-runmeta-index-out-of-hotpath).
+# Above this many session dirs the rglob over a cloud mount exceeds the pickup
+# watchdog (measured > 5 min on Gelya-Asr / 134 sids vs a 120 s budget), so the
+# index is skipped and catch-up falls back to the same-sid checks in
+# ``existing_transcript``. Override per node via ``run_meta_index_max_sids``.
+_RUN_META_FULL_INDEX_MAX_SIDS = 30
 
 
 def _sessions_root_of(transcript_dir: pathlib.Path) -> pathlib.Path | None:
@@ -1173,18 +1179,55 @@ def _sessions_root_of(transcript_dir: pathlib.Path) -> pathlib.Path | None:
     return None
 
 
-def _sessions_run_meta_index(sessions_root: pathlib.Path) -> dict[str, pathlib.Path]:
+def _sessions_sid_count(sessions_root: pathlib.Path) -> int | None:
+    """Cheap size probe for the gate: count session dirs (2 levels only).
+
+    Lists ``sessions/<month>/<sid>`` without ever descending into a session's
+    contents, so it stays in the low seconds even on a large FUSE tree (the
+    full rglob it gates took > 5 min on Gelya-Asr). ``None`` on OSError — a
+    tree we cannot list is unknowable; caller then builds the full index.
+    """
+    total = 0
+    try:
+        for month in sessions_root.iterdir():
+            if not month.is_dir():
+                continue
+            for _ in month.iterdir():
+                total += 1
+    except OSError:
+        return None
+    return total
+
+
+def _sessions_run_meta_index(sessions_root: pathlib.Path,
+                             max_sids: int | None = None) -> dict[str, pathlib.Path]:
     """``basename(source_file) -> transcript`` over every run under ``sessions/``.
 
     run-meta records which audio a run came from, so this survives what names
     alone cannot: a run written under a different SessionId or slug (an older
     collision, or a one-off script that transliterates differently). Built once
     per process — the tree is on a synced drive and rglob over it is not cheap.
+
+    **Cost-gated (13.10, ``org/801-pickup-runmeta-index-out-of-hotpath``):** a
+    tree with more than ``max_sids`` session dirs skips the rglob entirely and
+    returns an empty index — the rglob went over the 120 s pickup budget on a
+    real hub (> 5 min through rclone-FUSE). Catch-up then covers only the
+    same-sid case (the direct globs in ``existing_transcript``); a prior run
+    under a *different* sid may be re-transcribed once — bounded and
+    self-healing (the source sidecar is written after the first pass).
     """
+    if max_sids is None:
+        max_sids = _RUN_META_FULL_INDEX_MAX_SIDS
     key = str(sessions_root)
     cached = _SESSIONS_INDEX_CACHE.get(key)
     if cached is not None:
         return cached
+    size = _sessions_sid_count(sessions_root)
+    if size is not None and size > max_sids:
+        log(f"run-meta index: gated ({size} sessions > {max_sids}) - targeted checks only",
+            level="debug")
+        _SESSIONS_INDEX_CACHE[key] = {}
+        return {}
     index: dict[str, pathlib.Path] = {}
     try:
         metas = sessions_root.rglob("*-run-meta.json")
@@ -1211,7 +1254,8 @@ def _sessions_run_meta_index(sessions_root: pathlib.Path) -> dict[str, pathlib.P
 
 
 def existing_transcript(audio: pathlib.Path,
-                        transcript_dir: pathlib.Path | None = None) -> pathlib.Path | None:
+                        transcript_dir: pathlib.Path | None = None,
+                        max_sids: int | None = None) -> pathlib.Path | None:
     """Look for a transcript THIS pipeline already wrote (catch-up of prior work).
 
     Catch-up marks a recording ``asr-done`` without running ASR, so what counts
@@ -1268,7 +1312,7 @@ def existing_transcript(audio: pathlib.Path,
     if transcript_dir:
         sessions_root = _sessions_root_of(transcript_dir)
         if sessions_root and sessions_root.is_dir():
-            hit = _sessions_run_meta_index(sessions_root).get(audio.name)
+            hit = _sessions_run_meta_index(sessions_root, max_sids).get(audio.name)
             if hit:
                 return hit
     return None
@@ -2579,7 +2623,8 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
 
     # 1) catch-up: existing transcript without a sidecar -> mark asr-done
     if not state_file.exists():
-        transcript = existing_transcript(audio, transcript_dir)
+        transcript = existing_transcript(audio, transcript_dir,
+                                         max_sids=cfg.get("run_meta_index_max_sids"))
         if transcript:
             state = caught_up_state(transcript, pid, host_label)
             state["session_id"] = sid_preview
@@ -2901,7 +2946,8 @@ def run_once(cfg: dict, config_path: pathlib.Path, *,
                 pid, _ = route_pid_for_audio(audio, root, source, cfg, mapper)
                 started = started_at_for(audio)
                 _sid, _ctx, transcript_dir, _state_dir = resolve_session_dirs(cfg, pid, audio, started)
-                transcript = existing_transcript(audio, transcript_dir)
+                transcript = existing_transcript(audio, transcript_dir,
+                                                 max_sids=cfg.get("run_meta_index_max_sids"))
                 if not transcript:
                     continue
                 st = caught_up_state(transcript, pid, host_label)
