@@ -1,0 +1,11 @@
+[Unit]
+Description=Dispatch Zoom transcripts every five minutes for %i
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=5min
+Persistent=true
+Unit=zoom-dispatch@%i.service
+
+[Install]
+WantedBy=timers.target

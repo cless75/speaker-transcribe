@@ -1,0 +1,63 @@
+# Zoom transcript intake (optional, node-local)
+
+`src/zoom_dispatch.py` reads **only** zoomrs' SQLite tables and its downloaded files.
+It does not need Zoom/Google credentials and does not call Zoom APIs. It never
+moves or deletes the downloaded MP4: zoomrs' repository must be on local disk.
+The hub receives only VTT and (if available) a chat TXT file. This is a separate
+process: no zoomrs/GPL code is copied into this repository.
+
+## Prepare
+
+1. Copy `config/zoom_dispatch.example.json` to `config/zoom_dispatch.local.json`
+   (gitignored). Set the local paths (`database`, `repository`, `hub_root`,
+   `state_file`), mapping rules, fallback project and worker folder. The fallback
+   project must not start with `_`: the watcher skips such Hub directories.
+   Do not paste credentials into this JSON.
+2. Set `"zoom_vtt_only_input": true` in `config/node.local.json` on the **receiving**
+   node. Other nodes keep their current scan behaviour. VTT beside a matching
+   media source remains its sidecar; only standalone VTT creates a new run.
+3. Ensure the rclone Hub mount is active. The dispatcher refuses to deliver if
+   `hub_root` is absent or not a mount point (`require_hub_mount: true`). Keep
+   this guard on in production; it prevents accidental writes under an unmounted
+   `/home/.../hub` directory.
+4. Keep `max_meetings_per_run` low (3 by default) during backlog intake. An
+   incomplete zoomrs record, missing file, size mismatch or young file waits
+   for a later tick. Multiple VTT/chat records per meeting are deliberately
+   held for manual inspection rather than silently dropping one.
+
+Check selection without writing files:
+
+```sh
+python3 src/zoom_dispatch.py --config config/zoom_dispatch.local.json --dry-run
+```
+
+After reviewing the routes/fallback, run without `--dry-run`. The local manifest
+(`state_file`) tracks delivered Zoom meeting UUIDs. A chat file is copied first
+and the VTT last, using a temporary name and atomic rename. The watcher's VTT
+path produces `-transcript.md`, `state.json` (`asr-done`) and the usual
+`_sessions-index.md`. A crash after copying but before saving the manifest
+can be retried without overwriting a different file; an existing processed
+entry in `_sessions-index.md` is also treated as delivered.
+
+## Timer (operator / sudo)
+
+`scripts/systemd/zoom-dispatch@.service` and `.timer` assume the repo lives at
+`/home/<user>/speaker-transcribe`, Python at `/usr/bin/python3`, and the local
+configuration is ready. The operator installs both units under
+`/etc/systemd/system/`, runs `systemctl daemon-reload`, then enables and starts
+`zoom-dispatch@<user>.timer`. Do not enable before inspecting paths and testing
+one dry run. The operator (not the agent) performs the privileged step.
+
+Zoom app creation, credentials and the cloud-backlog size check are **separate**.
+Before any cloud cleanup, verify every copied recording and keep zoomrs
+`trash_downloaded`, `delete_downloaded` and `delete_skipped` all `false`.
+
+`scripts/zoomrs_config.py` turns the owner's private `zoomrs.env` (Account ID,
+Client ID, Client Secret) into a 600-only `config.yml` under `~/.config/zoomrs/`.
+The generated file disables sync/download by default; `--enable-sync` is reserved
+for **after** measuring the backlog and agreeing a local-disk batch limit. It
+enables VTT/chat types and keeps all three cloud deletion flags false. Do not
+paste the credential values into a CLI argument, a log or this repository.
+The optional `scripts/systemd/zoomrs@.service` binds its web API to localhost
+and mounts this private YAML read-only. The operator must verify the hardcoded
+image tag and paths and perform the `sudo` install; it is not enabled by default.

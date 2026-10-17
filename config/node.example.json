@@ -105,6 +105,8 @@
   "on_asr_done_after_days": 0,
 
   "_scan_knobs": "which files the watcher picks up; omit any key to use built-in defaults",
+  "_zoom_vtt_only_input_note": "Opt-in: treat standalone Zoom .vtt in a per-worker {hub_root}/{pid}/_{pid}_inbox/wN/ as a completed transcript without media/ASR. Historical VTT elsewhere is ignored. A VTT beside matching media remains a sidecar and is not processed twice. Heavy MP4 stays node-local.",
+  "zoom_vtt_only_input": false,
   "scan_extensions": [".m4a", ".mp3", ".wav", ".oga", ".mp4", ".mov", ".webm", ".m4v"],
   "scan_recursive": true,
   "skip_folders": ["_failed", "_processed", "_archive", "sessions", "Audio Record", "Transcripts"],

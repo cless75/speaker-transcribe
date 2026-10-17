@@ -1,0 +1,12 @@
+[Unit]
+Description=Dispatch downloaded Zoom transcripts to Hub for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+WorkingDirectory=/home/%i/speaker-transcribe
+ExecStart=/usr/bin/python3 /home/%i/speaker-transcribe/src/zoom_dispatch.py --config /home/%i/speaker-transcribe/config/zoom_dispatch.local.json
+NoNewPrivileges=true

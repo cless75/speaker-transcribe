@@ -584,8 +584,19 @@ def is_marker_file(name: str, patterns: list[str]) -> bool:
     return False
 
 
+def is_zoom_dispatch_vtt(path: pathlib.Path) -> bool:
+    """Only auto-import VTT deliberately dropped in a per-worker project inbox."""
+    parent = path.parent
+    project = parent.parent.parent
+    return (path.suffix.lower() == ".vtt"
+            and bool(re.fullmatch(r"w\d+", parent.name, re.I))
+            and parent.parent.name == f"_{project.name}_inbox")
+
+
 def _scan_one_source(root: pathlib.Path, cfg: dict, *, recursive: bool) -> list[pathlib.Path]:
     extensions = {ext.lower() for ext in cfg.get("scan_extensions", DEFAULT_SCAN_EXTENSIONS)}
+    if cfg.get("zoom_vtt_only_input", False):
+        extensions.add(".vtt")
     skip_folders = cfg.get("skip_folders", DEFAULT_SKIP_FOLDERS)
     skip_prefixes = cfg.get("skip_folder_prefixes", DEFAULT_SKIP_FOLDER_PREFIXES)
     skip_suffixes = cfg.get("skip_filename_suffixes", DEFAULT_SKIP_FILENAME_SUFFIXES)
@@ -623,6 +634,8 @@ def _scan_one_source(root: pathlib.Path, cfg: dict, *, recursive: bool) -> list[
                     if not path.is_file():
                         continue
                     if path.suffix.lower() not in extensions:
+                        continue
+                    if path.suffix.lower() == ".vtt" and not is_zoom_dispatch_vtt(path):
                         continue
                     rel = path.relative_to(root)
                 except ValueError:
@@ -816,6 +829,17 @@ def find_audio_files(cfg: dict) -> list[tuple[pathlib.Path, pathlib.Path, dict]]
                 continue
             seen.add(path)
             results.append((path, root, source))
+    if cfg.get("zoom_vtt_only_input", False):
+        # Existing Zoom exports can include BOTH a media input and its VTT
+        # sidecar. In that case the media path already consumes the VTT; do not
+        # open a second session for the same meeting.
+        by_dir: dict[pathlib.Path, list[pathlib.Path]] = {}
+        for path, _, _ in results:
+            if path.suffix.lower() in AUDIO_EXTS | VIDEO_EXTS:
+                by_dir.setdefault(path.parent, []).append(path)
+        results = [(path, root, source) for path, root, source in results
+                   if path.suffix.lower() != ".vtt" or not any(
+                       zoom_vtt_for(media, cfg) == path for media in by_dir.get(path.parent, []))]
     results.sort(key=lambda t: _safe_mtime(t[0]), reverse=True)
     return results
 
@@ -2606,6 +2630,18 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     return False, stderr_tail, None, result_meta
 
 
+def run_vtt_import(vtt: pathlib.Path, output_dir: pathlib.Path
+                   ) -> tuple[bool, str, pathlib.Path | None, dict | None]:
+    """Import a transcript-only Zoom recording through the normal state machine."""
+    from zoom_vtt_import import import_zoom_vtt
+
+    try:
+        transcript, meta = import_zoom_vtt(vtt, output_dir)
+        return True, "", transcript, meta
+    except (OSError, ValueError, UnicodeError) as exc:
+        return False, f"Zoom VTT import failed: {exc}", None, None
+
+
 # ---------------------------------------------------------------------------
 # Per-file processing
 # ---------------------------------------------------------------------------
@@ -2613,6 +2649,7 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
 
 def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dict,
                      cfg: dict, mapper: dict, config_path: pathlib.Path) -> None:
+    vtt_only = audio.suffix.lower() == ".vtt" and cfg.get("zoom_vtt_only_input", False)
     state_file = state_path(audio)
     host_label = host_label_of(cfg)
     pid, needs_class = route_pid_for_audio(audio, source_root, source, cfg, mapper)
@@ -2664,7 +2701,7 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     # speaker_pass (no whisper) when a *-raw.json is present; else fall back to full.
     exec_mode: str | None = None
     vmode = cfg.get("voiceprint_mode", "off")
-    need_vp = vmode != "off" and bool(pid) and not str(pid).startswith("_")
+    need_vp = not vtt_only and vmode != "off" and bool(pid) and not str(pid).startswith("_")
     existing = _discover_transcript(transcript_dir, audio.stem)
     # Failed/interrupted output publication leaves a transcript too. Do not
     # adopt it on the next sweep and silently turn a retry into asr-done.
@@ -2698,7 +2735,7 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     _cancel_cloud_watchdog()
 
     # 3) CPU-aware gate
-    proceed, cpu_reason = wait_for_cpu_available(cfg)
+    proceed, cpu_reason = (True, "") if vtt_only else wait_for_cpu_available(cfg)
     if not proceed:
         log(f"defer ASR: {audio.name} ({cpu_reason})")
         return
@@ -2724,7 +2761,7 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
         _size_bytes = 0
     _current = {"name": audio.name, "pid": pid, "size": _size_bytes,
                 "started_at": state["started_at"], "session_id": state.get("session_id"),
-                "speaker_source": "zoom VTT" if zoom_vtt_for(audio, cfg) else
+                "speaker_source": "zoom VTT" if vtt_only or zoom_vtt_for(audio, cfg) else
                                   cfg.get("speaker_mode", "diarize")}
     status_event(cfg, {"type": "file_start", "file": audio.name, "pid": pid,
                        "size": _size_bytes})
@@ -2732,8 +2769,11 @@ def process_one_file(audio: pathlib.Path, source_root: pathlib.Path, source: dic
     t0 = time.time()
     try:
         with _ClaimHeartbeat(audio, cfg):
-            ok, err_tail, transcript, result_meta = run_asr(
-                audio, cfg, pid, source_root, transcript_dir, config_path, execution_mode=exec_mode)
+            if vtt_only:
+                ok, err_tail, transcript, result_meta = run_vtt_import(audio, transcript_dir)
+            else:
+                ok, err_tail, transcript, result_meta = run_asr(
+                    audio, cfg, pid, source_root, transcript_dir, config_path, execution_mode=exec_mode)
     except AsrEnvironmentError as exc:
         # Roll the file back to queued without counting an attempt or quarantining
         # it; re-raise so the sweep aborts (every file would hit the same wall).
