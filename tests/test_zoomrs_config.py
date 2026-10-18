@@ -20,6 +20,7 @@ def test_generate_private_config_disabled_until_backlog_checked(tmp_path):
     settings = yaml.safe_load(output.read_text(encoding="utf-8"))
     assert settings["client"]["secret"] == "secret:#value"
     assert settings["storage"]["repository"] == "/data/recordings"
+    assert settings["storage"]["keep_free_space"] == 0
     assert settings["server"]["sync_job"] is False
     assert settings["server"]["download_job"] is False
     for key in ("trash_downloaded", "delete_downloaded", "delete_skipped"):
@@ -38,10 +39,10 @@ def test_bad_credentials_never_get_written(tmp_path):
     assert not (tmp_path / "config.yml").exists()
 
 
-def test_enable_sync_is_separate_explicit_step():
+def test_sync_cannot_be_enabled_by_generator():
     credentials = {"ZOOM_ACCOUNT_ID": "account", "ZOOM_CLIENT_ID": "id",
                    "ZOOM_CLIENT_SECRET": "secret"}
-    config = yaml.safe_load(render_config(credentials, enable_sync=True))
-    assert config["server"]["sync_job"] is True
-    assert config["server"]["download_job"] is True
+    config = yaml.safe_load(render_config(credentials))
+    assert config["server"]["sync_job"] is False
+    assert config["server"]["download_job"] is False
     assert config["client"]["trash_downloaded"] is False

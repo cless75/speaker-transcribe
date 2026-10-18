@@ -54,9 +54,12 @@ Before any cloud cleanup, verify every copied recording and keep zoomrs
 
 `scripts/zoomrs_config.py` turns the owner's private `zoomrs.env` (Account ID,
 Client ID, Client Secret) into a 600-only `config.yml` under `~/.config/zoomrs/`.
-The generated file disables sync/download by default; `--enable-sync` is reserved
-for **after** measuring the backlog and agreeing a local-disk batch limit. It
-enables VTT/chat types and keeps all three cloud deletion flags false. Do not
+The generated file **always** disables sync/download. It also sets
+`keep_free_space: 0`, which disables zoomrs' local auto-eviction in our separate
+patched GPL clone; this must not be used with an unpatched upstream image.
+Only after measuring the backlog and agreeing a local-disk batch limit may an
+operator enable controlled per-day downloads. It enables VTT/chat types and
+keeps all three cloud deletion flags false. Do not
 paste the credential values into a CLI argument, a log or this repository.
 The optional `scripts/systemd/zoomrs@.service` binds its web API to localhost
 and mounts this private YAML read-only. The operator must verify the hardcoded

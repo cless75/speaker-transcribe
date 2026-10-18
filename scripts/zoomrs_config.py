@@ -36,13 +36,13 @@ def read_credentials(path: pathlib.Path) -> dict[str, str]:
     return result
 
 
-def render_config(creds: dict[str, str], *, enable_sync: bool = False) -> str:
+def render_config(creds: dict[str, str]) -> str:
     q = lambda value: json.dumps(value, ensure_ascii=False)  # JSON strings are valid YAML
     return (f"server:\n  listen: ':8099'\n  domain: localhost\n"
             f"  access_key_salt: {q(secrets.token_hex(32))}\n"
             f"  jwt_secret: {q(secrets.token_hex(32))}\n"
-            f"  managers: []\n  sync_job: {str(enable_sync).lower()}\n"
-            f"  download_job: {str(enable_sync).lower()}\n"
+            "  managers: []\n  sync_job: false\n"
+            "  download_job: false\n"
             f"client:\n  account_id: {q(creds['ZOOM_ACCOUNT_ID'])}\n"
             f"  id: {q(creds['ZOOM_CLIENT_ID'])}\n"
             f"  secret: {q(creds['ZOOM_CLIENT_SECRET'])}\n"
@@ -51,7 +51,7 @@ def render_config(creds: dict[str, str], *, enable_sync: bool = False) -> str:
             "  rate_limiting_delay:\n    light: 300\n    medium: 550\n    heavy: 1050\n"
             "storage:\n  type: sqlite\n"
             "  path: 'file:/data/state/zoomrs.db?mode=rwc&_journal_mode=WAL'\n"
-            "  repository: /data/recordings\n  keep_free_space: 107374182400\n"
+            "  repository: /data/recordings\n  keep_free_space: 0\n"
             "syncable:\n  important: ['shared_screen_with_gallery_view']\n"
             "  alternative: ['shared_screen_with_speaker_view']\n"
             "  optional: ['audio_transcript', 'chat_file']\n  min_duration: 0\n"
@@ -77,11 +77,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", required=True, type=pathlib.Path)
     parser.add_argument("--output", required=True, type=pathlib.Path)
-    parser.add_argument("--enable-sync", action="store_true",
-                        help="Only after cloud backlog has been sized and approved")
     args = parser.parse_args()
-    write_private(args.output.expanduser(), render_config(
-        read_credentials(args.env.expanduser()), enable_sync=args.enable_sync))
+    write_private(args.output.expanduser(), render_config(read_credentials(args.env.expanduser())))
     print("Private zoomrs config written; cloud deletion disabled")
 
 

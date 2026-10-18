@@ -12,7 +12,7 @@ WorkingDirectory=/home/%i
 ExecStartPre=/usr/bin/test -f /home/%i/.config/zoomrs/config.yml
 ExecStartPre=/usr/bin/test -d /home/%i/.local/share/zoomrs
 ExecStartPre=/usr/bin/test -d /home/%i/zoom-recordings
-ExecStart=/bin/sh -c 'exec /usr/bin/docker run --rm --name zoomrs --user=$$(id -u):$$(id -g) -p 127.0.0.1:8099:8099 --mount type=bind,source=/home/%i/.config/zoomrs/config.yml,target=/app/config.yml,readonly --mount type=bind,source=/home/%i/.local/share/zoomrs,target=/data/state --mount type=bind,source=/home/%i/zoom-recordings,target=/data/recordings zoomrs:vtt-20261017'
+ExecStart=/bin/sh -c 'exec /usr/bin/docker run --rm --name zoomrs --user=$$(id -u):$$(id -g) -p 127.0.0.1:8099:8099 --mount type=bind,source=/home/%i/.config/zoomrs/config.yml,target=/app/config.yml,readonly --mount type=bind,source=/home/%i/.local/share/zoomrs,target=/data/state --mount type=bind,source=/home/%i/zoom-recordings,target=/data/recordings zoomrs:vtt-20261018'
 ExecStop=/usr/bin/docker stop zoomrs
 Restart=on-failure
 RestartSec=30
