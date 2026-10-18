@@ -146,6 +146,28 @@ def test_mounted_hub_required_and_external_paths_refused(tmp_path):
     assert not list(hub.iterdir())
 
 
+def test_container_record_paths_map_to_host_repository(tmp_path):
+    cfg, hub, _ = fixture(tmp_path)
+    cfg["container_repository"] = "/data/recordings"
+    with sqlite3.connect(cfg["database"]) as connection:
+        for record_id, original_path in connection.execute("SELECT id, path FROM records"):
+            connection.execute("UPDATE records SET path=? WHERE id=?",
+                               ("/data/recordings/" + pathlib.Path(original_path).name, record_id))
+    assert dispatch.dispatch_once(cfg)["delivered"] == 1
+    assert len(list((hub / "unrouted" / "_unrouted_inbox" / "w1").glob("*.vtt"))) == 1
+
+
+def test_container_path_cannot_escape_repository(tmp_path):
+    cfg, hub, _ = fixture(tmp_path)
+    cfg["container_repository"] = "/data/recordings"
+    with sqlite3.connect(cfg["database"]) as connection:
+        connection.execute("UPDATE records SET path=? WHERE id='2-audio_transcript'",
+                           ("/data/recordings/../../private.vtt",))
+    with pytest.raises(ValueError, match="escapes"):
+        dispatch.dispatch_once(cfg)
+    assert not list(hub.iterdir())
+
+
 def test_config_rejects_traversal_and_ambiguous_routes(tmp_path):
     path = tmp_path / "config.json"
     cfg, _, _ = fixture(tmp_path)

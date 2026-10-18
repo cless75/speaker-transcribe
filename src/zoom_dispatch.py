@@ -36,6 +36,10 @@ def load_config(path: pathlib.Path) -> dict:
         raise ValueError("worker_folder must be w1, w2, etc.")
     if int(config.get("max_meetings_per_run", 3)) < 1:
         raise ValueError("max_meetings_per_run must be positive")
+    container_root = config.get("container_repository")
+    if container_root and (not pathlib.PurePosixPath(container_root).is_absolute()
+                           or ".." in pathlib.PurePosixPath(container_root).parts):
+        raise ValueError("container_repository must be an absolute safe path")
     for rule in config.get("routes", []):
         if ("regex" in rule) == ("contains" in rule):
             raise ValueError("each route needs exactly one of regex/contains")
@@ -76,11 +80,20 @@ def _meetings(db: pathlib.Path) -> list[dict]:
     return list(grouped.values())
 
 
-def _local_file(record: dict, repository: pathlib.Path, settle_sec: int) -> pathlib.Path | None:
-    path = pathlib.Path(record["path"] or "").expanduser()
+def _local_file(record: dict, repository: pathlib.Path, settle_sec: int,
+                container_root: str | None = None) -> pathlib.Path | None:
     if record["status"] != "downloaded" or not record["path"]:
         return None
     root = repository.resolve()
+    path = pathlib.Path(record["path"]).expanduser()
+    if container_root:
+        container_path = pathlib.PurePosixPath(record["path"])
+        container_base = pathlib.PurePosixPath(container_root)
+        if container_path.is_relative_to(container_base):
+            relative = container_path.relative_to(container_base)
+            if ".." in relative.parts:
+                raise ValueError("zoomrs record path escapes container repository")
+            path = root.joinpath(*relative.parts)
     resolved = path.resolve()
     if not resolved.is_relative_to(root):
         raise ValueError("zoomrs file is outside the configured repository")
@@ -193,8 +206,9 @@ def dispatch_once(config: dict, *, dry_run: bool = False) -> dict:
         if len(vtts) != 1 or len(chats) > 1:
             report["ambiguous"] += 1
             continue  # never discard one of several transcript/chat files silently
-        vtt = _local_file(vtts[0], repository, settle)
-        chat = _local_file(chats[0], repository, settle) if chats else None
+        container_root = config.get("container_repository")
+        vtt = _local_file(vtts[0], repository, settle, container_root)
+        chat = _local_file(chats[0], repository, settle, container_root) if chats else None
         if vtt is None or chats and chat is None:
             report["pending"] += 1
             continue

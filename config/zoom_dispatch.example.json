@@ -2,6 +2,7 @@
   "_comment": "Copy to zoom_dispatch.local.json (gitignored). Local-only: reads zoomrs SQLite and downloaded files; never reads OAuth secrets or calls Zoom. VTT is copied LAST, after chat. Use only with zoom_vtt_only_input=true in node.local.json.",
   "database": "/home/<user>/.local/share/zoomrs/zoomrs.db",
   "repository": "/home/<user>/zoom-recordings",
+  "container_repository": "/data/recordings",
   "hub_root": "/home/<user>/hub",
   "require_hub_mount": true,
   "state_file": "/home/<user>/.local/state/speaker-transcribe/zoom-dispatch.json",

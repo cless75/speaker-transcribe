@@ -13,6 +13,9 @@ process: no zoomrs/GPL code is copied into this repository.
    `state_file`), mapping rules, fallback project and worker folder. The fallback
    project must not start with `_`: the watcher skips such Hub directories.
    Do not paste credentials into this JSON.
+   `container_repository` must match the zoomrs Docker mount path (`/data/recordings`);
+   the dispatcher maps SQLite's container paths to the host `repository` and rejects
+   anything resolving outside it.
 2. Set `"zoom_vtt_only_input": true` in `config/node.local.json` on the **receiving**
    node. Other nodes keep their current scan behaviour. VTT beside a matching
    media source remains its sidecar; only standalone VTT creates a new run.
