@@ -1,7 +1,7 @@
 ---
 requested_by: codex
-reviewer: opencode-dev
-reviewer_model: opencode/nemotron-3-ultra-free
+reviewer: codex-astra
+reviewer_model: openai/gpt-6-astra
 author: codex
 author_model: m4/gpt-6-sol
 owner_project: 803
@@ -33,7 +33,7 @@ opt-in VTT-only вход. MP4 остаётся на локальном диск�
 `org/zoom-vtt-only-input-triggers-watcher-without-hub-video`,
 `org/zoomrs-local-recordings-never-auto-evicted` и карточку
 `D:\work\cless75-ex1\areas\60-techplatform\803-learning-media-pipeline\803-o3-Auto-Capture-Fresh-Zoom-Recordings.md`.
-При запуске на Dev-сервере отображать `D:\work\speaker-transcribe` на
+При запуске Astra на Dev-сервере отображать `D:\work\speaker-transcribe` на
 `/home/cless/Projects/reviews/803-o3-speaker-transcribe`, а `D:\work\cless75-ex1`
 на `/home/cless/Projects/cless75-ex1`; не искать Windows-диски на Linux.
 Если задача противоречит текущему Drive-first пакету другой сессии, вернуть
