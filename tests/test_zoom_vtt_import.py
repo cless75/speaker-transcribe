@@ -132,6 +132,20 @@ def test_valid_note_prose_does_not_block_real_cues(tmp_path, note):
     assert [cue["speaker"] for cue in parse_zoom_vtt(source)] == ["Alice"]
 
 
+@pytest.mark.parametrize("note", [
+    "NOTE\n16:9 aspect ratio",
+    "NOTE 12:30 Meeting begins",
+])
+def test_ambiguous_note_is_held_for_manual_inspection(tmp_path, note):
+    source = tmp_path / "ambiguous-note.vtt"
+    source.write_text("WEBVTT\n\n" + note + "\n\n"
+                      "00:00:03.000 --> 00:00:04.000\nAlice: kept\n", encoding="utf-8")
+    ok, error, transcript, meta = watcher.run_vtt_import(source, tmp_path / "out")
+    assert not ok and "failed" in error.lower()
+    assert transcript is None and meta is None
+    assert not (tmp_path / "out" / "ambiguous-note-transcript.md").exists()
+
+
 def test_opt_in_scans_vtt_but_not_a_media_sidecar(tmp_path):
     inbox = tmp_path / "Hub" / "PE45" / "_PE45_inbox" / "w1"
     inbox.mkdir(parents=True)

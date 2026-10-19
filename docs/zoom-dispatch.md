@@ -26,7 +26,11 @@ process: no zoomrs/GPL code is copied into this repository.
     ISO week (for example, 2026-10-16 → `w42`); a fixed `wN` is still supported.
     The VTT importer fails closed on malformed cues or timestamps hidden in VTT
     comments/headers, rather than treating a partial transcript as `asr-done`.
-    Even a timestamp-bearing `NOTE` comment needs manual inspection if rejected.
+    Per `org/zoom-vtt-ambiguous-note-fails-closed`, even a **valid** `NOTE`
+    comment starting with a time or numeric ratio (such as `12:30 Meeting begins`
+    or `16:9 aspect ratio`) is intentionally held for manual inspection. The
+    operator checks the original VTT and corrects a copy before resubmitting;
+    no partial transcript is published automatically.
    `container_repository` must match the zoomrs Docker mount path (`/data/recordings`);
    the dispatcher maps SQLite's container paths to the host `repository` and rejects
    anything resolving outside it.
