@@ -53,7 +53,7 @@ def render_config(creds: dict[str, str]) -> str:
             "  path: 'file:/data/state/zoomrs.db?mode=rwc&_journal_mode=WAL'\n"
             "  repository: /data/recordings\n  keep_free_space: 0\n"
             "syncable:\n  important: ['shared_screen_with_gallery_view']\n"
-            "  alternative: ['shared_screen_with_speaker_view']\n"
+            "  alternative: ['shared_screen_with_speaker_view', 'active_speaker']\n"
             "  optional: ['audio_transcript', 'chat_file']\n  min_duration: 0\n"
             "commander:\n  instances: ['http://localhost:8099']\n")
 

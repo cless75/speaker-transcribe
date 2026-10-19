@@ -64,6 +64,10 @@ Only after measuring the backlog and agreeing a local-disk batch limit may an
 operator enable controlled per-day downloads. It enables VTT/chat types and
 keeps all three cloud deletion flags false. Do not
 paste the credential values into a CLI argument, a log or this repository.
+The video selection includes `active_speaker` as a fallback: some Zoom meetings
+have only this MP4 type, not either of the `shared_screen_*` variants. When Zoom
+did not record a `chat_file`, the dispatcher imports the VTT alone and does not
+invent a chat transcript.
 The optional `scripts/systemd/zoomrs@.service` binds its web API to localhost
 and mounts this private YAML read-only. The operator must verify the hardcoded
 image tag and paths and perform the `sudo` install; it is not enabled by default.

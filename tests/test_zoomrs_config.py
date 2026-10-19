@@ -26,6 +26,7 @@ def test_generate_private_config_disabled_until_backlog_checked(tmp_path):
     for key in ("trash_downloaded", "delete_downloaded", "delete_skipped"):
         assert settings["client"][key] is False
     assert settings["syncable"]["optional"] == ["audio_transcript", "chat_file"]
+    assert "active_speaker" in settings["syncable"]["alternative"]
     if os.name == "posix":
         assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
