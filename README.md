@@ -150,6 +150,88 @@ Work in progress. Landed: setup docs, project scaffolding, **engine core**
 (`src/audio_inbox_watch.py`, `scripts/watch.ps1`). Pending: MCP server,
 voiceprint-in-hub, English docs.
 
+### Drive-first intake (opt-in foundation)
+
+`src/hub_intake.py` lists every project directly through rclone's Drive backend,
+including completed projects and the shared `Hub/_inbox`. It does **not** depend on recursively walking the
+FUSE mount. It can produce a local `index.html` for each project and a
+`hub-hygiene.json` report, or download one selected media revision to local disk
+with a verified size and Drive MD5. A failed listing is reported as **incomplete**,
+never as an empty queue. Legacy `asr-done` markers are labeled "publication not
+verified" until their output is independently checked. Marker reads are batched
+into a node-local cache, checked against Drive MD5; the report is saved after
+**each** project so a long whole-Hub run can resume using `--after PROJECT` or
+`--through PROJECT`. Nothing is deleted from the Hub.
+
+```bash
+python src/hub_intake.py --remote gdrive:Hub \
+  --rclone-config /home/clessd/.config/rclone/rclone.conf \
+  --output-dir /home/clessd/hub-intake-status
+# Optional explicit, single-file delivery (does NOT start ASR):
+python src/hub_intake.py --remote gdrive:Hub \
+  --rclone-config /home/clessd/.config/rclone/rclone.conf \
+  --output-dir /home/clessd/hub-intake-status \
+  --stage 'Example-Course/Lessons/new-recording.m4a'
+```
+
+Use `--publish` only after reviewing the result: it writes generated `index.html`
+into each project root, refusing to overwrite unrelated HTML. HTML in Drive is
+**not** a web host; it inherits the folder's Drive permissions and may need to be
+downloaded to open in a browser. A separate sign-in-only website still needs
+an approved authentication/hosting endpoint.
+
+`src/hub_worker.py` is an **explicit one-file E2E canary**, not a replacement
+timer. It stages an immutable Drive revision locally, creates its transcript
+locally (ASR or opt-in Zoom VTT-only), uploads the complete session, verifies
+every published output by size and MD5, then publishes `asr-done` LAST. It
+groups timestamped Zoom media with video/VTT peers and uses the watcher's
+shared claim and heartbeat (when `enable_multi_machine` is on). Progress
+markers and the affected project's HTML follow copying → ASR → publication.
+A local journal resumes an interrupted copy or publication without re-running
+successful ASR. It refuses to run while the
+old systemd watcher is active. The single exception is `--isolated-vtt-canary`:
+only a `.vtt` in a `_test*` folder, and only after verifying the **actual** old
+watcher config cannot discover VTT. Old media in that folder is *not* isolated.
+Standalone VTTs without markers have no age cutoff: a separately approved
+historical backlog can be imported after cutover, with the risk of re-importing
+material previously processed outside this watcher.
+
+```bash
+# No writes: inspect one candidate, or inspect the whole Hub queue.
+python3 src/hub_worker.py --project PROJECT --file recording.m4a \
+  --config config/node.local.json --rclone-config /path/to/rclone.conf \
+  --local-root /local/asr-work
+python3 src/hub_worker.py --all --config config/node.local.json \
+  --rclone-config /path/to/rclone.conf --local-root /local/asr-work
+
+# Only after the old consumer is off, use --run for an explicit file.
+# For an isolated VTT test use --isolated-vtt-canary and --legacy-config.
+
+# Report locally eligible copies without deleting them. --run deletes ONLY
+# local inputs/outputs older than 30 days after verified publication.
+python3 src/hub_worker.py --cleanup-local --config config/node.local.json \
+  --rclone-config /path/to/rclone.conf --local-root /local/asr-work
+```
+
+**Whole-Hub `--all --run` is gated, not currently enabled.** Before production cutover,
+verify peer watchers are off, test a real media bundle as well as VTT-only,
+coordinate the single writer, deploy the code through the reviewed `release`
+branch, and switch the old timer under an operator-controlled rollback window.
+The current old watcher remains the live consumer; no new worker timer is installed.
+The optional whole-Hub HTML refresh timer should not run alongside a future
+worker's event-driven status writes without a single-writer arbitration rule.
+
+`scripts/systemd/hub-worker@.*` is an **operator-only, disabled template** for
+that future window. It runs at most three verified sources per sweep and refuses
+to execute until a real-media E2E receipt from the *same worker code and node*
+is less than 24 hours old. It also refuses an active legacy timer or missing
+shared Hub mount/claim. Do not install it during a VTT-only pilot.
+
+Optional six-hour refresh units live in `scripts/systemd/hub-intake-status@.*`.
+They are **not installed automatically**: a node operator must review paths,
+publish the tested script through the repo, install the units and enable the
+timer. The unit does not require a FUSE mount for discovery and does not run ASR.
+
 ## License
 
 [MIT](LICENSE) © 2026 Dmitry Bezuglyi

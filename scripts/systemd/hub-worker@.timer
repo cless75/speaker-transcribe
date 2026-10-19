@@ -1,0 +1,12 @@
+[Unit]
+Description=Drive-first local ASR sweep (%i)
+
+[Timer]
+OnBootSec=20min
+OnCalendar=*:0/30
+AccuracySec=1min
+Unit=hub-worker@%i.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,20 @@
+[Unit]
+Description=Drive-first local ASR worker (%i, verified-only)
+Wants=network-online.target
+After=network-online.target hub-rclone.service
+Requires=hub-rclone.service
+ConditionPathIsMountPoint=/home/%i/hub
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+Environment=HOME=/home/%i
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/%i/speaker-transcribe
+ExecStart=/home/%i/venvs/asr/bin/python /home/%i/speaker-transcribe/src/hub_worker.py --all --run --max-files 3 --config /home/%i/speaker-transcribe/config/node.local.json --rclone-config /home/%i/.config/rclone/rclone.conf --local-root /home/%i/out/hub-worker
+TimeoutStartSec=8h
+
+# OPERATOR: Do not install/enable until the old watch timer is disabled, a
+# real media E2E created a same-code receipt, and rollback is agreed. There
+# is deliberately no ExecStartPre git pull: changing code invalidates E2E.

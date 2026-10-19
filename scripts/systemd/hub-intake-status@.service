@@ -1,0 +1,16 @@
+[Unit]
+Description=Hub Drive-first intake status and hygiene report (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+Environment=HOME=/home/%i
+WorkingDirectory=/home/%i/speaker-transcribe
+ExecStart=/usr/bin/python3 /home/%i/speaker-transcribe/src/hub_intake.py --remote gdrive:Hub --rclone-config /home/%i/.config/rclone/rclone.conf --output-dir /home/%i/out/hub-intake --publish
+TimeoutStartSec=2h
+
+# This unit inventories Drive and publishes HTML. It neither starts ASR nor
+# removes local/Hub material. Deploy only after the script is in the node repo.

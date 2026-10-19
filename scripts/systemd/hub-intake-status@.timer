@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh project HTML and Hub hygiene report (%i)
+
+[Timer]
+OnBootSec=30min
+OnCalendar=*-*-* 00,06,12,18:00:00
+AccuracySec=5min
+Unit=hub-intake-status@%i.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
