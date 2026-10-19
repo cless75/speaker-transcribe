@@ -24,6 +24,9 @@ process: no zoomrs/GPL code is copied into this repository.
     identity from a matching start time alone. Unapproved meetings remain untouched.
     `worker_folder: "iso_week"` routes each meeting to `wN` using its start date's
     ISO week (for example, 2026-10-16 → `w42`); a fixed `wN` is still supported.
+    The VTT importer fails closed on malformed cues or timestamps hidden in VTT
+    comments/headers, rather than treating a partial transcript as `asr-done`.
+    Even a timestamp-bearing `NOTE` comment needs manual inspection if rejected.
    `container_repository` must match the zoomrs Docker mount path (`/data/recordings`);
    the dispatcher maps SQLite's container paths to the host `repository` and rejects
    anything resolving outside it.

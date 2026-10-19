@@ -84,6 +84,26 @@ def test_metadata_header_and_service_block_cannot_hide_a_cue(tmp_path):
         parse_zoom_vtt(source)
 
 
+@pytest.mark.parametrize("separator", [" ", "\t"])
+def test_note_with_attached_timing_never_publishes_partial_transcript(tmp_path, separator):
+    source = tmp_path / "note-attached.vtt"
+    source.write_text("WEBVTT\n\n"
+                      f"NOTE{separator}00:00:01.000 --> 00:00:02.000\nBob: lost\n\n"
+                      "00:00:03.000 --> 00:00:04.000\nAlice: kept\n", encoding="utf-8")
+    ok, error, transcript, meta = watcher.run_vtt_import(source, tmp_path / "out")
+    assert not ok and "failed" in error.lower()
+    assert transcript is None and meta is None
+    assert not (tmp_path / "out" / "note-attached-transcript.md").exists()
+
+
+def test_timing_attached_to_webvtt_header_is_rejected(tmp_path):
+    source = tmp_path / "header-attached.vtt"
+    source.write_text("WEBVTT 00:00:01.000 --> 00:00:02.000\nBob: lost\n\n"
+                      "00:00:03.000 --> 00:00:04.000\nAlice: kept\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        parse_zoom_vtt(source)
+
+
 def test_opt_in_scans_vtt_but_not_a_media_sidecar(tmp_path):
     inbox = tmp_path / "Hub" / "PE45" / "_PE45_inbox" / "w1"
     inbox.mkdir(parents=True)
