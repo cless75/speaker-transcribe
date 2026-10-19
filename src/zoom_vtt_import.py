@@ -14,9 +14,9 @@ import re
 
 
 _TIME = re.compile(r"^(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})$")
-# Used only to reject suspect service blocks. This is intentionally *looser*
-# than _TIME: malformed cue timestamps must not be silently treated as comments.
-_TIMESTAMP_LIKE = re.compile(r"(?<!\w)\d{1,3}:\d{1,3}(?::\d{1,3})?(?:[.,]\d*)?")
+# Used only at the *start* of a suspect cue line. It accepts malformed times,
+# but a NOTE mentioning "aspect ratio 16:9" or "draft -> final" is not a cue.
+_CUE_START = re.compile(r"^(?:\d{1,3}:){1,2}\d{1,3}(?:[.,]\d*)?(?=\s|$|[-=>])")
 _VOICE = re.compile(r"^<v(?:\.[^ >]+)?\s+([^>]+)>(.*?)(?:</v>)?$", re.I)
 _LABEL = re.compile(r"^([^:]{1,80}):\s+(.+)$")
 _TAG = re.compile(r"<[^>]+>")
@@ -41,7 +41,7 @@ def parse_zoom_vtt(path: pathlib.Path) -> list[dict]:
     blocks = re.split(r"\n\s*\n", text.replace("\r\n", "\n").replace("\r", "\n"))
     header = [line.strip() for line in blocks[0].splitlines()] if blocks else []
     if (not header or not re.fullmatch(r"WEBVTT(?:[ \t].*)?", header[0])
-            or _TIMESTAMP_LIKE.search(header[0])):
+            or _CUE_START.match(header[0][len("WEBVTT"):].strip())):
         raise ValueError("not a WEBVTT recording")
     # A missing blank separator after the header must not swallow the first cue.
     # Unknown header metadata also fails closed rather than losing dialogue.
@@ -56,7 +56,10 @@ def parse_zoom_vtt(path: pathlib.Path) -> list[dict]:
         first = lines[0]
         if (first == "NOTE" or first.startswith(("NOTE ", "NOTE\t"))
                 or first in ("STYLE", "REGION")):
-            if any("->" in line or _TIMESTAMP_LIKE.search(line) for line in lines):
+            # NOTE permits prose, including numbers and arrows. Only a timed
+            # line attached to NOTE or following a service heading is suspect.
+            attached = first[4:].strip() if first.startswith(("NOTE ", "NOTE\t")) else ""
+            if _CUE_START.match(attached) or any(_CUE_START.match(line) for line in lines[1:]):
                 raise ValueError("timed cue hidden inside VTT service block")
             continue
         timing = next((idx for idx, line in enumerate(lines) if "-->" in line), None)

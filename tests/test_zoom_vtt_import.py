@@ -120,6 +120,18 @@ def test_malformed_timing_in_service_block_never_loses_a_cue(tmp_path, service, 
     assert not (tmp_path / "out" / "malformed-service-transcript.md").exists()
 
 
+@pytest.mark.parametrize("note", [
+    "NOTE aspect ratio 16:9",
+    "NOTE\nMeeting begins at 12:30",
+    "NOTE draft -> final",
+])
+def test_valid_note_prose_does_not_block_real_cues(tmp_path, note):
+    source = tmp_path / "comment.vtt"
+    source.write_text("WEBVTT\n\n" + note + "\n\n"
+                      "00:00:03.000 --> 00:00:04.000\nAlice: kept\n", encoding="utf-8")
+    assert [cue["speaker"] for cue in parse_zoom_vtt(source)] == ["Alice"]
+
+
 def test_opt_in_scans_vtt_but_not_a_media_sidecar(tmp_path):
     inbox = tmp_path / "Hub" / "PE45" / "_PE45_inbox" / "w1"
     inbox.mkdir(parents=True)
