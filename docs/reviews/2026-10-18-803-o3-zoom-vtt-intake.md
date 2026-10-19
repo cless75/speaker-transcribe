@@ -7,13 +7,13 @@ author_model: m4/gpt-6-sol
 owner_project: 803
 subject: "803-o3: opt-in Zoom VTT-only intake, SQLite dispatcher, private config and systemd templates; speaker-transcribe ebd74f3..d2c8074"
 roles: [adversary, operator, integrator, gate-keeper]
-status: answered
+status: closed
 opened: 2026-10-18
-closed:
+closed: 2026-10-20
 unit: 803-o3
 unit_form: dor-open
-outcome:
-return_reason:
+outcome: returned
+return_reason: incomplete-package
 ---
 
 # Review: 803-o3 — Zoom VTT-only intake in 801
@@ -227,4 +227,25 @@ A-03: **в вопрос → разрешён решением владельца
 Это **не** разрешение `origin/release`, загрузки из Zoom или установки юнитов:
 не получено согласование с параллельным Drive-first `cc9cfff` и не проведены
 операторские проверки на Lenovo. Формальное закрытие review ждёт гейта P;
-статус остаётся `answered`, пока запись исхода и проекта не оформлены.
+статус остаётся `answered`, пока запись исхода и проекта не оформлена.
+
+## Закрытие (20.10)
+
+Порог G4v сработал (Blocker G2-01 и четыре Major), проверочные раунды пройдены
+до чистого вердикта: финальный ответ Astra — цикл остановить
+(`/home/cless/Projects/reviews/803-o3-boundary/review-context/astra-boundary-response.md`).
+Гейт P исполнен: запись в ПЗ 803
+(`areas/60-techplatform/803-learning-media-pipeline/803-п-Learning-Media-Pipeline.md`).
+
+`outcome: returned` — пакет не прошёл с первого раза: G2-01 вернул запрос до
+анализа кода, G3 дал три Major. `return_reason: incomplete-package` взят из
+закрытого перечня по порядку: единица предъявлена с `unit_form: dor-open`
+(без закрытого DoR), а исходные коммиты первого предъявления не были адресуемы
+(G2-01). Свободный текст причины сюда не пишется — он живёт в разделе возврата
+и в находках.
+
+Закрытие подтверждает чистоту **проверенного пакета кода 803-o3**. Оно **не**
+разрешает: push `origin/release` (ждёт согласования с параллельным Drive-first
+`cc9cfff`), установку systemd-юнитов и скачивание из Zoom (ждут операторских
+проверок на Lenovo), production E2E (не проводился), автоудаление записей
+(запрещено решениями владельца).
