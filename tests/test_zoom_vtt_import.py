@@ -104,6 +104,22 @@ def test_timing_attached_to_webvtt_header_is_rejected(tmp_path):
         parse_zoom_vtt(source)
 
 
+@pytest.mark.parametrize("service", ["NOTE", "STYLE", "REGION"])
+@pytest.mark.parametrize("timing", [
+    "00:00:01.00 --> 00:00:02.00",
+    "00:00:01 --> 00:00:02",
+    "00:00:01.000 -> 00:00:02.000",
+])
+def test_malformed_timing_in_service_block_never_loses_a_cue(tmp_path, service, timing):
+    source = tmp_path / "malformed-service.vtt"
+    source.write_text(f"WEBVTT\n\n{service}\n{timing}\nBob: lost\n\n"
+                      "00:00:03.000 --> 00:00:04.000\nAlice: kept\n", encoding="utf-8")
+    ok, error, transcript, meta = watcher.run_vtt_import(source, tmp_path / "out")
+    assert not ok and "failed" in error.lower()
+    assert transcript is None and meta is None
+    assert not (tmp_path / "out" / "malformed-service-transcript.md").exists()
+
+
 def test_opt_in_scans_vtt_but_not_a_media_sidecar(tmp_path):
     inbox = tmp_path / "Hub" / "PE45" / "_PE45_inbox" / "w1"
     inbox.mkdir(parents=True)

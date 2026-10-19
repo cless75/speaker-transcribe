@@ -14,7 +14,9 @@ import re
 
 
 _TIME = re.compile(r"^(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})$")
-_TIMESTAMP_LIKE = re.compile(r"(?<!\w)(?:\d+:)?\d{2}:\d{2}[.,]\d{3}")
+# Used only to reject suspect service blocks. This is intentionally *looser*
+# than _TIME: malformed cue timestamps must not be silently treated as comments.
+_TIMESTAMP_LIKE = re.compile(r"(?<!\w)\d{1,3}:\d{1,3}(?::\d{1,3})?(?:[.,]\d*)?")
 _VOICE = re.compile(r"^<v(?:\.[^ >]+)?\s+([^>]+)>(.*?)(?:</v>)?$", re.I)
 _LABEL = re.compile(r"^([^:]{1,80}):\s+(.+)$")
 _TAG = re.compile(r"<[^>]+>")
@@ -54,7 +56,7 @@ def parse_zoom_vtt(path: pathlib.Path) -> list[dict]:
         first = lines[0]
         if (first == "NOTE" or first.startswith(("NOTE ", "NOTE\t"))
                 or first in ("STYLE", "REGION")):
-            if any(_TIMESTAMP_LIKE.search(line) for line in lines):
+            if any("->" in line or _TIMESTAMP_LIKE.search(line) for line in lines):
                 raise ValueError("timed cue hidden inside VTT service block")
             continue
         timing = next((idx for idx, line in enumerate(lines) if "-->" in line), None)
