@@ -36,12 +36,24 @@ def parse_zoom_vtt(path: pathlib.Path) -> list[dict]:
     """Read every timed cue; a cue without a speaker remains unattributed, not lost."""
     text = path.read_text(encoding="utf-8-sig")
     blocks = re.split(r"\n\s*\n", text.replace("\r\n", "\n").replace("\r", "\n"))
-    if not blocks or not blocks[0].strip().startswith("WEBVTT"):
+    header = [line.strip() for line in blocks[0].splitlines()] if blocks else []
+    if not header or not re.fullmatch(r"WEBVTT(?:[ \t].*)?", header[0]):
         raise ValueError("not a WEBVTT recording")
+    # A missing blank separator after the header must not swallow the first cue.
+    # Unknown header metadata also fails closed rather than losing dialogue.
+    if any(not line.startswith(("Kind:", "Language:", "X-TIMESTAMP-MAP="))
+           for line in header[1:] if line):
+        raise ValueError("unexpected content in VTT header")
     cues: list[dict] = []
-    for block in blocks:
+    for block in blocks[1:]:
         lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if not lines or lines[0].startswith(("WEBVTT", "NOTE", "STYLE", "REGION")):
+        if not lines:
+            continue
+        first = lines[0]
+        if (first == "NOTE" or first.startswith(("NOTE ", "NOTE\t"))
+                or first in ("STYLE", "REGION")):
+            if any("-->" in line for line in lines[1:]):
+                raise ValueError("timed cue hidden inside VTT service block")
             continue
         timing = next((idx for idx, line in enumerate(lines) if "-->" in line), None)
         if timing is None or timing > 1:

@@ -54,6 +54,36 @@ def test_partly_malformed_vtt_cannot_be_marked_done(tmp_path, bad_cue):
     assert not (tmp_path / "out" / "partly-bad-transcript.md").exists()
 
 
+def test_cue_identifier_note_prefix_is_not_a_comment(tmp_path):
+    source = tmp_path / "note-prefix.vtt"
+    source.write_text("WEBVTT\n\nNOTE-2\n00:00:01.000 --> 00:00:02.000\nBob: included\n\n"
+                      "NOTE this is a real comment\nwithout timing\n\n"
+                      "00:00:03.000 --> 00:00:04.000\nAlice: also included\n",
+                      encoding="utf-8")
+    assert [cue["speaker"] for cue in parse_zoom_vtt(source)] == ["Bob", "Alice"]
+
+
+def test_missing_header_separator_never_publishes_partial_transcript(tmp_path):
+    source = tmp_path / "missing-separator.vtt"
+    source.write_text("WEBVTT\n00:00:01.000 --> 00:00:02.000\nBob: lost\n\n"
+                      "00:00:03.000 --> 00:00:04.000\nAlice: kept\n", encoding="utf-8")
+    ok, error, transcript, meta = watcher.run_vtt_import(source, tmp_path / "out")
+    assert not ok and "failed" in error.lower()
+    assert transcript is None and meta is None
+    assert not (tmp_path / "out" / "missing-separator-transcript.md").exists()
+
+
+def test_metadata_header_and_service_block_cannot_hide_a_cue(tmp_path):
+    source = tmp_path / "metadata.vtt"
+    source.write_text("WEBVTT\nKind: captions\nLanguage: en\n\n"
+                      "00:00:01.000 --> 00:00:02.000\nAlice: kept\n", encoding="utf-8")
+    assert parse_zoom_vtt(source)[0]["speaker"] == "Alice"
+    source.write_text("WEBVTT\n\nNOTE comment\n00:00:01.000 --> 00:00:02.000\nBob: lost\n\n"
+                      "00:00:03.000 --> 00:00:04.000\nAlice: kept\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="hidden"):
+        parse_zoom_vtt(source)
+
+
 def test_opt_in_scans_vtt_but_not_a_media_sidecar(tmp_path):
     inbox = tmp_path / "Hub" / "PE45" / "_PE45_inbox" / "w1"
     inbox.mkdir(parents=True)
