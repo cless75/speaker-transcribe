@@ -44,16 +44,19 @@ def parse_zoom_vtt(path: pathlib.Path) -> list[dict]:
         if not lines or lines[0].startswith(("WEBVTT", "NOTE", "STYLE", "REGION")):
             continue
         timing = next((idx for idx, line in enumerate(lines) if "-->" in line), None)
-        if timing is None:
-            continue
+        if timing is None or timing > 1:
+            raise ValueError("VTT cue is missing a valid timing line")
         left, right = lines[timing].split("-->", 1)
         start = _seconds(left)
-        end = _seconds(right.strip().split()[0])
+        end_fields = right.split()
+        if not end_fields:
+            raise ValueError("VTT cue is missing its end time")
+        end = _seconds(end_fields[0])
         if end < start:
             raise ValueError("VTT cue ends before it starts")
         raw = " ".join(lines[timing + 1:]).strip()
         if not raw:
-            continue
+            raise ValueError("VTT cue has no text")
         speaker = ""
         voice = _VOICE.match(raw)
         if voice:
@@ -63,8 +66,9 @@ def parse_zoom_vtt(path: pathlib.Path) -> list[dict]:
             if label:
                 speaker, raw = label.group(1).strip(), label.group(2).strip()
         utterance = _TAG.sub("", raw).strip()
-        if utterance:
-            cues.append({"start": start, "end": end, "speaker": speaker, "text": utterance})
+        if not utterance:
+            raise ValueError("VTT cue has no text")
+        cues.append({"start": start, "end": end, "speaker": speaker, "text": utterance})
     if not cues:
         raise ValueError("Zoom VTT has no transcript cues")
     return cues

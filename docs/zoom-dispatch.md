@@ -10,9 +10,20 @@ process: no zoomrs/GPL code is copied into this repository.
 
 1. Copy `config/zoom_dispatch.example.json` to `config/zoom_dispatch.local.json`
    (gitignored). Set the local paths (`database`, `repository`, `hub_root`,
-   `state_file`), mapping rules, fallback project and worker folder. The fallback
-   project must not start with `_`: the watcher skips such Hub directories.
-   Do not paste credentials into this JSON.
+    `state_file`), mapping rules, fallback project and worker folder. The fallback
+    project must not start with `_`: the watcher skips such Hub directories.
+    Do not paste credentials into this JSON.
+    `approved_meetings` starts empty: no Zoom meeting is imported until its UUID
+    is explicitly approved after checking whether it has already been processed
+    by an earlier media import. Keep this allowlist local; do not log meeting
+    identifiers or titles. If an approved meeting is already in the project index
+    as `asr-done` under another filename, add a `legacy_processed` mapping from
+    its UUID to `{ "pid": "...", "filename": "original index filename" }`.
+    The dispatcher checks that exact completed input and records it as already
+    delivered; a stale mapping or wrong project **blocks** delivery. Never infer
+    identity from a matching start time alone. Unapproved meetings remain untouched.
+    `worker_folder: "iso_week"` routes each meeting to `wN` using its start date's
+    ISO week (for example, 2026-10-16 → `w42`); a fixed `wN` is still supported.
    `container_repository` must match the zoomrs Docker mount path (`/data/recordings`);
    the dispatcher maps SQLite's container paths to the host `repository` and rejects
    anything resolving outside it.

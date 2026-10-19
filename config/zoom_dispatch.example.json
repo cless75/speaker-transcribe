@@ -6,7 +6,9 @@
   "hub_root": "/home/<user>/hub",
   "require_hub_mount": true,
   "state_file": "/home/<user>/.local/state/speaker-transcribe/zoom-dispatch.json",
-  "worker_folder": "w1",
+  "worker_folder": "iso_week",
+  "approved_meetings": [],
+  "legacy_processed": {},
   "max_meetings_per_run": 3,
   "min_stable_age_seconds": 120,
   "routes": [

@@ -32,8 +32,20 @@ def load_config(path: pathlib.Path) -> dict:
     for pid in [config["fallback_pid"], *(rule["pid"] for rule in config.get("routes", []))]:
         if not PID.fullmatch(pid):
             raise ValueError(f"unsafe pid: {pid!r}")
-    if not WORKER.fullmatch(config.get("worker_folder", "w1")):
-        raise ValueError("worker_folder must be w1, w2, etc.")
+    if (config.get("worker_folder", "w1") != "iso_week"
+            and not WORKER.fullmatch(config.get("worker_folder", "w1"))):
+        raise ValueError("worker_folder must be iso_week or w1, w2, etc.")
+    if not isinstance(config.get("approved_meetings"), list) or any(
+            not isinstance(uuid, str) or not uuid for uuid in config["approved_meetings"]):
+        raise ValueError("approved_meetings must be a list of reviewed Zoom UUIDs")
+    legacy = config.get("legacy_processed", {})
+    if not isinstance(legacy, dict) or any(
+            not isinstance(uuid, str) or not isinstance(item, dict)
+            or not PID.fullmatch(item.get("pid", ""))
+            or not isinstance(item.get("filename"), str)
+            or not item["filename"] or pathlib.Path(item["filename"]).name != item["filename"]
+            for uuid, item in legacy.items()):
+        raise ValueError("legacy_processed must map UUIDs to safe pid/filename pairs")
     if int(config.get("max_meetings_per_run", 3)) < 1:
         raise ValueError("max_meetings_per_run must be positive")
     container_root = config.get("container_repository")
@@ -148,12 +160,17 @@ def _save_state(path: pathlib.Path, state: dict) -> None:
 
 
 def _filename(meeting: dict, vtt: dict) -> str:
+    stamp = _meeting_start(meeting)
+    key = hashlib.sha256((meeting["uuid"] + ":" + vtt["record_id"]).encode()).hexdigest()[:12]
+    return stamp.strftime("%Y%m%d_%H%M%S") + "_" + key
+
+
+def _meeting_start(meeting: dict) -> dt.datetime:
     try:
         stamp = dt.datetime.fromisoformat(meeting["start"].replace("Z", "+00:00"))
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid zoomrs meeting startTime") from exc
-    key = hashlib.sha256((meeting["uuid"] + ":" + vtt["record_id"]).encode()).hexdigest()[:12]
-    return stamp.strftime("%Y%m%d_%H%M%S") + "_" + key
+    return stamp
 
 
 def _already_processed(project: pathlib.Path, filename: str) -> bool:
@@ -196,11 +213,16 @@ def dispatch_once(config: dict, *, dry_run: bool = False) -> dict:
     settle = int(config.get("min_stable_age_seconds", 120))
     if settle < 0:
         raise ValueError("min_stable_age_seconds cannot be negative")
-    report = {"delivered": 0, "pending": 0, "already": 0, "ambiguous": 0}
+    report = {"delivered": 0, "pending": 0, "already": 0, "ambiguous": 0,
+              "unapproved": 0}
+    approved = set(config.get("approved_meetings", []))
     for meeting in _meetings(pathlib.Path(config["database"]).expanduser()):
         if meeting["uuid"] in saved:
             report["already"] += 1
             continue
+        if meeting["uuid"] not in approved:
+            report["unapproved"] += 1
+            continue  # never import an unreviewed historic meeting by timestamp alone
         vtts = [r for r in meeting["records"] if r["type"] == "audio_transcript"]
         chats = [r for r in meeting["records"] if r["type"] == "chat_file"]
         if len(vtts) != 1 or len(chats) > 1:
@@ -215,9 +237,22 @@ def dispatch_once(config: dict, *, dry_run: bool = False) -> dict:
         pid = project_id(meeting["topic"] or "", config)
         stem = _filename(meeting, vtts[0])
         project = hub / pid
-        inbox = project / f"_{pid}_inbox" / config.get("worker_folder", "w1")
+        worker = config.get("worker_folder", "w1")
+        if worker == "iso_week":
+            worker = f"w{_meeting_start(meeting).isocalendar().week}"
+        inbox = project / f"_{pid}_inbox" / worker
         vtt_name = f"{stem}.transcript.vtt"
         target_vtt = inbox / vtt_name
+        legacy = config.get("legacy_processed", {}).get(meeting["uuid"])
+        if legacy is not None:
+            if legacy["pid"] != pid or not _already_processed(project, legacy["filename"]):
+                raise ValueError("legacy meeting approval does not match an asr-done input")
+            if not dry_run:
+                saved[meeting["uuid"]] = {"pid": pid, "legacy": legacy["filename"],
+                                          "recovered": True}
+                _save_state(state_path, saved)
+            report["already"] += 1
+            continue
         if _already_processed(project, vtt_name):
             if not dry_run:
                 saved[meeting["uuid"]] = {"pid": pid, "vtt": vtt_name, "recovered": True}

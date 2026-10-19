@@ -39,6 +39,21 @@ def test_malformed_vtt_never_publishes_success(tmp_path):
     assert not (tmp_path / "out" / "bad-transcript.md").exists()
 
 
+@pytest.mark.parametrize("bad_cue", [
+    "2\n00:00:03.500 -> 00:00:05.000\nBob: lost",
+    "2\n00:00:03.500 -->\nBob: lost",
+    "2\n00:00:03.500 --> 00:00:05.000",
+])
+def test_partly_malformed_vtt_cannot_be_marked_done(tmp_path, bad_cue):
+    source = tmp_path / "partly-bad.vtt"
+    source.write_text("WEBVTT\n\n1\n00:00:01.100 --> 00:00:03.500\nAlice: kept\n\n"
+                      + bad_cue + "\n", encoding="utf-8")
+    ok, error, transcript, meta = watcher.run_vtt_import(source, tmp_path / "out")
+    assert not ok and "failed" in error.lower()
+    assert transcript is None and meta is None
+    assert not (tmp_path / "out" / "partly-bad-transcript.md").exists()
+
+
 def test_opt_in_scans_vtt_but_not_a_media_sidecar(tmp_path):
     inbox = tmp_path / "Hub" / "PE45" / "_PE45_inbox" / "w1"
     inbox.mkdir(parents=True)

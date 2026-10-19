@@ -37,7 +37,8 @@ def fixture(tmp_path):
     cfg = {"database": str(db), "repository": str(repo), "hub_root": str(hub),
            "require_hub_mount": False, "state_file": str(tmp_path / "state.json"),
            "routes": [{"contains": "example course", "pid": "PE45"}],
-           "fallback_pid": "unrouted", "worker_folder": "w1",
+            "fallback_pid": "unrouted", "worker_folder": "w1",
+            "approved_meetings": ["uuid-1", "uuid-2"],
            "max_meetings_per_run": 1, "min_stable_age_seconds": 0}
     return cfg, hub, repo
 
@@ -116,6 +117,35 @@ def test_existing_processed_index_prevents_republishing(tmp_path):
     assert result["delivered"] == 1  # second meeting, but not the already processed first
     assert result["already"] == 1
     assert not list((project / "_unrouted_inbox").glob("**/*.vtt"))
+
+
+def test_legacy_processed_mapping_uses_explicit_identity_not_timestamp(tmp_path):
+    cfg, hub, _ = fixture(tmp_path)
+    project = hub / "unrouted"
+    project.mkdir()
+    old_name = "20261017_080200_Recording.mp4"
+    (project / "_sessions-index.md").write_text(
+        f"| `{old_name}` | asr-done | — | S20261017T0802 |\n", encoding="utf-8")
+    cfg["legacy_processed"] = {"uuid-2": {"pid": "unrouted", "filename": old_name}}
+    cfg["worker_folder"] = "iso_week"
+    result = dispatch.dispatch_once(cfg)
+    assert result["already"] == 1
+    assert result["delivered"] == 1  # only the other, approved meeting
+    assert not list((project / "_unrouted_inbox").glob("**/*.vtt"))
+    assert list((hub / "PE45" / "_PE45_inbox" / "w42").glob("*.vtt"))
+
+
+def test_unapproved_or_unverified_legacy_meeting_cannot_be_dispatched(tmp_path):
+    cfg, hub, _ = fixture(tmp_path)
+    cfg["approved_meetings"] = []
+    report = dispatch.dispatch_once(cfg)
+    assert report["unapproved"] == 2 and report["delivered"] == 0
+    assert not list(hub.iterdir())
+    cfg["approved_meetings"] = ["uuid-2"]
+    cfg["legacy_processed"] = {"uuid-2": {"pid": "unrouted", "filename": "old.mp4"}}
+    with pytest.raises(ValueError, match="legacy meeting approval"):
+        dispatch.dispatch_once(cfg)
+    assert not list(hub.iterdir())
 
 
 def test_processed_sidecar_recovers_before_index_refresh(tmp_path):
