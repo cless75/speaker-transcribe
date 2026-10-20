@@ -217,6 +217,13 @@ day — and `src/zoom_dispatch.py` copies an approved meeting's VTT/chat into th
 canonical project-inbox path above, where the running node picks the VTT up.
 The video stays in the local zoomrs repository and never enters the hub.
 
+This is the existing **Drive-backed VTT-only** route, not a local-only media
+bundle. For a local-only run, the MP4 and its matching Zoom VTT must be staged
+and claimed together: ASR derives text from the MP4; the VTT provides speaker
+turns/names. The current Drive-first worker still inventories and publishes to
+Drive, even when it stages media locally. A separate local backend and a
+verified local `asr-done` are required before claiming this route works.
+
 ```bash
 # No writes: inspect one candidate, or inspect the whole Hub queue.
 python3 src/hub_worker.py --project PROJECT --file recording.m4a \

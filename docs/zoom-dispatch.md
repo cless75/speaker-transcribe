@@ -6,6 +6,13 @@ moves or deletes the downloaded MP4: zoomrs' repository must be on local disk.
 The hub receives only VTT and (if available) a chat TXT file. This is a separate
 process: no zoomrs/GPL code is copied into this repository.
 
+**Scope:** this is the existing VTT-only delivery route into a mounted Hub.
+It does **not** hand the downloaded MP4 and its VTT to the ASR engine as one
+local bundle. If `hub_root` is an rclone/Drive mount, delivery writes to Drive;
+executing the worker on a local machine does not make that storage local.
+Do not run this dispatcher or enable its timer for a local-only Zoom-bundle
+workflow. That workflow needs a separate local intake and processing backend.
+
 ## Acquisition from Zoom (zoomrs side)
 
 The separate zoomrs container keeps recordings in its local repository; nothing
@@ -31,8 +38,9 @@ is deleted anywhere with our configuration (`trash_downloaded`,
 - zoomrs downloads only the record types listed in its `syncable` config
   (video variants, `audio_transcript`, `chat_file`); other cloud artifacts
   such as AI summaries stay in Zoom.
-- The logger wraps every character of its output; strip the filler before
-  grepping, for example: `tr -d '*' < cli.log | grep 'cli job done'`.
+- In deployments where the logger decorates output with asterisks, normalize
+  before searching for completion, for example:
+  `tr -d '*' < cli.log | grep 'cli job done'`. Check the CLI exit status too.
 
 ## Prepare
 
@@ -90,22 +98,30 @@ entry in `_sessions-index.md` is also treated as delivered.
 
 ## Pickup by the receiving node
 
-Delivery ends at the hub project inbox; the processing node completes the
-chain on its own, without ever seeing the video:
+For the **existing VTT-only route**, delivery ends at the hub project inbox:
 
-- The node's watcher scans `{hub_root}` with
-  `discover: "project-inboxes"` (see `config/node.local.json`), so every
-  `_{pid}_inbox/wN/` directory is a pickup zone.
+- The legacy watcher can scan `{hub_root}` with
+  `discover: "project-inboxes"` (see `config/node.local.json`). A separate
+  Drive-first `hub_worker.py` inventories Drive directly. These are alternative
+  consumers: do not run both on the same inputs.
 - With `"zoom_vtt_only_input": true` on the receiving node, a standalone VTT
   at the canonical path `{pid}/_{pid}_inbox/wN/*.vtt` (lowercase `w`, ISO
-  week of the meeting start) starts a VTT-only run: transcript import without
-  media ASR, outputs written through the node's `outputs{}` templates, and
-  `asr-done` in the project index. The dispatcher copies the VTT last, so its
-  presence is the ready signal; chat text, when present, arrives first.
+  week of the meeting start) is eligible for VTT-only import **if the chosen
+  consumer is running and its gates pass**. Merely downloading or delivering
+  it does not establish `asr-done`. The dispatcher copies the VTT last as the
+  ready signal; chat text, when present, arrives first.
 - A VTT beside a matching media source stays a sidecar; only a standalone VTT
   creates a run. Other standalone VTT paths are not auto-selected.
 - The MP4 stays in the zoomrs local repository by design — the hub receives
   VTT and chat text only.
+
+For **local-only bundle processing**, the intended input is one verified copy
+of the MP4 and matching VTT (plus chat when available), claimed as **one job**.
+Local ASR uses the MP4 audio for the transcript; Zoom VTT supplies speaker turns
+and names, not the transcript text. Results, source markers, and the final
+`asr-done` must stay on local disk. This route is **not implemented here yet**;
+the Drive-first worker still uses Drive for inventory and publication. Do not
+mistake its local staging directory for a local-only backend.
 
 ## Timer (operator / sudo)
 
