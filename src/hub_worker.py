@@ -633,9 +633,23 @@ def process_one(drive: Drive, item: MediaFile, root: pathlib.Path, cfg: dict,
         refresh_status(drive, item.project, root)
         executor = transcribe or _default_transcribe
         transcript, meta = executor(local, out_dir, cfg, config_path, pid)
-        if not transcript.is_file() or transcript.stat().st_size == 0 or meta.get("status") != "ok":
+        if (transcript is None or not transcript.is_file() or
+                transcript.stat().st_size == 0 or not isinstance(meta, dict) or
+                meta.get("status") not in {"ok", "degraded"}):
             raise RuntimeError("transcriber returned no complete transcript")
-        job.update({"phase": "processed", "transcript": transcript.name})
+        quality = meta.get("quality")
+        if meta["status"] == "degraded" and (not isinstance(quality, dict) or
+                                              quality.get("status") != "degraded"):
+            raise RuntimeError("degraded transcript has no quality details")
+        quality = quality if isinstance(quality, dict) else {}
+        job.update({"phase": "processed", "transcript": transcript.name,
+                    "transcript_quality": {
+                        "status": meta["status"],
+                        "suspect_sec": quality.get("suspect_sec"),
+                        "suspect_ratio": quality.get("suspect_ratio"),
+                        "gaps_sec": quality.get("gaps_sec"),
+                        "thresholds": quality.get("thresholds"),
+                    }})
         atomic_json(job_path, job)
     publish_progress(drive, item, local.parent, job, pid, "awaiting-publication", cfg)
     refresh_status(drive, item.project, root)
@@ -671,6 +685,7 @@ def process_one(drive: Drive, item: MediaFile, root: pathlib.Path, cfg: dict,
              "transcript_path": remote_transcript,
              "transcript_url": "https://drive.google.com/file/d/" + transcript_info["ID"] + "/view",
              "publication_verified": True, "worker_completed": True,
+             "transcript_quality": job.get("transcript_quality", {"status": "ok"}),
              "last_error": None}
     if needs_classification:
         state["needs_classification"] = True

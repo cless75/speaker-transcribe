@@ -194,6 +194,12 @@ only a `.vtt` in a `_test*` folder, and only after verifying the **actual** old
 watcher config cannot discover VTT. Old media in that folder is *not* isolated.
 The whole-Hub sweep always transcribes eligible **media**. A same-meeting VTT
 travels with the media as a speaker-label sidecar, never as a second job.
+An ASR result marked `degraded` by the quality gate is still published if it
+contains a nonempty completed transcript and explicit quality details. The
+`transcript_quality` warning (including gaps and thresholds) is carried in the
+local journal and both Drive state markers; the full quality report stays in
+the published run metadata. Missing/failed output still blocks publication,
+and `asr-done` is written only after Drive reconciliation.
 With `zoom_vtt_only_input: true`, VTT-only jobs are selected automatically
 **only** from the canonical Zoom dispatch path
 `{pid}/_{pid}_inbox/wN/*.vtt` (lowercase `w`, ISO week). Zoom's heavy video can

@@ -113,6 +113,63 @@ def test_local_asr_output_is_published_and_verified_before_done(tmp_path):
     assert any(name.endswith("pipeline/state.json") for name in drive.files)
 
 
+def test_degraded_transcript_publishes_with_quality_warning_after_verification(tmp_path):
+    drive = MemoryDrive({"553/voice.m4a": b"audio"})
+    item = media(drive, project="553")
+    calls = []
+    quality = {"status": "degraded", "suspect_sec": 0, "suspect_ratio": 0,
+               "gaps_sec": 152.17, "thresholds": {"gaps_sec_max": 30}}
+
+    def degraded(audio, output, cfg, config_path, pid):
+        transcript, _ = fake_asr(calls)(audio, output, cfg, config_path, pid)
+        (output / (audio.stem + "-run-meta.json")).write_text(
+            json.dumps({"status": "degraded", "quality": quality}), encoding="utf-8")
+        return transcript, {"status": "degraded", "quality": quality}
+
+    drive.fail_copy_once = True
+    with pytest.raises(RuntimeError, match="interrupted"):
+        hub_worker.process_one(drive, item, tmp_path, {"hub_root": "/mnt/hub"},
+                               tmp_path / "node.json", transcribe=degraded)
+    assert drive.state("553", "voice.m4a")["status"] == "awaiting-publication"
+    journal = next(tmp_path.glob("intake/553/*/*/job.json"))
+    assert json.loads(journal.read_text())["transcript_quality"] == {
+        "status": "degraded", "suspect_sec": 0, "suspect_ratio": 0,
+        "gaps_sec": 152.17, "thresholds": {"gaps_sec_max": 30}}
+
+    state = hub_worker.process_one(drive, media(drive, project="553"), tmp_path,
+                                   {"hub_root": "/mnt/hub"}, tmp_path / "node.json",
+                                   transcribe=degraded)
+    assert len(calls) == 1
+    assert state["status"] == "asr-done" and state["publication_verified"] is True
+    assert state["transcript_quality"]["status"] == "degraded"
+    assert state["transcript_quality"]["gaps_sec"] == 152.17
+    assert drive.state("553", "voice.m4a")["transcript_quality"] == state["transcript_quality"]
+    assert any(path.endswith("pipeline/state.json") and
+               json.loads(blob)["transcript_quality"] == state["transcript_quality"]
+               for path, blob in drive.files.items())
+    assert any(path.endswith("-run-meta.json") and
+               json.loads(blob)["status"] == "degraded"
+               for path, blob in drive.files.items())
+
+
+@pytest.mark.parametrize("status,quality", [
+    ("error", {}), ("degraded", None), ("degraded", {"status": "ok"}),
+])
+def test_incomplete_asr_is_not_published(tmp_path, status, quality):
+    drive = MemoryDrive({"553/voice.m4a": b"audio"})
+
+    def incomplete(audio, output, cfg, config_path, pid):
+        transcript, _ = fake_asr([])(audio, output, cfg, config_path, pid)
+        return transcript, {"status": status, "quality": quality}
+
+    with pytest.raises(RuntimeError, match="transcriber returned|quality details"):
+        hub_worker.process_one(drive, media(drive, project="553"), tmp_path,
+                               {"hub_root": "/mnt/hub"}, tmp_path / "node.json",
+                               transcribe=incomplete)
+    assert drive.state("553", "voice.m4a")["status"] == "in-progress"
+    assert not any(path.endswith("pipeline/state.json") for path in drive.files)
+
+
 def test_publish_failure_resumes_without_repeating_asr(tmp_path):
     drive = MemoryDrive({"_test505/voice.m4a": b"fake audio"})
     item = media(drive)
