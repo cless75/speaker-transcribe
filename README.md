@@ -192,9 +192,16 @@ successful ASR. It refuses to run while the
 old systemd watcher is active. The single exception is `--isolated-vtt-canary`:
 only a `.vtt` in a `_test*` folder, and only after verifying the **actual** old
 watcher config cannot discover VTT. Old media in that folder is *not* isolated.
-Standalone VTTs without markers have no age cutoff: a separately approved
-historical backlog can be imported after cutover, with the risk of re-importing
-material previously processed outside this watcher.
+The whole-Hub sweep always transcribes eligible **media**. A same-meeting VTT
+travels with the media as a speaker-label sidecar, never as a second job.
+With `zoom_vtt_only_input: true`, VTT-only jobs are selected automatically
+**only** from the canonical Zoom dispatch path
+`{pid}/_{pid}_inbox/wN/*.vtt` (lowercase `w`, ISO week). Zoom's heavy video can
+stay on Lenovo; this separate route imports the VTT without media ASR. Other
+standalone VTTs are not auto-selected. An owner-approved historical backlog can
+be imported one file at a time with `--project PID --file PATH --manual-vtt --run`;
+there is no age cutoff, but previous media ASR may have created a transcript
+for the same meeting. The old watcher must remain off for these manual imports.
 
 ```bash
 # No writes: inspect one candidate, or inspect the whole Hub queue.

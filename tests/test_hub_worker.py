@@ -203,28 +203,63 @@ def test_queue_inspection_includes_new_and_vtt_but_not_completed(tmp_path):
     old = json.dumps({"status": "asr-done"}).encode("utf-8")
     drive = MemoryDrive({"506/voice.m4a": b"new audio", "506/old.m4a": b"old audio",
                          "506/old.m4a.state.json": old,
-                         "506/meeting.vtt": b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n"})
+                         "506/_506_inbox/w42/meeting.vtt": b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n",
+                         "506/notes.vtt": b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nNotes\n"})
     jobs, quarantine = hub_worker.pending_inputs(
         drive, "506", {"zoom_vtt_only_input": True}, tmp_path)
-    assert {item.path for item, _ in jobs} == {"voice.m4a", "meeting.vtt"}
+    assert {item.path for item, _ in jobs} == {"voice.m4a", "_506_inbox/w42/meeting.vtt"}
     assert quarantine == []
 
 
-def test_historical_standalone_vtt_has_no_age_cutoff(tmp_path):
+def test_historical_zoom_week_vtt_has_no_age_cutoff(tmp_path):
     class OldVtt(MemoryDrive):
         def list(self, *parts, recursive=False):
             values = super().list(*parts, recursive=recursive)
             for entry in values:
-                if entry.get("Path") == "2026-05-25-lesson.vtt":
+                if entry.get("Path") == "_Example-Course_inbox/w21/2026-05-25-lesson.vtt":
                     entry["ModTime"] = "2026-05-25T07:00:00Z"
             return values
 
-    drive = OldVtt({"Example-Course/2026-05-25-lesson.vtt":
+    drive = OldVtt({"Example-Course/_Example-Course_inbox/w21/2026-05-25-lesson.vtt":
                     b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nOld cue\n"})
     jobs, held = hub_worker.pending_inputs(
         drive, "Example-Course", {"zoom_vtt_only_input": True}, tmp_path)
-    assert [item.path for item, _ in jobs] == ["2026-05-25-lesson.vtt"]
+    assert [item.path for item, _ in jobs] == ["_Example-Course_inbox/w21/2026-05-25-lesson.vtt"]
     assert held == []
+
+
+def test_unpaired_vtt_needs_explicit_manual_exception(tmp_path):
+    drive = MemoryDrive({"33/GMT20260525-060146_Recording.transcript.vtt":
+                         b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nOld cue\n"})
+    cfg = {"zoom_vtt_only_input": True}
+    jobs, held = hub_worker.pending_inputs(drive, "33", cfg, tmp_path)
+    assert jobs == [] and held == []
+    item = hub_worker.choose_input(drive, "33", "GMT20260525-060146_Recording.transcript.vtt",
+                                   allow_vtt=True)
+    with pytest.raises(ValueError, match="--manual-vtt"):
+        hub_worker.require_vtt_route(item, cfg)
+    hub_worker.require_vtt_route(item, cfg, manual=True)
+
+
+def test_weekly_vtt_route_rejects_lookalikes_and_media_still_runs(tmp_path):
+    cfg = {"zoom_vtt_only_input": True}
+    assert hub_worker.zoom_dispatch_vtt("415", "_415_inbox/w42/meeting.vtt")
+    for path in ("meeting.vtt", "_415_inbox/meeting.vtt",
+                 "_415_inbox/W42/meeting.vtt", "_415_inbox/w54/meeting.vtt",
+                 "_415_inbox/w42/deeper/meeting.vtt", "_416_inbox/w42/meeting.vtt"):
+        assert not hub_worker.zoom_dispatch_vtt("415", path)
+    vtt = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nSpeaker: hello\n"
+    stem = "GMT20261019-110000_Recording"
+    drive = MemoryDrive({f"415/_415_inbox/w42/{stem}.m4a": b"audio",
+                         f"415/_415_inbox/w42/{stem}.transcript.vtt": vtt})
+    jobs, held = hub_worker.pending_inputs(drive, "415", cfg, tmp_path)
+    assert held == [] and len(jobs) == 1
+    primary, peers = jobs[0]
+    assert primary.path.endswith(".m4a")
+    assert [peer.path for peer in peers] == [f"_415_inbox/w42/{stem}.transcript.vtt"]
+    jobs, held = hub_worker.pending_inputs(drive, "415", {"zoom_vtt_only_input": False}, tmp_path)
+    assert held == [] and len(jobs) == 1 and jobs[0][0].path == primary.path
+    assert [peer.path for peer in jobs[0][1]] == [peers[0].path]
 
 
 def test_queue_quarantines_duplicate_id_but_keeps_other_file(tmp_path):
@@ -319,8 +354,8 @@ def test_whole_hub_limits_processing_to_one_file_per_sweep(tmp_path, monkeypatch
                                    transcribe=fake_asr([]))
     hub_worker.media_e2e_receipt(tmp_path, cfg, proof, state)
     vtt = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n"
-    drive.files["506/lesson-a.vtt"] = vtt
-    drive.files["506/lesson-b.vtt"] = vtt
+    drive.files["506/_506_inbox/w42/lesson-a.vtt"] = vtt
+    drive.files["506/_506_inbox/w42/lesson-b.vtt"] = vtt
     monkeypatch.setattr(hub_worker, "legacy_inactive", lambda: None)
     monkeypatch.setattr(hub_worker, "single_worker", lambda *_a: __import__("contextlib").nullcontext())
     monkeypatch.setattr(hub_worker, "run_claimed", lambda d, item, root, config, path, peers:
@@ -329,6 +364,32 @@ def test_whole_hub_limits_processing_to_one_file_per_sweep(tmp_path, monkeypatch
     assert summary["attempted"] == summary["processed"] == 1
     assert summary["unscanned_projects"] == 0  # only one project in this fixture
     assert sum(path.endswith(".vtt.state.json") for path in drive.files) == 1
+
+
+def test_media_only_sweep_keeps_vtt_as_sidecar_without_importing_it(tmp_path, monkeypatch):
+    drive = MemoryDrive({"506/proof.m4a": b"proof audio"})
+    cfg = {"hub_root": "/mnt/hub", "zoom_vtt_only_input": False,
+           "enable_multi_machine": True}
+    proof = media(drive, project="506", path="proof.m4a")
+    state = hub_worker.process_one(drive, proof, tmp_path, cfg, tmp_path / "node.json",
+                                   transcribe=fake_asr([]))
+    hub_worker.media_e2e_receipt(tmp_path, cfg, proof, state)
+    stem = "GMT20261019-110000_Recording"
+    drive.files[f"506/_506_inbox/w42/{stem}.m4a"] = b"media"
+    drive.files[f"506/_506_inbox/w42/{stem}.transcript.vtt"] = (
+        b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nSpeaker: hello\n")
+    drive.files["506/unpaired.vtt"] = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nOld\n"
+    monkeypatch.setattr(hub_worker, "legacy_inactive", lambda: None)
+    monkeypatch.setattr(hub_worker, "single_worker", lambda *_a: __import__("contextlib").nullcontext())
+    calls = []
+    monkeypatch.setattr(hub_worker, "run_claimed", lambda d, item, root, config, path, peers:
+                        hub_worker.process_one(d, item, root, config, path,
+                                               companions=peers, transcribe=fake_asr(calls)))
+    summary = hub_worker.run_whole_hub(drive, tmp_path, cfg, tmp_path / "node.json", 1)
+    assert summary["attempted"] == summary["processed"] == 1
+    assert len(calls) == 1 and calls[0].suffix == ".m4a"
+    assert f"506/_506_inbox/w42/{stem}.transcript.vtt.state.json" not in drive.files
+    assert "506/unpaired.vtt.state.json" not in drive.files
 
 
 def test_zoom_bundle_is_staged_together_and_transcribed_once(tmp_path):

@@ -30,6 +30,7 @@ from hub_intake import (Drive, MediaFile, MEDIA, media_inventory, partition_entr
 from zoom_vtt_import import import_zoom_vtt
 
 ZOOM_TIMESTAMP = re.compile(r"(?:GMT)?(\d{8}[-_]\d{6})")
+ZOOM_WEEK = re.compile(r"w(?:[1-9]|[1-4]\d|5[0-3])")
 
 
 def atomic_json(path: pathlib.Path, payload: dict) -> None:
@@ -107,8 +108,26 @@ def isolated_vtt_canary(item: MediaFile, legacy_config: pathlib.Path) -> None:
     if old.get("zoom_vtt_only_input") or ".vtt" in extensions:
         raise RuntimeError("legacy watcher can discover VTT; stop it before this E2E")
     if not any(source.get("discover") == "project-inboxes" and
-               source.get("root") == "{hub_root}" for source in old.get("sources", [])):
+                source.get("root") == "{hub_root}" for source in old.get("sources", [])):
         raise RuntimeError("cannot prove legacy watcher source coverage from config")
+
+
+def zoom_dispatch_vtt(project: str, path: str) -> bool:
+    """Only the canonical weekly project inbox is a VTT-only automatic input."""
+    parts = safe_parts(path)
+    return (len(parts) == 3 and parts[0] == f"_{project}_inbox" and
+            ZOOM_WEEK.fullmatch(parts[1]) is not None and
+            pathlib.PurePosixPath(parts[2]).suffix.lower() == ".vtt")
+
+
+def require_vtt_route(item: MediaFile, cfg: dict, *, manual: bool = False,
+                      isolated: bool = False) -> None:
+    if pathlib.PurePosixPath(item.path).suffix.lower() != ".vtt":
+        return
+    if not cfg.get("zoom_vtt_only_input"):
+        raise ValueError("VTT-only input is disabled")
+    if not (zoom_dispatch_vtt(item.project, item.path) or manual or isolated):
+        raise ValueError("standalone VTT outside weekly Zoom inbox needs --manual-vtt")
 
 
 def choose_input(drive: Drive, project: str, rel: str, *, allow_vtt: bool) -> MediaFile:
@@ -240,7 +259,8 @@ def pending_inputs(drive: Drive, project: str, cfg: dict, cache: pathlib.Path,
             path = entry.get("Path", "")
             vtt = pathlib.PurePosixPath(path)
             if (entry.get("IsDir") or vtt.suffix.lower() != ".vtt" or
-                    vtt.name.endswith("-segments.vtt") or not scannable(project, path)):
+                    vtt.name.endswith("-segments.vtt") or
+                    not zoom_dispatch_vtt(project, path) or not scannable(project, path)):
                 continue
             stamp = ZOOM_TIMESTAMP.search(vtt.name)
             if any(peer.parent == vtt.parent and (peer.stem == vtt.stem or
@@ -778,8 +798,8 @@ def require_media_e2e(drive: Drive, root: pathlib.Path, cfg: dict,
 def run_whole_hub(drive: Drive, root: pathlib.Path, cfg: dict,
                   config_path: pathlib.Path, max_files: int) -> dict:
     """Bounded single-node sweep; other nodes may only compete via the shared claim."""
-    if max_files < 1 or not cfg.get("zoom_vtt_only_input") or not cfg.get("enable_multi_machine"):
-        raise ValueError("whole-Hub sweep needs max_files >= 1, VTT-only and multi-machine claim")
+    if max_files < 1 or not cfg.get("enable_multi_machine"):
+        raise ValueError("whole-Hub sweep needs max_files >= 1 and multi-machine claim")
     legacy_inactive()
     require_media_e2e(drive, root, cfg)
     report = {"processed": 0, "attempted": 0, "quarantined": 0,
@@ -901,6 +921,8 @@ def main() -> int:
     parser.add_argument("--run", action="store_true", help="actually start the local worker")
     parser.add_argument("--isolated-vtt-canary", action="store_true",
                         help="permit one _test* VTT only if old watcher config excludes VTT")
+    parser.add_argument("--manual-vtt", action="store_true",
+                        help="explicit one-file VTT backlog exception; never part of --all")
     parser.add_argument("--legacy-config", type=pathlib.Path,
                         help="actual live config of the running watcher (required for canary)")
     args = parser.parse_args()
@@ -908,7 +930,7 @@ def main() -> int:
         if args.all or args.project or args.file:
             parser.error("cleanup cannot be combined with project or queue selection")
     elif args.all:
-        if args.project or args.file:
+        if args.project or args.file or args.manual_vtt:
             parser.error("--all cannot be combined with a single file")
     elif not args.project or not args.file:
         parser.error("--project and --file are both required unless --all is used")
@@ -944,6 +966,11 @@ def main() -> int:
         return 1 if counts["incomplete"] else 0
     item, companions = choose_group(drive, args.project, args.file,
                                     allow_vtt=bool(cfg.get("zoom_vtt_only_input", False)))
+    if args.manual_vtt and pathlib.PurePosixPath(item.path).suffix.lower() != ".vtt":
+        parser.error("--manual-vtt requires a single VTT input")
+    if args.run:
+        require_vtt_route(item, cfg, manual=args.manual_vtt,
+                          isolated=args.isolated_vtt_canary)
     if not args.run:
         print(f"DRY RUN: {item.project}/{item.path} ID={item.file_id} bytes={item.size} "
               f"companions={len(companions)}")
