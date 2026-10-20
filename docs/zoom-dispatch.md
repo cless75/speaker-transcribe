@@ -6,6 +6,34 @@ moves or deletes the downloaded MP4: zoomrs' repository must be on local disk.
 The hub receives only VTT and (if available) a chat TXT file. This is a separate
 process: no zoomrs/GPL code is copied into this repository.
 
+## Acquisition from Zoom (zoomrs side)
+
+The separate zoomrs container keeps recordings in its local repository; nothing
+is deleted anywhere with our configuration (`trash_downloaded`,
+`delete_downloaded`, `delete_skipped` all `false`).
+
+- **Fresh recordings:** with `sync_job: true` (and `download_job: true`) the
+  service re-checks the Zoom feed **hourly, for yesterday only** — a meeting
+  lands in the local repository the day after it ended, never the same day.
+- **One specific day** (a backlog meeting, or a same-day verification): the
+  rolling job never reaches it; run the CLI once instead:
+
+  ```sh
+  docker exec zoomrs ./zoomrs-cli --config config.yml --cmd=sync --days N
+  ```
+
+  `N` is the distance in days from today to the meeting date (`0` = today,
+  `4` = four days back). One run **syncs and downloads only that day's**
+  meetings, then exits with `cli job done`; other days' backlog and failures
+  stay untouched.
+- Keep the service jobs **off** while a CLI batch runs: both downloaders share
+  one queue and are not coordinated with each other.
+- zoomrs downloads only the record types listed in its `syncable` config
+  (video variants, `audio_transcript`, `chat_file`); other cloud artifacts
+  such as AI summaries stay in Zoom.
+- The logger wraps every character of its output; strip the filler before
+  grepping, for example: `tr -d '*' < cli.log | grep 'cli job done'`.
+
 ## Prepare
 
 1. Copy `config/zoom_dispatch.example.json` to `config/zoom_dispatch.local.json`
@@ -59,6 +87,25 @@ path produces `-transcript.md`, `state.json` (`asr-done`) and the usual
 `_sessions-index.md`. A crash after copying but before saving the manifest
 can be retried without overwriting a different file; an existing processed
 entry in `_sessions-index.md` is also treated as delivered.
+
+## Pickup by the receiving node
+
+Delivery ends at the hub project inbox; the processing node completes the
+chain on its own, without ever seeing the video:
+
+- The node's watcher scans `{hub_root}` with
+  `discover: "project-inboxes"` (see `config/node.local.json`), so every
+  `_{pid}_inbox/wN/` directory is a pickup zone.
+- With `"zoom_vtt_only_input": true` on the receiving node, a standalone VTT
+  at the canonical path `{pid}/_{pid}_inbox/wN/*.vtt` (lowercase `w`, ISO
+  week of the meeting start) starts a VTT-only run: transcript import without
+  media ASR, outputs written through the node's `outputs{}` templates, and
+  `asr-done` in the project index. The dispatcher copies the VTT last, so its
+  presence is the ready signal; chat text, when present, arrives first.
+- A VTT beside a matching media source stays a sidecar; only a standalone VTT
+  creates a run. Other standalone VTT paths are not auto-selected.
+- The MP4 stays in the zoomrs local repository by design — the hub receives
+  VTT and chat text only.
 
 ## Timer (operator / sudo)
 

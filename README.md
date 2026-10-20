@@ -203,6 +203,14 @@ be imported one file at a time with `--project PID --file PATH --manual-vtt --ru
 there is no age cutoff, but previous media ASR may have created a transcript
 for the same meeting. The old watcher must remain off for these manual imports.
 
+The Zoom side of this route is documented in
+[docs/zoom-dispatch.md](docs/zoom-dispatch.md): recordings are acquired by the
+separate zoomrs container — an hourly rolling sync that reaches **yesterday's**
+meetings only, or an explicit `zoomrs-cli --cmd=sync --days N` for one chosen
+day — and `src/zoom_dispatch.py` copies an approved meeting's VTT/chat into the
+canonical project-inbox path above, where the running node picks the VTT up.
+The video stays in the local zoomrs repository and never enters the hub.
+
 ```bash
 # No writes: inspect one candidate, or inspect the whole Hub queue.
 python3 src/hub_worker.py --project PROJECT --file recording.m4a \
