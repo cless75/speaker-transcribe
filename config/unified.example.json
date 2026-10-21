@@ -1,0 +1,9 @@
+{
+  "hub_config": "/home/<user>/speaker-transcribe/config/node.local.json",
+  "zoom_config": "/home/<user>/speaker-transcribe/config/zoom_local.local.json",
+  "hub_worker_root": "/home/<user>/out/hub-worker",
+  "queue_path": "/home/<user>/out/hub-worker/unified/queue.sqlite3",
+  "remote": "gdrive:Hub",
+  "rclone_config": "/home/<user>/.config/rclone/rclone.conf",
+  "deployed_at": "2026-10-21T00:00:00+00:00"
+}

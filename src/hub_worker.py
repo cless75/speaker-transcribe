@@ -789,14 +789,15 @@ def media_e2e_receipt(root: pathlib.Path, cfg: dict, item: MediaFile, state: dic
 
 
 def require_media_e2e(drive: Drive, root: pathlib.Path, cfg: dict,
-                      now: dt.datetime | None = None) -> None:
+                      now: dt.datetime | None = None, *,
+                      max_age: dt.timedelta | None = dt.timedelta(hours=24)) -> None:
     """No whole-Hub execution without a recent, same-code, still-published media proof."""
     try:
         receipt = json.loads((root / "media-e2e.json").read_text(encoding="utf-8"))
         now = now or dt.datetime.now(dt.timezone.utc)
         age = now - dt.datetime.fromisoformat(receipt["verified_at"])
-        if not dt.timedelta(0) <= age <= dt.timedelta(hours=24):
-            raise ValueError("media E2E is older than 24 hours")
+        if age < dt.timedelta(0) or (max_age is not None and age > max_age):
+            raise ValueError("media E2E is outside its validity window")
         if (receipt["code_sha256"] != code_digest()
                 or receipt["host"] != watcher.host_label_of(worker_config(cfg))):
             raise ValueError("worker code or host changed after media E2E")

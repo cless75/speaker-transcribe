@@ -396,6 +396,13 @@ def test_whole_hub_needs_recent_same_code_media_e2e(tmp_path, monkeypatch):
     hub_worker.require_media_e2e(drive, tmp_path, cfg)
     receipt_path = tmp_path / "media-e2e.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["verified_at"] = (dt.datetime.now(dt.timezone.utc) -
+                              dt.timedelta(days=2)).isoformat()
+    hub_worker.atomic_json(receipt_path, receipt)
+    with pytest.raises(RuntimeError, match="validity window"):
+        hub_worker.require_media_e2e(drive, tmp_path, cfg)
+    hub_worker.require_media_e2e(drive, tmp_path, cfg, max_age=None)
+    receipt["verified_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
     receipt["code_sha256"] = "wrong code"
     hub_worker.atomic_json(receipt_path, receipt)
     with pytest.raises(RuntimeError, match="worker code"):

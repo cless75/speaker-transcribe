@@ -1,0 +1,10 @@
+[Unit]
+Description=Pick up Drive and local Zoom recordings (%i)
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+Unit=unified-intake@%i.service
+
+[Install]
+WantedBy=timers.target

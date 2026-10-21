@@ -1,0 +1,18 @@
+[Unit]
+Description=Drive and local Zoom ASR intake (%i, verified publication)
+Wants=network-online.target
+After=network-online.target zoomrs@%i.service
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+Environment=HOME=/home/%i
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/%i/speaker-transcribe
+ExecStart=/home/%i/venvs/asr/bin/python /home/%i/speaker-transcribe/src/unified_intake.py --config /home/%i/speaker-transcribe/config/unified.local.json --run --max-files 3
+TimeoutStartSec=8h
+
+# OPERATOR: never enable with hub-worker@%i.timer, zoom-local-worker@%i.timer,
+# zoom-dispatch@%i.timer or speaker-transcribe-watch.timer. Run --migrate,
+# same-release media E2Es and --attest before first automatic invocation.
