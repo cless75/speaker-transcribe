@@ -10,8 +10,8 @@ process: no zoomrs/GPL code is copied into this repository.
 It does **not** hand the downloaded MP4 and its VTT to the ASR engine as one
 local bundle. If `hub_root` is an rclone/Drive mount, delivery writes to Drive;
 executing the worker on a local machine does not make that storage local.
-Do not run this dispatcher or enable its timer for a local-only Zoom-bundle
-workflow. That workflow needs a separate local intake and processing backend.
+Do not run this dispatcher or enable its timer for local Zoom-bundle ASR;
+that workflow uses the separate `zoom_local_worker.py` described below.
 
 ## Acquisition from Zoom (zoomrs side)
 
@@ -115,13 +115,32 @@ For the **existing VTT-only route**, delivery ends at the hub project inbox:
 - The MP4 stays in the zoomrs local repository by design — the hub receives
   VTT and chat text only.
 
-For **local-only bundle processing**, the intended input is one verified copy
-of the MP4 and matching VTT (plus chat when available), claimed as **one job**.
-Local ASR uses the MP4 audio for the transcript; Zoom VTT supplies speaker turns
-and names, not the transcript text. Results, source markers, and the final
-`asr-done` must stay on local disk. This route is **not implemented here yet**;
-the Drive-first worker still uses Drive for inventory and publication. Do not
-mistake its local staging directory for a local-only backend.
+For **automatic local Zoom ASR**, use `src/zoom_local_worker.py` instead of the
+VTT-only dispatcher. It reads zoomrs' downloaded MP4 and matching VTT, waits
+for stable files with matching SQLite sizes, stages immutable local copies,
+transcribes the MP4 and takes speaker names from the VTT. There is no approval
+list: all complete, unambiguous pairs are eligible (at most three per tick).
+Raw video, WAV chunks, and private worker logs stay on Lenovo under
+`~/out/zoom-local`. Only `transcript.md`, `quality.json`, and a final
+`pipeline/state.json` are uploaded to the project in Drive. The local
+`jobs/<uuid-digest>/state.json: asr-done` is written **last**, after every
+uploaded file has passed size/MD5 verification; `degraded` remains visible as
+`transcript_quality` rather than blocking a completed ASR result. A failed
+upload resumes from the local journal without re-running ASR. Nothing deletes
+the zoomrs repository or Hub files.
+
+Copy `config/zoom_local.example.json` to gitignored
+`config/zoom_local.local.json` and set paths and routing to the receiving node.
+Inspect without writes using `python3 src/zoom_local_worker.py --config
+config/zoom_local.local.json`; only after an E2E, run with `--run`. The local
+worker refuses any UUID approved/delivered by `zoom_dispatch`, any matching
+VTT already in the Hub weekly inbox, and an active dispatch timer. It shares
+the Drive-first worker's Lenovo lock to avoid simultaneous Hub publication.
+The Zoom dispatch timer must remain **disabled** for automatically processed
+local bundles; it must not create a second VTT-only session. The
+`zoom-local-worker@.service`/`.timer` templates are operator-only and ship
+disabled until real local MP4+VTT E2E verification. This does not change the
+Drive-first route for media already in Hub.
 
 ## Timer (operator / sudo)
 

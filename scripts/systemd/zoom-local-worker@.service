@@ -1,0 +1,17 @@
+[Unit]
+Description=Local Zoom MP4 ASR with VTT speaker labels (%i)
+Wants=network-online.target
+After=network-online.target zoomrs@%i.service
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+Environment=HOME=/home/%i
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/%i/speaker-transcribe
+ExecStart=/home/%i/venvs/asr/bin/python /home/%i/speaker-transcribe/src/zoom_local_worker.py --run --config /home/%i/speaker-transcribe/config/zoom_local.local.json
+TimeoutStartSec=8h
+
+# OPERATOR: Keep disabled until local MP4+VTT E2E proves verified text-only
+# publication. zoom-dispatch@%i.timer must remain off to avoid duplicate sessions.

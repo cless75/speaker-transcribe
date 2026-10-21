@@ -68,17 +68,20 @@ def project_id(topic: str, config: dict) -> str:
     return config["fallback_pid"]
 
 
-def _meetings(db: pathlib.Path) -> list[dict]:
+def _meetings(db: pathlib.Path, *, include_video: bool = False) -> list[dict]:
     """Read zoomrs' tables without opening its SQLite DB for writing."""
     connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         connection.row_factory = sqlite3.Row
+        types = ("audio_transcript", "chat_file", "active_speaker",
+                 "shared_screen_with_speaker_view", "shared_screen_with_gallery_view") if include_video else (
+                     "audio_transcript", "chat_file")
         rows = connection.execute(
             'SELECT m.uuid, m.topic, m.startTime AS meeting_start, '
             'r.id AS record_id, r.type, r.fileExtension, r.fileSize, '
             'r.status, r.path FROM meetings m JOIN records r ON r.meetingId=m.uuid '
-            "WHERE r.type IN ('audio_transcript','chat_file') "
-            'ORDER BY m.startTime DESC, r.id'
+            f"WHERE r.type IN ({','.join('?' for _ in types)}) "
+            'ORDER BY m.startTime DESC, r.id', types
         ).fetchall()
     finally:
         connection.close()

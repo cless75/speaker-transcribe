@@ -1,0 +1,16 @@
+{
+  "database": "/home/<user>/.local/share/zoomrs/zoomrs.db",
+  "repository": "/home/<user>/zoom-recordings",
+  "container_repository": "/data/recordings",
+  "dispatch_config": "/home/<user>/speaker-transcribe/config/zoom_dispatch.local.json",
+  "node_config": "/home/<user>/speaker-transcribe/config/node.local.json",
+  "local_root": "/home/<user>/out/zoom-local",
+  "hub_worker_root": "/home/<user>/out/hub-worker",
+  "hub_root": "/home/<user>/hub",
+  "drive_remote": "gdrive:Hub",
+  "rclone_config": "/home/<user>/.config/rclone/rclone.conf",
+  "routes": [{"contains": "example course", "pid": "example-course"}],
+  "fallback_pid": "unrouted",
+  "min_stable_age_seconds": 120,
+  "max_meetings_per_run": 3
+}

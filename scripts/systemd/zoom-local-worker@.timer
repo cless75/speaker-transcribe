@@ -1,0 +1,10 @@
+[Unit]
+Description=Pick up completed local Zoom bundles (%i)
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+Unit=zoom-local-worker@%i.service
+
+[Install]
+WantedBy=timers.target
