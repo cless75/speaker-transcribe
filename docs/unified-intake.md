@@ -57,3 +57,44 @@ the release is re-attested. Expiration by calendar time alone does not.
 Rollback: disable the unified timer, wait for or intentionally stop its active
 service, preserve `queue.sqlite3` and all journals, then reconcile partial
 publications before enabling an old consumer. Do not delete anything in Hub.
+
+## Source copies, retention and archive pilot
+
+Drive sources are downloaded to `out/hub-worker/intake/<project>/<Drive ID>/<revision>/`
+and verified against Drive MD5 before ASR. `out/hub-worker/outputs/` holds local
+ASR results; verified publication goes to `Hub/<project>/sessions/`. The
+current `hub_worker.py --cleanup-local` gate retains the downloaded media for
+**30 days after confirmed publication**; it does not remove Hub originals.
+An earlier proposal to delete the Lenovo copy immediately is not active yet.
+
+Separately, zoomrs downloads original MP4+VTT to its local repository;
+`zoom_local_worker.py` stages another MP4+VTT under `out/zoom-local/jobs/`.
+Neither Zoom original nor working copy is automatically deleted by the NAS
+archive pilot. Any Zoom cleanup requires its own retention and restore policy.
+
+`config/archive.example.json` is the **disabled** per-project policy for a
+possible NAS archive: `keep`, `archive` (Drive `_archive`), or
+`trash_after_nas`. The selected pilot for `415` is `trash_after_nas`, but
+the example keeps `enabled: false`. The read-only inventory is:
+
+```sh
+python src/hub_archive.py --config config/archive.local.json --project 415
+```
+
+It lists exact paths, Drive IDs, revisions, sizes and hold reasons. Eligible
+rows require a unique Drive source and state marker, matching revision,
+`publication_verified: true`, an eligible local job journal, and a freshly
+verified published output. Old `asr-done` alone is **not** enough. Timestamped
+meeting bundles and current Hub release E2E sources are held. The Python
+`copy_verified()` helper can only stage a uniquely eligible, explicitly
+enabled source plus its marker and read back SHA-256 from NAS. It requires a
+CIFS mount at `/mnt/wd-book` with source `//192.168.1.28/Archive`, a separate
+operator-provisioned identity file `.speaker-transcribe-archive` containing
+`speaker-transcribe-archive-v1`, and reserved free space. The example does not
+create that identity file. The mount root itself is not `/mnt/wd-book/Archive`.
+
+**No archive timer or Hub-mutation command is supplied.** `hub_action` is
+policy metadata, not permission to send a file to the Drive trash. The
+existing migration and local cleanup still require the live Hub marker; do
+not trash sources until archive-aware verification, exact-ID deletion, restore
+test, and a separately approved list of files are implemented and accepted.

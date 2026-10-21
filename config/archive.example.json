@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "remote": "gdrive:Hub",
+  "rclone_config": "/home/<user>/.config/rclone/rclone.conf",
+  "worker_root": "/home/<user>/out/hub-worker",
+  "nas": {
+    "mount": "/mnt/wd-book",
+    "source": "//192.168.1.28/Archive",
+    "root": "/mnt/wd-book/speaker-transcribe",
+    "identity_file": ".speaker-transcribe-archive",
+    "min_free_gib": 50
+  },
+  "defaults": {
+    "enabled": false,
+    "min_days_after_publication": 30,
+    "hub_action": "keep"
+  },
+  "projects": {
+    "415": {
+      "enabled": false,
+      "hub_action": "trash_after_nas"
+    }
+  }
+}
