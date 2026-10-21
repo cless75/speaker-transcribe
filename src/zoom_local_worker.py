@@ -220,16 +220,19 @@ def process_one(config: dict, item: dict, drive: Drive, *, transcribe=None) -> d
 def run(config: dict, *, dry_run: bool = True, transcribe=None, drive=None) -> dict:
     drive = drive or Drive(config["drive_remote"], config.get("rclone_config"))
     report = {"eligible": 0, "processed": 0, "held": 0}
-    items = select(config)
+    root = pathlib.Path(config["local_root"])
+    items = []
+    for item in select(config):
+        journal = root / "jobs" / hashlib.sha256(item["uuid"].encode()).hexdigest()[:16] / "job.json"
+        if journal.is_file() and json.loads(journal.read_text()).get("phase") == "done":
+            continue
+        items.append(item)
     if dry_run:
         report["eligible"] = len(items)
         return report
     require_dispatch_inactive(config)
     with single_worker(pathlib.Path(config["hub_worker_root"])):
         for item in items:
-            journal = pathlib.Path(config["local_root"]) / "jobs" / hashlib.sha256(item["uuid"].encode()).hexdigest()[:16] / "job.json"
-            if journal.is_file() and json.loads(journal.read_text()).get("phase") == "done":
-                continue
             if report["eligible"] >= min(int(config.get("max_meetings_per_run", 3)), 3):
                 break
             report["eligible"] += 1

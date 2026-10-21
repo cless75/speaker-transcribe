@@ -150,6 +150,7 @@ def test_dry_run_and_runner_are_bounded(tmp_path, monkeypatch):
     calls = []
     assert local.run(cfg, dry_run=False, drive=drive, transcribe=fake_asr(calls))["processed"] == 1
     assert local.run(cfg, dry_run=False, drive=drive, transcribe=fake_asr(calls))["processed"] == 0
+    assert local.run(cfg, dry_run=True, drive=drive)["eligible"] == 0
     assert len(calls) == 1
 
 
