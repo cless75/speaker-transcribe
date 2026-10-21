@@ -2,6 +2,8 @@ import datetime as dt
 import hashlib
 import json
 import pathlib
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,3 +100,68 @@ def test_copy_never_mutates_hub_and_rejects_changed_source(tmp_path, monkeypatch
     drive.files["415/voice.m4a"] = b"modified"
     with pytest.raises(RuntimeError, match="eligibility changed"):
         archive.copy_verified(drive, cfg, {**row, "id": "other"})
+
+
+@pytest.mark.parametrize("failure", ["mount", "identity", "space"])
+def test_nas_gate_fails_closed(tmp_path, monkeypatch, failure):
+    cfg = config(tmp_path)
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    cfg["nas"]["mount"] = str(mount)
+    cfg["nas"]["root"] = str(mount / "archive")
+    identity = mount / cfg["nas"]["identity_file"]
+    identity.write_text("wrong" if failure == "identity" else "speaker-transcribe-archive-v1")
+    source = "//wrong/share" if failure == "mount" else cfg["nas"]["source"]
+    monkeypatch.setattr(archive, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        returncode=0, stdout=f"{mount} systemd-1 autofs\n{mount} {source} cifs\n"))
+    monkeypatch.setattr(archive.shutil, "disk_usage", lambda p: SimpleNamespace(
+        free=0 if failure == "space" else 100 * 1024 ** 3))
+    with pytest.raises(RuntimeError):
+        archive.nas_ready(cfg)
+    assert not (mount / "archive").exists()
+
+
+@pytest.mark.parametrize("failure", ["source-corrupt", "marker-corrupt", "source-replaced"])
+def test_interrupted_or_changed_copy_never_commits_archive(tmp_path, monkeypatch, failure):
+    cfg = config(tmp_path)
+    cfg["projects"]["415"]["enabled"] = True
+    drive, _ = finished(tmp_path)
+    row = archive.inventory(drive, cfg, "415")[0]
+    nas = tmp_path / "nas"
+    nas.mkdir()
+    monkeypatch.setattr(archive, "nas_ready", lambda c, need_bytes=0: nas)
+    before = drive.files.copy()
+    original = drive.call
+    def damaged(*args):
+        result = original(*args)
+        if args[0] == "copyto" and args[1].startswith("gdrive:"):
+            marker = args[1].endswith(".state.json")
+            if (failure == "source-corrupt" and not marker or
+                    failure == "marker-corrupt" and marker):
+                pathlib.Path(args[2]).write_bytes(b"damaged")
+            if failure == "source-replaced" and marker:
+                drive.files["415/voice.m4a"] = b"replacement by another actor"
+        return result
+    monkeypatch.setattr(drive, "call", damaged)
+    with pytest.raises(RuntimeError):
+        archive.copy_verified(drive, cfg, row)
+    assert not (nas / "415" / row["id"] / row["revision"]).exists()
+    assert not list(nas.rglob(".archive-*"))
+    if failure != "source-replaced":
+        assert drive.files == before
+
+
+def test_nas_automount_and_reserve_includes_copy_budget(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    (mount / cfg["nas"]["identity_file"]).write_text("speaker-transcribe-archive-v1")
+    cfg["nas"].update(mount=str(mount), root=str(mount / "archive"))
+    monkeypatch.setattr(archive, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        returncode=0, stdout=f"{mount} systemd-1 autofs\n{mount} {cfg['nas']['source']} cifs\n"))
+    monkeypatch.setattr(archive.shutil, "disk_usage", lambda p: SimpleNamespace(free=51 * 1024 ** 3))
+    assert archive.nas_ready(cfg) == mount / "archive"
+    with pytest.raises(RuntimeError, match="reserve"):
+        archive.nas_ready(cfg, need_bytes=2 * 1024 ** 3)
