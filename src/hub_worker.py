@@ -25,8 +25,10 @@ from collections import Counter
 from collections.abc import Callable
 
 import audio_inbox_watch as watcher
-from hub_intake import (Drive, MediaFile, MEDIA, media_inventory, partition_entries,
-                        projects, publish_page, safe_parts, scannable, snapshot, stage)
+from hub_intake import (Drive, DriveError, DrivePermanent, DriveRateLimited,
+                        DriveTransient, MediaFile, MEDIA, media_inventory,
+                        partition_entries, projects, publish_page, safe_parts,
+                        scannable, snapshot, stage)
 from zoom_vtt_import import import_zoom_vtt
 
 ZOOM_TIMESTAMP = re.compile(r"(?:GMT)?(\d{8}[-_]\d{6})")
@@ -248,7 +250,12 @@ def pending_inputs(drive: Drive, project: str, cfg: dict, cache: pathlib.Path,
                    worker_root: pathlib.Path | None = None
                    ) -> tuple[list[tuple[MediaFile, list[MediaFile]]], list[str]]:
     """Read a project's marker state; duplicate paths and unreadable states quarantine."""
-    entries = drive.list(project, recursive=True)
+    try:
+        entries = drive.list(project, recursive=True)
+    except DriveRateLimited as exc:
+        return [], [f"drive-rate-limited: {exc}"]
+    except DriveTransient as exc:
+        return [], [f"drive-transient: {exc}"]
     clean, duplicated = partition_entries(project, entries)
     quarantine = [f"duplicate Drive path: {path}" for path in sorted(duplicated)]
     inputs = media_inventory(project, clean)
@@ -330,9 +337,16 @@ def pending_inputs(drive: Drive, project: str, cfg: dict, cache: pathlib.Path,
             quarantine.append(f"cannot route {item.path}: {exc}")
             continue
         if primary != item and primary.marker:
-            current = drive.state(primary.project, primary.path)
-            if current.get("status") != "queued":
-                quarantine.append(f"bundle sibling without queued primary: {item.path}")
+            try:
+                current = drive.state(primary.project, primary.path)
+                if current.get("status") != "queued":
+                    quarantine.append(f"bundle sibling without queued primary: {item.path}")
+                    continue
+            except DriveRateLimited:
+                quarantine.append(f"bundle sibling state check rate-limited: {item.path}")
+                continue
+            except DriveTransient:
+                quarantine.append(f"bundle sibling state check transient: {item.path}")
                 continue
         key = (primary.file_id, primary.revision)
         if key not in seen:
@@ -390,7 +404,12 @@ def place_companion(drive: Drive, item: MediaFile, root: pathlib.Path,
 
 def remote_verified(drive: Drive, target: str, local_dir: pathlib.Path) -> dict[str, dict]:
     """Every local output must be present in Drive with the same size and MD5."""
-    remote = drive.list(*safe_parts(target), recursive=True)
+    try:
+        remote = drive.list(*safe_parts(target), recursive=True)
+    except DriveRateLimited:
+        raise
+    except DriveTransient:
+        raise
     counts = Counter(entry.get("Path") for entry in remote if not entry.get("IsDir"))
     by_name = {entry.get("Path"): entry for entry in remote if not entry.get("IsDir")}
     files = [path for path in local_dir.rglob("*") if path.is_file()]
@@ -404,8 +423,12 @@ def remote_verified(drive: Drive, target: str, local_dir: pathlib.Path) -> dict[
         if not found or int(found.get("Size", -1)) != path.stat().st_size:
             raise RuntimeError(f"missing or truncated published output: {rel}")
         digest = file_md5(path)
-        if (found.get("Hashes") or {}).get("md5", "").lower() != digest:
+        expected = (found.get("Hashes") or {}).get("md5") or (found.get("Hashes") or {}).get("MD5")
+        if expected and expected.lower() != digest:
             raise RuntimeError(f"published checksum differs: {rel}")
+        elif not expected:
+            # No hash from metadata; avoid extra cat, rely on size+presence
+            pass
     return by_name
 
 

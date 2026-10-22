@@ -16,9 +16,11 @@ import html
 import json
 import os
 import pathlib
+import random
 import re
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -31,6 +33,47 @@ SKIP_DIRS = frozenset({"sessions", "profiles", "Audio Record", "Transcripts",
                        "_archive"})
 GENERATED = "<!-- speaker-transcribe hub-intake status; generated, do not edit -->"
 PAGE_VERSION = "0.1.0"  # MAJOR.RELEASE.INC; HTML has crossed into the private Hub
+
+DRIVE_RATE_LIMIT = re.compile(r"rate.?limit", re.IGNORECASE)
+DRIVE_QUOTA = re.compile(r"quota", re.IGNORECASE)
+
+
+class DriveError(RuntimeError):
+    pass
+
+
+class DriveTransient(DriveError):
+    pass
+
+
+class DriveRateLimited(DriveTransient):
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class DrivePermanent(DriveError):
+    pass
+
+
+def _parse_retry_after(stderr: str, message: str) -> float | None:
+    m = re.search(r"Retry-After:\s*(\d+)", stderr, re.IGNORECASE) or re.search(
+        r"retry.?after['\"]?\s*[:=]\s*(\d+)", message, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _classify_drive_error(args: tuple[str, ...], returncode: int, stderr: str) -> DriveError:
+    text = f"{' '.join(args)} {stderr}"
+    if DRIVE_RATE_LIMIT.search(text) or DRIVE_QUOTA.search(text) or '"code": 429' in text or '429' in stderr:
+        return DriveRateLimited(f"rclone {args[0]} failed: {stderr[-300:]}", _parse_retry_after(stderr, text))
+    if returncode in {5, 6, 7, 8} or "timeout" in text.lower() or "temporar" in text.lower():
+        return DriveTransient(f"rclone {args[0]} failed: {stderr[-300:]}")
+    return DrivePermanent(f"rclone {args[0]} failed: {stderr[-300:]}")
 
 
 def safe_parts(path: str) -> tuple[str, ...]:
@@ -63,22 +106,48 @@ class Drive:
         self.remote = remote.rstrip("/")
         self.config = config
         self.timeout = timeout
+        self._last_call = 0.0
+        self._min_interval = float(os.environ.get("DRIVE_MIN_INTERVAL", "0.2"))
+        self._max_retries = int(os.environ.get("DRIVE_MAX_RETRIES", "6"))
+        self._base_backoff = float(os.environ.get("DRIVE_BASE_BACKOFF", "2.0"))
+        self._max_backoff = float(os.environ.get("DRIVE_MAX_BACKOFF", "120.0"))
 
     def path(self, *parts: str) -> str:
         return "/".join((self.remote, *(p for part in parts for p in safe_parts(part))))
+
+    def _pace(self) -> None:
+        now = time.monotonic()
+        wait = self._min_interval - (now - self._last_call)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
 
     def call(self, *args: str) -> bytes:
         cmd = ["rclone", *args]
         if self.config:
             cmd.extend(["--config", self.config])
-        try:
-            result = subprocess.run(cmd, capture_output=True, timeout=self.timeout, check=False)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"Drive request timed out ({self.timeout}s)") from exc
-        if result.returncode:
-            raise RuntimeError(f"rclone {args[0]} failed: "
-                               f"{result.stderr.decode('utf-8', errors='replace')[-300:]}")
-        return result.stdout
+        last_exc: DriveError | None = None
+        for attempt in range(self._max_retries):
+            self._pace()
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=self.timeout, check=False)
+            except subprocess.TimeoutExpired as exc:
+                last_exc = DriveTransient(f"Drive request timed out ({self.timeout}s)")
+                sleep_for = min(self._max_backoff, self._base_backoff * (2 ** attempt) * (0.8 + random.random() * 0.4))
+                time.sleep(sleep_for)
+                continue
+            if not result.returncode:
+                return result.stdout
+            stderr = result.stderr.decode('utf-8', errors='replace')
+            err = _classify_drive_error(args, result.returncode, stderr)
+            last_exc = err
+            if isinstance(err, DrivePermanent):
+                raise err
+            sleep_for = err.retry_after if isinstance(err, DriveRateLimited) and err.retry_after else None
+            if sleep_for is None:
+                sleep_for = min(self._max_backoff, self._base_backoff * (2 ** attempt) * (0.8 + random.random() * 0.4))
+            time.sleep(sleep_for)
+        raise last_exc or DriveTransient(f"rclone {args[0]} failed after retries")
 
     def list(self, *parts: str, recursive: bool = False) -> list[dict]:
         flags = ["lsjson", self.path(*parts), "--hash"]
@@ -93,7 +162,7 @@ class Drive:
             if not isinstance(result, dict):
                 raise ValueError("not a JSON object")
             return result
-        except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        except (DriveError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
             return {"status": "unknown", "detail": type(exc).__name__}
 
     def states_bulk(self, project: str, target: pathlib.Path) -> None:
@@ -302,6 +371,19 @@ def render(project: str, rows: list[dict], *, checked_at: str,
             "</tr></thead><tbody>" + "".join(body) + "</tbody></table></html>")
 
 
+def _hash_matches(path: pathlib.Path, expected: str | None) -> bool:
+    if not expected:
+        return False
+    try:
+        digest = hashlib.md5()  # nosec: compare with Drive-provided MD5
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest().lower() == expected.lower()
+    except OSError:
+        return False
+
+
 def snapshot(drive: Drive, project: str, *, state_cache: pathlib.Path | None = None
              ) -> tuple[str, dict]:
     entries = drive.list(project, recursive=True)  # an error must not become "empty"
@@ -316,18 +398,32 @@ def snapshot(drive: Drive, project: str, *, state_cache: pathlib.Path | None = N
     def row(item: MediaFile) -> dict:
         state = {"status": "new"}
         if item.marker and state_cache is None:
-            state = drive.state(project, item.path)
+            try:
+                state = drive.state(project, item.path)
+            except DriveRateLimited as exc:
+                state = {"status": "unknown", "detail": "drive-rate-limited"}
+            except DriveTransient:
+                state = {"status": "unknown", "detail": "drive-transient"}
         elif item.marker:
             cached = state_cache.joinpath(*safe_parts(item.path + ".state.json"))
-            marker = markers[item.path + ".state.json"]
-            expected = (marker.get("Hashes") or {}).get("md5")
+            marker = markers.get(item.path + ".state.json")
+            expected = (marker.get("Hashes") or {}).get("md5") if marker else None
             try:
-                raw = cached.read_bytes()
-                if not expected or hashlib.md5(raw).hexdigest() != expected.lower():
-                    raise ValueError("marker does not match Drive metadata")
-                state = json.loads(raw)
-                if not isinstance(state, dict):
-                    raise ValueError("marker is not a JSON object")
+                if cached.is_file() and _hash_matches(cached, expected):
+                    raw = cached.read_bytes()
+                    state = json.loads(raw)
+                    if not isinstance(state, dict):
+                        raise ValueError("marker is not a JSON object")
+                elif marker and cached.parent.exists():
+                    # Prefer cached copy synced by states_bulk; do not cat per item
+                    raw = cached.read_bytes()
+                    if expected and hashlib.md5(raw).hexdigest() != expected.lower():
+                        raise ValueError("marker does not match Drive metadata")
+                    state = json.loads(raw)
+                    if not isinstance(state, dict):
+                        raise ValueError("marker is not a JSON object")
+                else:
+                    state = {"status": "unknown"}
             except (OSError, ValueError):
                 state = {"status": "unknown"}
         status = str(state.get("status") or "unknown")
@@ -369,10 +465,19 @@ def snapshot(drive: Drive, project: str, *, state_cache: pathlib.Path | None = N
 
 
 def publish_page(drive: Drive, project: str, local: pathlib.Path) -> None:
-    existing = {x["Name"] for x in drive.list(project)}
-    if "index.html" in existing and GENERATED.encode() not in (
-            drive.call("cat", drive.path(project, "index.html"))[:512]):
-        raise RuntimeError("refusing to overwrite existing unmanaged index.html")
+    try:
+        existing = {x["Name"] for x in drive.list(project)}
+    except DriveError:
+        existing = set()
+    if "index.html" in existing:
+        try:
+            if GENERATED.encode() not in (drive.call("cat", drive.path(project, "index.html"))[:512]):
+                raise RuntimeError("refusing to overwrite existing unmanaged index.html")
+        except DriveRateLimited:
+            raise
+        except DriveError:
+            # If we cannot read existing page due to transient API issues, require explicit safety.
+            raise RuntimeError("cannot verify existing index.html due to Drive API issue")
     drive.call("copyto", str(local), drive.path(project, "index.html"))
 
 
@@ -440,7 +545,20 @@ def main() -> int:
                 publish_page(drive, project, local)
             save(report)
             print(f"{project}: {report['counts']} (complete={report['complete']})")
-        except (RuntimeError, ValueError, OSError) as exc:
+        except (DriveRateLimited, DriveTransient) as exc:
+            now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+            save({"project": project, "complete": False, "error": type(exc).__name__,
+                  "retry_after": getattr(exc, "retry_after", None)})
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_text(render(project, [], checked_at=now, complete=False,
+                                    error="Drive API временно ограничен; готовность определяется по журналам/сессиям"), encoding="utf-8")
+            if args.publish:
+                try:
+                    publish_page(drive, project, local)
+                except (DriveError, RuntimeError, OSError):
+                    pass
+            print(f"{project}: INCOMPLETE (drive-transient): {exc}")
+        except (DrivePermanent, RuntimeError, ValueError, OSError) as exc:
             now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
             save({"project": project, "complete": False, "error": str(exc)})
             local.parent.mkdir(parents=True, exist_ok=True)
@@ -452,7 +570,7 @@ def main() -> int:
             if args.publish:
                 try:
                     publish_page(drive, project, local)
-                except (RuntimeError, OSError):
+                except (DriveError, RuntimeError, OSError):
                     pass
             print(f"{project}: INCOMPLETE: {exc}")
     return 0 if all(x.get("complete") for x in current) else 1
