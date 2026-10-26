@@ -1,6 +1,6 @@
 # NAS intake and independent ASR pipeline
 
-Version: 0.1.0 · Status: design draft · Project: 801
+Version: 0.1.1 · Status: design draft · Project: 801
 
 ## 1. Scope and owner decisions
 
@@ -15,9 +15,10 @@ Owner decisions:
 - `org/801-nas-ready-versioned-results-quality-review` — directory plus `READY`,
   versioned `.asr` results, degraded results delivered with `needs_review`.
 
-The remaining details below are implementation proposals, not additional owner
-decisions. In particular, the v1 one-primary-media rule needs confirmation
-before the archive adapter is enabled for real input.
+Owner refinements: support Zoom bundles and prefer separate participant audio
+when available; changed content with an existing READY is a new automatic
+revision. See [Zoom bundle research/specification](zoom-recording-bundle-spec.md).
+Other details below remain implementation proposals, not additional owner decisions.
 
 This is not the Drive-to-NAS archive pilot in `hub_archive.py`. It neither
 removes originals nor sends anything to Drive trash.
@@ -56,28 +57,33 @@ when the worker, lock and disk budget are available.
 
 1. Build a dedicated directory for one recording/meeting under an enabled
    collection root. File names may contain Unicode and spaces.
-2. Finish copying every member, close files and make the directory immutable
-   to the producer while processing is outstanding.
+2. Finish copying every member and close files. Avoid editing inputs while a
+   snapshot is being taken; 801 must detect instability rather than assume it away.
 3. Write an empty `READY.tmp`, close it and rename it to `READY` last.
    Merely appearing or having an old modification time does not make media ready.
-4. Do not rename, move, replace or delete ready sources until receipt/coordination.
-   Corrections require a new submission generation, not silently replacing bytes
-   while keeping an existing READY generation.
+4. Corrections under the same READY are permitted and create automatic content
+   revisions after revalidation. An older running snapshot is never silently
+   rebound to new bytes. Do not move/delete source directories during delivery.
 
 801 does not create, consume/delete or rename the producer's `READY` marker.
 The initial contract permits only an empty regular READY file. Directories,
 symlinks and nonempty control files are rejected; input never contains commands.
 No node config, model path, executable or absolute output path comes from READY.
 
-### Composition — proposed conservative first implementation
+### Composition — Zoom bundles
 
-- One primary regular media file in the immediate directory; media suffixes
-  follow the engine's supported list.
-- Optional same-stem VTT and text chat. Their roles are explicit in the frozen
-  inventory; chat is not an instruction to the worker.
-- Multiple media files, ambiguous sidecars or unexpected unclassified files
-  hold the submission as `ambiguous_bundle` / `unsupported_member`.
-- Nested directories are not silently folded into a meeting. Scanners can find
+- Multiple media files are allowed: participant audio, mixed audio, alternative
+  video layouts and sequential recording segments. Classification and selection
+  follow `zoom-recording-bundle-spec.md`, not a one-media-per-directory rule.
+- Prefer separate participant tracks with verified membership, coverage and
+  timeline; otherwise select mixed original audio or a verified video fallback.
+- VTT/chat roles are frozen in inventory; same-stem names are not mandatory
+  across Zoom exports. Chat is never an instruction to the worker.
+- Ambiguous membership, timing or roles hold the submission with a specific
+  reason. File names alone cannot establish a ready processing plan.
+- `Audio Record/` is an allowed participant-track subdirectory, not skipped as
+  it is in the existing Hub adapter. Other nested directories are not silently
+  folded into a meeting. Scanners can find
   distinct ready directories beneath the collection; nested READY submissions
   are held until composition rules are explicit.
 - Exclude READY, temporary control files and generated `*.asr` directories from
@@ -106,12 +112,14 @@ Paths and credentials are node-local, not embedded in the public example.
 Discovery performs cheap validation and records a candidate, NOT an accepted
 immutable revision. The stager streams members while computing SHA-256,
 checks the original listing/stat before and after copying and revalidates READY.
-Changed membership or bytes prevents transition to ready. Producer immutability
-is required; stat equality alone is not content verification.
+Changed membership or bytes during capture prevents transition to ready and
+triggers a fresh snapshot. Stable changed content becomes a new revision even
+with the old READY. Stat equality alone is not content verification; periodic
+full hash reconciliation is needed for replacements preserving metadata.
 
-- Submission ID: stable collection ID plus relative ready-directory path and
-  captured READY generation. A generation is an observation token, not proof
-  of immutable bytes.
+- Submission ID: stable collection ID plus relative ready-directory path.
+  READY generation is an observation token, not a revision key
+  or proof of immutable bytes; unchanged READY does not suppress rescans.
 - Content revision: SHA-256 of a canonical inventory sorted by relative path,
   including member path, role, byte length and content SHA-256.
 - Processing identity: content revision plus canonical processing-profile
@@ -295,6 +303,12 @@ Required tests before enabling real input:
 ## 10. Implementation slices and open gates
 
 1. Contract validator and versioned local queue, isolated tests; no deployment.
+   Foundation implemented in `src/pipeline_queue.py` with isolated schema v1
+   and tests. This library has no daemon, migration, receipt verifier, expired
+   lease reconciler, GPU execution, disk reservation or weighted scheduling yet.
+   `finish()` requires the future adapter to verify durable stage evidence;
+   it is not by itself proof of ASR/delivery completion. Schema v1 will need
+   explicit migrations as these interfaces are added.
 2. NAS discovery/staging, bounded disk reservations and stage receipts.
 3. Constant ASR consumer using existing engine and common GPU lock; independent
    NAS publisher and restart tests.
@@ -304,7 +318,7 @@ Required tests before enabling real input:
    approved NAS pilot and only then controlled production cutover.
 
 Open before NAS pilot: exact collection roots/mount identity, allowed write
-areas, v1 composition approval, profile/output set, byte budgets and local NAS-job
+areas, Zoom timeline/coverage fixtures, profile/output set, byte budgets and local NAS-job
 retention. Open before production cutover: deployed adapter completeness,
 dependency pins, migration/rollback evidence and E2Es. These are not guessed
 from the old archive-pilot config.
