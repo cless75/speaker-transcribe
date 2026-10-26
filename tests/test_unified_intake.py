@@ -77,6 +77,52 @@ def test_release_identity_pins_code_and_node_config(tmp_path):
     assert unified.identity(cfg) != baseline
 
 
+def test_release_preflight_reports_drift_without_config_values(tmp_path):
+    cfg = config(tmp_path)
+    root = pathlib.Path(cfg["hub_worker_root"])
+    root.mkdir()
+    assert unified.release_status(cfg)["reason"] == "missing_or_invalid_attestation"
+    (root / "release-attestation.json").write_text(json.dumps({"identity": unified.identity(cfg)}))
+    assert unified.release_status(cfg)["status"] == "ok"
+    pathlib.Path(cfg["hub_config"]).write_text(json.dumps({"hub_root": "private-new-path"}))
+    status = unified.release_status(cfg)
+    assert status["changed"] == ["config.hub_config"]
+    assert "private-new-path" not in json.dumps(status)
+
+
+def test_health_records_blocked_run_without_erasing_progress(tmp_path):
+    cfg = config(tmp_path)
+    unified.record_health(cfg, report={"processed": 1})
+    path = pathlib.Path(cfg["hub_worker_root"]) / "health" / "intake.json"
+    before = json.loads(path.read_text())
+    unified.record_health(cfg)
+    unified.record_health(cfg, error=RuntimeError("private source name"))
+    after = json.loads(path.read_text())
+    assert after["status"] == "blocked"
+    assert after["last_processed_at"] == before["last_processed_at"]
+    assert after["last_scan_finished_at"] == before["last_scan_finished_at"]
+    assert "private source name" not in path.read_text()
+
+
+@pytest.mark.parametrize("error,reason", [
+    (unified.DriveRateLimited("quota"), "drive-quota"),
+    (unified.DriveTransient("timeout"), "drive-transient"),
+    (ValueError("bad marker"), "scan-error"),
+])
+def test_discovery_distinguishes_incomplete_from_quarantine(tmp_path, monkeypatch, error, reason):
+    cfg = config(tmp_path)
+    hc, zc, _ = unified.configs(cfg)
+    monkeypatch.setattr(unified.zoom, "select", lambda c: [])
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(unified.hub, "pending_inputs", fail)
+    candidates, report = unified.discover(cfg, hc, zc, MemoryDrive({"415/voice.m4a": b"a"}))
+    assert candidates == {}
+    assert report["hub_incomplete"] == 1
+    assert report["hub_quarantined"] == 0
+    assert report["hub_incomplete_reasons"][reason] == 1
+
+
 def test_release_attestation_requires_fresh_zoom_proof_and_pins_identity(tmp_path, monkeypatch):
     cfg = config(tmp_path)
     hc, zc, drive = unified.configs(cfg)

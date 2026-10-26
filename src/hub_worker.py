@@ -250,12 +250,7 @@ def pending_inputs(drive: Drive, project: str, cfg: dict, cache: pathlib.Path,
                    worker_root: pathlib.Path | None = None
                    ) -> tuple[list[tuple[MediaFile, list[MediaFile]]], list[str]]:
     """Read a project's marker state; duplicate paths and unreadable states quarantine."""
-    try:
-        entries = drive.list(project, recursive=True)
-    except DriveRateLimited as exc:
-        return [], [f"drive-rate-limited: {exc}"]
-    except DriveTransient as exc:
-        return [], [f"drive-transient: {exc}"]
+    entries = drive.list(project, recursive=True)
     clean, duplicated = partition_entries(project, entries)
     quarantine = [f"duplicate Drive path: {path}" for path in sorted(duplicated)]
     inputs = media_inventory(project, clean)
@@ -342,12 +337,8 @@ def pending_inputs(drive: Drive, project: str, cfg: dict, cache: pathlib.Path,
                 if current.get("status") != "queued":
                     quarantine.append(f"bundle sibling without queued primary: {item.path}")
                     continue
-            except DriveRateLimited:
-                quarantine.append(f"bundle sibling state check rate-limited: {item.path}")
-                continue
             except DriveTransient:
-                quarantine.append(f"bundle sibling state check transient: {item.path}")
-                continue
+                raise
         key = (primary.file_id, primary.revision)
         if key not in seen:
             seen.add(key)
@@ -427,8 +418,11 @@ def remote_verified(drive: Drive, target: str, local_dir: pathlib.Path) -> dict[
         if expected and expected.lower() != digest:
             raise RuntimeError(f"published checksum differs: {rel}")
         elif not expected:
-            # No hash from metadata; avoid extra cat, rely on size+presence
-            pass
+            # Critical publication verification cannot trust size alone. Read
+            # content only when Drive supplied no checksum metadata.
+            content = drive.call("cat", drive.path(target, rel))
+            if hashlib.md5(content).hexdigest() != digest:
+                raise RuntimeError(f"published checksum differs: {rel}")
     return by_name
 
 

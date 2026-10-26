@@ -58,6 +58,45 @@ Rollback: disable the unified timer, wait for or intentionally stop its active
 service, preserve `queue.sqlite3` and all journals, then reconcile partial
 publications before enabling an old consumer. Do not delete anything in Hub.
 
+## Updates and blocked-release recovery
+
+Stop the unified timer **before** changing pinned code or configuration, and
+confirm `MainPID=0` for its service. Keep the timer stopped until both E2Es,
+`--attest` and a bounded `--run --max-files 1` have succeeded. Do not edit hashes
+in a previous attestation or reuse a pre-deployment `done` journal as a fresh E2E.
+Back up the queue using SQLite's backup API (not a live database file copy),
+configuration, per-job journals and both proof receipts before recovery.
+
+```sh
+python src/unified_intake.py --config config/unified.local.json --preflight
+```
+
+This local-only command reports `ok` or `blocked`, plus changed identity keys
+(for example `code.hub_worker.py`), without contacting Drive or printing private
+configuration values. Exit 0 means the local identity matches, **not** that the
+live publications have passed verification. `--attest` and normal execution
+still verify the live Hub and Zoom proofs. Record the actual deployment time
+in `deployed_at` before running fresh E2Es, not after them.
+
+`<hub_worker_root>/health/intake.json` is updated at the start and end of each
+`--run`, including gate failures. It distinguishes `running`, `blocked`,
+`failed`, `degraded` and `ok`; preserves `last_processed_at` and
+`last_scan_finished_at` across failed starts; and stores aggregate counts only.
+A firing timer is not evidence of completed scans or successful processing.
+This is a local health signal, not an installed alert delivery service.
+
+Project scans classify incomplete work separately as `drive-quota`,
+`drive-transient` or `scan-error`. Temporary Drive failures propagate out of
+marker and bundle checks instead of quarantining recordings. Publication uses
+Drive MD5 metadata where available and reads content only for the critical
+checksum fallback; matching file sizes alone never verify a publication.
+
+Resume a journal in `publishing` without deleting it: keep existing local ASR
+outputs, verify source revision and let the normal worker finish publication.
+A resumed publication does **not** replace a fresh same-code media E2E when its
+ASR journal belongs to a previous worker version. Reprocessing an already-done
+real recording or publishing a new canary requires an agreed exact source.
+
 ## Source copies, retention and archive pilot
 
 Drive sources are downloaded to `out/hub-worker/intake/<project>/<Drive ID>/<revision>/`

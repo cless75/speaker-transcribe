@@ -20,7 +20,7 @@ import sys
 
 import hub_worker as hub
 import zoom_local_worker as zoom
-from hub_intake import Drive, projects
+from hub_intake import Drive, DriveRateLimited, DriveTransient, projects
 
 
 def now() -> dt.datetime:
@@ -46,6 +46,59 @@ def identity(config: dict) -> dict:
                 "remote", "hub_worker_root", "queue_path", "deployed_at")},
             "node": hub.watcher.host_label_of(hub.worker_config(
                 json.loads(pathlib.Path(config["hub_config"]).read_text(encoding="utf-8"))))}
+
+
+def release_status(config: dict) -> dict:
+    """Local preflight: identify drift without Drive access or exposing values."""
+    path = pathlib.Path(config["hub_worker_root"]) / "release-attestation.json"
+    current = identity(config)
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        pinned = receipt["identity"]
+        if not isinstance(pinned, dict):
+            raise ValueError("invalid identity")
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"status": "blocked", "reason": "missing_or_invalid_attestation",
+                "changed": []}
+    changed = []
+    for group in sorted(set(current) | set(pinned)):
+        before, after = pinned.get(group), current.get(group)
+        if isinstance(before, dict) and isinstance(after, dict):
+            changed.extend(f"{group}.{name}" for name in sorted(set(before) | set(after))
+                           if before.get(name) != after.get(name))
+        elif before != after:
+            changed.append(group)
+    return {"status": "blocked" if changed else "ok",
+            "reason": "release_identity_changed" if changed else None,
+            "changed": changed, "attested_at": receipt.get("attested_at")}
+
+
+def record_health(config: dict, *, report: dict | None = None,
+                  error: Exception | None = None) -> None:
+    """Persist a path-free heartbeat even when the release gate blocks a run."""
+    path = pathlib.Path(config["hub_worker_root"]) / "health" / "intake.json"
+    try:
+        health = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(health, dict):
+            health = {}
+    except (OSError, ValueError):
+        health = {}
+    when = now().isoformat()
+    health.update({"updated_at": when, "status": "running"})
+    if error is not None:
+        release = release_status(config)
+        health.update({"status": "blocked" if release["status"] == "blocked" else "failed",
+                       "reason": release.get("reason") or type(error).__name__,
+                       "changed": release["changed"]})
+    elif report is not None:
+        health.update({"status": "degraded" if report.get("failed") or report.get("hub_incomplete")
+                       else "ok", "reason": None, "changed": [],
+                       "last_scan_finished_at": when, "report": report})
+        if report.get("processed", 0) > 0:
+            health["last_processed_at"] = when
+    else:
+        health["last_started_at"] = when
+    hub.atomic_json(path, health)
 
 
 class Queue:
@@ -175,10 +228,12 @@ def attest(config: dict, drive: Drive, hc: dict, zc: dict,
 
 
 def require_attestation(config: dict, drive: Drive, hc: dict, zc: dict) -> None:
+    status = release_status(config)
+    if status["status"] != "ok":
+        raise RuntimeError("release identity changed or attestation missing; repeat both E2Es; "
+                           "changed=" + ",".join(status["changed"]))
     receipt = json.loads((pathlib.Path(config["hub_worker_root"]) /
                           "release-attestation.json").read_text(encoding="utf-8"))
-    if receipt.get("identity") != identity(config):
-        raise RuntimeError("release identity changed; repeat both E2Es")
     hub.require_media_e2e(drive, pathlib.Path(config["hub_worker_root"]), hc, max_age=None)
     hub_proof = json.loads((pathlib.Path(config["hub_worker_root"]) /
                             "media-e2e.json").read_text(encoding="utf-8"))
@@ -208,7 +263,9 @@ def old_consumers_inactive() -> None:
 def discover(config: dict, hc: dict, zc: dict, drive: Drive,
              queue: Queue | None = None) -> tuple[dict[str, tuple], dict]:
     candidates: dict[str, tuple] = {}
-    report = {"hub_incomplete": 0, "hub_quarantined": 0, "zoom_ready": 0}
+    report = {"hub_incomplete": 0, "hub_quarantined": 0, "zoom_ready": 0,
+              "hub_incomplete_reasons": {"drive-quota": 0, "drive-transient": 0,
+                                         "scan-error": 0}}
     for item in zoom.select(zc):
         key = zoom_key(item)
         journal = pathlib.Path(zc["local_root"]) / "jobs" / key.split(":", 1)[1] / "job.json"
@@ -225,8 +282,17 @@ def discover(config: dict, hc: dict, zc: dict, drive: Drive,
                 pathlib.Path(config["hub_worker_root"]) / "state-cache" / pid,
                 worker_root=pathlib.Path(config["hub_worker_root"]))
             report["hub_quarantined"] += len(held)
+        except DriveRateLimited:
+            report["hub_incomplete"] += 1
+            report["hub_incomplete_reasons"]["drive-quota"] += 1
+            continue
+        except DriveTransient:
+            report["hub_incomplete"] += 1
+            report["hub_incomplete_reasons"]["drive-transient"] += 1
+            continue
         except (OSError, RuntimeError, ValueError):
             report["hub_incomplete"] += 1
+            report["hub_incomplete_reasons"]["scan-error"] += 1
             continue
         for item, peers in jobs:
             key = hub_key(item)
@@ -361,11 +427,17 @@ def main() -> int:
     parser.add_argument("--migrate", action="store_true")
     parser.add_argument("--attest", action="store_true")
     parser.add_argument("--status", action="store_true", help="read local queue status without Drive")
+    parser.add_argument("--preflight", action="store_true",
+                        help="check local release identity only; does not run E2Es or access Drive")
     parser.add_argument("--max-files", type=int, default=3)
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    if sum((args.run, args.migrate, args.attest, args.status)) > 1:
+    if sum((args.run, args.migrate, args.attest, args.status, args.preflight)) > 1:
         parser.error("choose only one operation")
+    if args.preflight:
+        status = release_status(config)
+        print(json.dumps(status))
+        return 0 if status["status"] == "ok" else 1
     if args.status:
         queue = Queue(pathlib.Path(config["queue_path"]))
         try:
@@ -387,7 +459,16 @@ def main() -> int:
                 finally:
                     queue.close()
         return 0
-    result = run(config, dry_run=not args.run, max_files=args.max_files)
+    if args.run:
+        record_health(config)
+    try:
+        result = run(config, dry_run=not args.run, max_files=args.max_files)
+    except Exception as exc:
+        if args.run:
+            record_health(config, error=exc)
+        raise
+    if args.run:
+        record_health(config, report=result)
     print(json.dumps(result))
     return 1 if result.get("failed") or result.get("hub_incomplete") else 0
 

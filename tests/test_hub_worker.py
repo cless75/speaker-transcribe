@@ -6,7 +6,7 @@ import pathlib
 import pytest
 
 import hub_worker
-from hub_intake import Drive, MediaFile
+from hub_intake import Drive, DriveRateLimited, DriveTransient, MediaFile
 
 
 class MemoryDrive(Drive):
@@ -83,6 +83,64 @@ class MemoryDrive(Drive):
 
 def media(drive, project="_test505", path="voice.m4a"):
     return hub_worker.choose_input(drive, project, path, allow_vtt=True)
+
+
+@pytest.mark.parametrize("error", [DriveRateLimited("quota"), DriveTransient("timeout")])
+def test_project_scan_propagates_transient_instead_of_quarantining(tmp_path, error):
+    class UnavailableDrive(MemoryDrive):
+        def list(self, *parts, **kwargs):
+            raise error
+    with pytest.raises(type(error)):
+        hub_worker.pending_inputs(UnavailableDrive({}), "415", {}, tmp_path)
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_publication_without_metadata_hash_checks_content(tmp_path, corrupt):
+    class NoHashDrive(MemoryDrive):
+        def list(self, *parts, **kwargs):
+            rows = super().list(*parts, **kwargs)
+            for row in rows:
+                row.pop("Hashes", None)
+            return rows
+    (tmp_path / "transcript.md").write_bytes(b"good")
+    drive = NoHashDrive({"415/sessions/test/transcript.md": b"evil" if corrupt else b"good"})
+    if corrupt:
+        with pytest.raises(RuntimeError, match="checksum differs"):
+            hub_worker.remote_verified(drive, "415/sessions/test", tmp_path)
+    else:
+        assert hub_worker.remote_verified(drive, "415/sessions/test", tmp_path)
+
+
+def test_publication_with_metadata_hash_does_not_read_content(tmp_path, monkeypatch):
+    (tmp_path / "transcript.md").write_bytes(b"good")
+    drive = MemoryDrive({"415/sessions/test/transcript.md": b"good"})
+    monkeypatch.setattr(drive, "call", lambda *a: pytest.fail("metadata hash should suffice"))
+    assert hub_worker.remote_verified(drive, "415/sessions/test", tmp_path)
+
+
+@pytest.mark.parametrize("error", [DriveRateLimited("quota"), DriveTransient("timeout")])
+def test_state_read_preserves_transient_error(monkeypatch, error):
+    drive = Drive("gdrive:Hub")
+    def fail(*args):
+        raise error
+    monkeypatch.setattr(drive, "call", fail)
+    with pytest.raises(type(error)):
+        drive.state("415", "voice.m4a")
+
+
+@pytest.mark.parametrize("error", [DriveRateLimited("quota"), DriveTransient("timeout")])
+def test_bundle_state_outage_is_not_quarantined(tmp_path, monkeypatch, error):
+    class BundleDrive(MemoryDrive):
+        def state(self, project, path):
+            raise error
+    marker = json.dumps({"status": "queued"}).encode()
+    drive = BundleDrive({"415/primary.m4a": b"a", "415/sibling.m4a": b"b",
+                         "415/primary.m4a.state.json": marker,
+                         "415/sibling.m4a.state.json": marker})
+    primary = media(drive, "415", "primary.m4a")
+    monkeypatch.setattr(hub_worker, "choose_group", lambda *a, **kw: (primary, []))
+    with pytest.raises(type(error)):
+        hub_worker.pending_inputs(drive, "415", {}, tmp_path)
 
 
 def fake_asr(calls):

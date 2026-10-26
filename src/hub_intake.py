@@ -162,6 +162,8 @@ class Drive:
             if not isinstance(result, dict):
                 raise ValueError("not a JSON object")
             return result
+        except DriveTransient:
+            raise
         except (DriveError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
             return {"status": "unknown", "detail": type(exc).__name__}
 
