@@ -42,8 +42,8 @@ def identity(config: dict) -> dict:
                       for name in ("unified-intake@.service", "unified-intake@.timer")},
             "config": {key: digest(pathlib.Path(config[key])) for key in (
                 "hub_config", "zoom_config")},
-            "routing": {key: config.get(key) for key in (
-                "remote", "hub_worker_root", "queue_path", "deployed_at")},
+             "routing": {key: config.get(key) for key in (
+                 "remote", "hub_worker_root", "queue_path", "deployed_at", "excluded_hub_projects")},
             "node": hub.watcher.host_label_of(hub.worker_config(
                 json.loads(pathlib.Path(config["hub_config"]).read_text(encoding="utf-8"))))}
 
@@ -262,6 +262,10 @@ def old_consumers_inactive() -> None:
 
 def discover(config: dict, hc: dict, zc: dict, drive: Drive,
              queue: Queue | None = None) -> tuple[dict[str, tuple], dict]:
+    excluded = config.get("excluded_hub_projects", [])
+    if (not isinstance(excluded, list) or any(not isinstance(p, str) or not p or
+            p in {".", ".."} or any(c in p for c in '/\\*?\x00') for p in excluded)):
+        raise ValueError("excluded_hub_projects must be an explicit list of project names")
     candidates: dict[str, tuple] = {}
     report = {"hub_incomplete": 0, "hub_quarantined": 0, "zoom_ready": 0,
               "hub_incomplete_reasons": {"drive-quota": 0, "drive-transient": 0,
@@ -277,6 +281,8 @@ def discover(config: dict, hc: dict, zc: dict, drive: Drive,
             queue.upsert(key, "zoom", item["pid"], key.split(":", 1)[1],
                          "local-content-fingerprint-in-journal")
     for pid in projects(drive.list()):
+        if pid in excluded:
+            continue
         try:
             jobs, held = hub.pending_inputs(drive, pid, hc,
                 pathlib.Path(config["hub_worker_root"]) / "state-cache" / pid,

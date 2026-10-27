@@ -77,6 +77,31 @@ def test_release_identity_pins_code_and_node_config(tmp_path):
     assert unified.identity(cfg) != baseline
 
 
+def test_pilot_exclusion_is_exact_and_pinned_in_release_identity(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    baseline = unified.identity(cfg)
+    cfg["excluded_hub_projects"] = ["Example"]
+    assert unified.identity(cfg) != baseline
+    hc, zc, _ = unified.configs(cfg)
+    monkeypatch.setattr(unified.zoom, "select", lambda c: [])
+    scanned = []
+    def pending(drive, project, *args, **kwargs):
+        scanned.append(project)
+        return [], []
+    monkeypatch.setattr(unified.hub, "pending_inputs", pending)
+    unified.discover(cfg, hc, zc, MemoryDrive({"Example/a.m4a": b"a", "Example-other/b.m4a": b"b"}))
+    assert scanned == ["Example-other"]
+
+
+@pytest.mark.parametrize("excluded", ["Example", ["*"], ["../Example"], [None]])
+def test_pilot_exclusion_refuses_ambiguous_scope(tmp_path, excluded):
+    cfg = config(tmp_path)
+    cfg["excluded_hub_projects"] = excluded
+    hc, zc, _ = unified.configs(cfg)
+    with pytest.raises(ValueError, match="explicit list"):
+        unified.discover(cfg, hc, zc, MemoryDrive({}))
+
+
 def test_release_preflight_reports_drift_without_config_values(tmp_path):
     cfg = config(tmp_path)
     root = pathlib.Path(cfg["hub_worker_root"])

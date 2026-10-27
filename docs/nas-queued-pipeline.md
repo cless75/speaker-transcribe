@@ -1,6 +1,6 @@
 # NAS intake and independent ASR pipeline
 
-Version: 0.1.2 · Status: design draft · Project: 801
+Version: 0.1.3 · Status: design draft · Project: 801
 
 ## 1. Scope and owner decisions
 
@@ -309,10 +309,19 @@ technical contracts, implementation and tests.
 
 As of 2026-10-27:
 
+- Initial I1 stage runtime, local receipts/resource locks, transactional byte
+  reservations, guarded NAS copies, dual-delivery protocol and read/copy-only
+  Hub source adapter are implemented in isolation. See
+  [I1 interfaces, limitations and safety gates](hub-nas-i1.md). Real ASR/Hub
+  publication/claim adapters and production services are NOT connected.
+  An exact pilot-project exclusion is available in the old intake, but its
+  long GPU critical section still needs a safe split before mixed-route use.
+
 - `src/pipeline_queue.py`: isolated SQLite schema v1, fenced claims, leases,
-  heartbeat, retry/held. No daemon, complete receipt reconciliation, disk
-  reservations, weighted scheduling or production migration yet. `finish()`
-  is not stage evidence: the future adapter must verify a durable receipt first.
+  heartbeat, retry/held and explicit evidence-based expired completion. Runtime
+  consumers and reservations are separate libraries; weighted scheduling,
+  incomplete-stage recovery and production migration are not implemented.
+  `finish()` is not stage evidence: the adapter must verify a durable receipt first.
 - `src/zoom_bundle.py`: read-only READY/inventory/hash/path validation and
   conservative media/timeline eligibility, tested on Windows and Linux.
   Multi-track alignment/coverage and overlapping-video choice remain held

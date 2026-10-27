@@ -159,4 +159,27 @@ class PipelineQueue:
         """Report only. No automatic lease takeover or side-effect re-execution."""
         return [dict(r) for r in self.db.execute(
             "SELECT * FROM pipeline_jobs WHERE expires IS NOT NULL AND expires<=?",
-            (self.clock(),))]
+             (self.clock(),))]
+
+    def reconcile_finished(self, key: str, token: str, *, verify):
+        """Promote expired completed work ONLY under external job/resource locks.
+
+        verify(job, stage) must read durable identity-bound evidence. This method
+        never retries unfinished work and never obtains permission to own a GPU.
+        I/O is outside the SQLite transaction; token/expiry are checked again.
+        """
+        job = self.get(key)
+        if (not job or not token or job["token"] != token or job["expires"] is None
+                or job["expires"] > self.clock()):
+            raise LeaseLost("not an expired owned attempt")
+        stage = job["resume_stage"]
+        if stage not in TRANSITIONS or verify(job, stage) is not True:
+            raise ValueError("verified durable stage evidence required")
+        with self._transaction():
+            current = self.get(key)
+            if (current["token"] != token or current["expires"] is None or
+                    current["expires"] > self.clock() or current["state"] != job["state"]):
+                raise LeaseLost("attempt changed during reconciliation")
+            self.db.execute("UPDATE pipeline_jobs SET state=?,resume_stage=NULL,owner=NULL,"
+                            "token=NULL,expires=NULL,reason=NULL WHERE id=?",
+                            (TRANSITIONS[stage][1], key))
