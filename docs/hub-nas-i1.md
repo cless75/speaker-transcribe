@@ -1,6 +1,6 @@
 # Hub → NAS: isolated I1 implementation
 
-Version: 0.0.3 · Status: development, NOT a production cutover
+Version: 0.0.4 · Status: development, NOT a production cutover
 
 The owner roadmap remains in the project vault (`801-p10`). This document
 describes technical interfaces and evidence, not a second owner roadmap.
@@ -124,3 +124,23 @@ heartbeat, post-receipt failures, expired leases, disk admission, both-destinati
 retry, input/output corruption, source-state changes, source-history exclusion,
 READY timing and absence of Drive writes are tested. These tests do not start
 the ASR model, alter live timers, or prove deployment-level GPU ownership.
+
+### Verified development evidence
+
+Code candidate `abcde0f`:
+
+- Windows: **357 passed, 2 skipped** (existing symlink privilege/case-sensitive FS skips).
+- Linux: **359 passed** in an isolated detached worktree, using the node's ASR
+  Python plus the existing test dependency directory, without modifying the
+  production checkout or services.
+- An explicitly approved new NAS area was provisioned with a separate identity.
+  A 32044-byte synthetic silent WAV was mirrored, SHA-256 read back, receipted,
+  and exposed with READY last. A synthetic non-ASR result beside it in `.asr`
+  was also read back. Repeated source/result publication was idempotent.
+- Live probe found the autofs/CIFS layering and post-write CIFS attribute
+  refresh behaviours described above; regression tests cover both fixes.
+- These are storage-integrity probes, NOT speech recognition E2Es. No real Hub
+  media was transferred, no source was deleted, and no service was switched.
+- Live Drive state reads failed transiently during read-only candidate audit;
+  no yet-unprocessed production E2E source has been verified. Source selection
+  must not infer queued state from an unreadable marker or stale cache.
