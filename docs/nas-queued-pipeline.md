@@ -1,6 +1,6 @@
 # NAS intake and independent ASR pipeline
 
-Version: 0.1.1 · Status: design draft · Project: 801
+Version: 0.1.2 · Status: design draft · Project: 801
 
 ## 1. Scope and owner decisions
 
@@ -300,22 +300,27 @@ Required tests before enabling real input:
 12. Existing Hub and Zoom receipt migrations/E2Es retain claim and publication
     guarantees; no competing GPU consumer during cutover.
 
-## 10. Implementation slices and open gates
+## 10. Implementation evidence and owner roadmap
 
-1. Contract validator and versioned local queue, isolated tests; no deployment.
-   Foundation implemented in `src/pipeline_queue.py` with isolated schema v1
-   and tests. This library has no daemon, migration, receipt verifier, expired
-   lease reconciler, GPU execution, disk reservation or weighted scheduling yet.
-   `finish()` requires the future adapter to verify durable stage evidence;
-   it is not by itself proof of ASR/delivery completion. Schema v1 will need
-   explicit migrations as these interfaces are added.
-2. NAS discovery/staging, bounded disk reservations and stage receipts.
-3. Constant ASR consumer using existing engine and common GPU lock; independent
-   NAS publisher and restart tests.
-4. Hub/Zoom adapters and read-only journal migration; remove the scan-before-ASR
-   dependency, retain source-specific safeguards.
-5. Component health/attestation, disabled service templates for both profiles;
-   approved NAS pilot and only then controlled production cutover.
+The owner-facing release plan is maintained in the project vault:
+`cless75-ex1/areas/60-techplatform/801-asr-engine/801-p10-NAS-Queued-Pipeline-Release-Plan.md`.
+Do not maintain a second editable release roadmap here. This repository owns
+technical contracts, implementation and tests.
+
+As of 2026-10-27:
+
+- `src/pipeline_queue.py`: isolated SQLite schema v1, fenced claims, leases,
+  heartbeat, retry/held. No daemon, complete receipt reconciliation, disk
+  reservations, weighted scheduling or production migration yet. `finish()`
+  is not stage evidence: the future adapter must verify a durable receipt first.
+- `src/zoom_bundle.py`: read-only READY/inventory/hash/path validation and
+  conservative media/timeline eligibility, tested on Windows and Linux.
+  Multi-track alignment/coverage and overlapping-video choice remain held
+  without supporting evidence. See the bundle specification for test results.
+- The separate GPL downloader exports complete observed local Zoom inventories;
+  this does not implement NAS transfer or the new ASR consumer.
+- Production still uses the existing intake; the independent pipeline has not
+  been enabled. Source contracts remain subordinate to shared GPU ownership.
 
 Open before NAS pilot: exact collection roots/mount identity, allowed write
 areas, Zoom timeline/coverage fixtures, profile/output set, byte budgets and local NAS-job
