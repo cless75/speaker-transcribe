@@ -1,6 +1,6 @@
 # Hub → NAS: isolated I1 implementation
 
-Version: 0.0.2 · Status: development, NOT a production cutover
+Version: 0.0.3 · Status: development, NOT a production cutover
 
 The owner roadmap remains in the project vault (`801-p10`). This document
 describes technical interfaces and evidence, not a second owner roadmap.
@@ -33,6 +33,10 @@ describes technical interfaces and evidence, not a second owner roadmap.
   explicit UNC share roots, not unverifiable mapped-drive identities.
   Linux findmnt filters for CIFS: a systemd autofs layer at the same target is
   not the mounted share identity and cannot substitute for an actual CIFS mount.
+  NAS-owned destination verification compares full SHA-256 and byte length:
+  CIFS timestamp/inode attribute refresh after a write must not be interpreted
+  as a local-input mutation. Local source/receipt snapshots retain strict
+  inode/mtime/ctime checks; destination checksum requirements are not relaxed.
 - `DualDelivery`: independently receipted Hub/NAS sinks; failed delivery never
   repeats ASR; a verified sink is rechecked on resume, not blindly trusted.
   The terminal Hub marker finalizer runs only after BOTH destinations verify.

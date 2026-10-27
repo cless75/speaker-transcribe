@@ -48,7 +48,7 @@ def no_links(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
-def digest(path: pathlib.Path) -> str:
+def digest(path: pathlib.Path, *, strict_snapshot: bool = True) -> str:
     no_links(path)
     before = path.stat()
     if not stat.S_ISREG(before.st_mode):
@@ -58,8 +58,9 @@ def digest(path: pathlib.Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             h.update(block)
     after = path.stat()
-    if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
-            after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+    if before.st_size != after.st_size or (strict_snapshot and
+            (before.st_ino, before.st_mtime_ns, before.st_ctime_ns) !=
+            (after.st_ino, after.st_mtime_ns, after.st_ctime_ns)):
         raise EvidenceError("artifact_changed")
     return h.hexdigest()
 

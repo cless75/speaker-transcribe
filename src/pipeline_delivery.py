@@ -83,7 +83,7 @@ class NasArea:
             check()
             self.guard()
             path = no_links(target / str(safe_path(member["path"])))
-            if path.stat().st_size != member["size"] or digest(path) != member["sha256"]:
+            if path.stat().st_size != member["size"] or digest(path, strict_snapshot=False) != member["sha256"]:
                 raise EvidenceError("nas_readback_mismatch")
         # Results are immutable versions: do not accept extra, unhashed files.
         actual = set()
@@ -140,7 +140,7 @@ class NasArea:
             if source.stat().st_size != member["size"] or digest(source) != member["sha256"]:
                 raise EvidenceError("local_delivery_artifact_changed")
             if dest.exists():
-                if dest.stat().st_size == member["size"] and digest(dest) == member["sha256"]:
+                if dest.stat().st_size == member["size"] and digest(dest, strict_snapshot=False) == member["sha256"]:
                     continue  # known complete member of an interrupted attempt
                 raise EvidenceError("nas_existing_member_conflict")
             if shutil.disk_usage(self.root).free - member["size"] < self.minimum_free:
@@ -158,7 +158,10 @@ class NasArea:
                         out.write(block)
                     out.flush()
                     os.fsync(out.fileno())
-                if tmp.stat().st_size != member["size"] or digest(tmp) != member["sha256"]:
+                # CIFS can refresh cached inode/timestamp attributes after a
+                # flushed write/read. For owned destination bytes compare full
+                # SHA-256 + length, NOT local-filesystem metadata equality.
+                if tmp.stat().st_size != member["size"] or digest(tmp, strict_snapshot=False) != member["sha256"]:
                     raise EvidenceError("nas_copy_mismatch")
                 self.guard()
                 if dest.exists():

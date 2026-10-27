@@ -11,7 +11,7 @@ from pipeline_budget import DiskBudget, DiskPressure
 from pipeline_delivery import DualDelivery, NasArea, verify_mount
 from pipeline_queue import LeaseLost, PipelineQueue
 from pipeline_runtime import RetryJob, StageRunner
-from pipeline_storage import EvidenceError, ReceiptStore, ResourceBusy, atomic_json, file_lock
+from pipeline_storage import EvidenceError, ReceiptStore, ResourceBusy, atomic_json, file_lock, digest
 
 
 def enqueue(queue, name="one"):
@@ -422,3 +422,22 @@ def test_mount_guard_filters_autofs_but_requires_exact_cifs_identity(tmp_path, m
     verify_mount(tmp_path, "//test/share")
     with pytest.raises(OSError, match="identity_mismatch"):
         verify_mount(tmp_path, "//different/share")
+
+
+def test_owned_nas_hash_does_not_depend_on_cifs_timestamp_cache(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    path = tmp_path / "nas-copy"
+    path.write_bytes(b"synthetic")
+    original = pathlib.Path.stat
+    calls = [0]
+    def stat_for_test(self, *args, **kwargs):
+        value = original(self, *args, **kwargs)
+        if self != path:
+            return value
+        calls[0] += 1
+        return SimpleNamespace(st_mode=value.st_mode, st_size=value.st_size,
+                               st_ino=value.st_ino, st_mtime_ns=calls[0], st_ctime_ns=calls[0])
+    monkeypatch.setattr(pathlib.Path, "stat", stat_for_test)
+    with pytest.raises(EvidenceError, match="artifact_changed"):
+        digest(path)  # local input snapshot checks remain strict
+    assert digest(path, strict_snapshot=False) == hashlib.sha256(b"synthetic").hexdigest()
