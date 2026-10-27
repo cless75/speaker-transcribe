@@ -161,6 +161,12 @@ class PipelineQueue:
             "SELECT * FROM pipeline_jobs WHERE expires IS NOT NULL AND expires<=?",
              (self.clock(),))]
 
+    def inflight(self, stage: str) -> list[dict]:
+        if stage not in TRANSITIONS:
+            raise ValueError("unknown stage")
+        return [dict(r) for r in self.db.execute(
+            "SELECT * FROM pipeline_jobs WHERE state=?", (TRANSITIONS[stage][0],))]
+
     def reconcile_finished(self, key: str, token: str, *, verify):
         """Promote expired completed work ONLY under external job/resource locks.
 

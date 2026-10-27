@@ -26,7 +26,8 @@ def verify_mount(mountpoint: pathlib.Path, source: str):
         raise OSError("nas_mount_missing")
     if os.name == "posix":
         result = subprocess.run(
-            ["findmnt", "--json", "--mountpoint", str(mountpoint), "--output", "TARGET,SOURCE,FSTYPE"],
+            ["findmnt", "--json", "--types", "cifs", "--mountpoint", str(mountpoint),
+             "--output", "TARGET,SOURCE,FSTYPE"],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=True)
         mounts = json.loads(result.stdout).get("filesystems", [])
         if len(mounts) != 1 or mounts[0] != {

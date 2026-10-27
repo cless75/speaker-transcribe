@@ -14,14 +14,18 @@ class DiskPressure(RuntimeError):
 
 class DiskBudget:
     def __init__(self, path: pathlib.Path, *, capacity: int, minimum_free: int,
-                 volume: pathlib.Path, free_bytes=None):
+                 volume: pathlib.Path, maximum_job: int | None = None, free_bytes=None):
         if (type(capacity) is not int or capacity <= 0 or type(minimum_free) is not int
                 or minimum_free < 0):
             raise ValueError("explicit_byte_budget_required")
+        maximum_job = capacity if maximum_job is None else maximum_job
+        if type(maximum_job) is not int or not 0 < maximum_job <= capacity:
+            raise ValueError("invalid_per_job_budget")
         self.volume = no_links(volume)
         if not self.volume.is_dir():
             raise ValueError("budget_volume_missing")
         self.capacity, self.minimum_free = capacity, minimum_free
+        self.maximum_job = maximum_job
         self.free_bytes = free_bytes or (lambda: shutil.disk_usage(self.volume).free)
         no_links(path)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -35,15 +39,16 @@ class DiskBudget:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("BEGIN IMMEDIATE")
             self.db.execute("CREATE TABLE IF NOT EXISTS disk_budget_config "
-                            "(capacity INTEGER NOT NULL, minimum_free INTEGER NOT NULL, volume TEXT NOT NULL)")
+                            "(capacity INTEGER NOT NULL, minimum_free INTEGER NOT NULL, volume TEXT NOT NULL, "
+                            "maximum_job INTEGER NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS disk_reservations "
                             "(job_id TEXT PRIMARY KEY, bytes INTEGER NOT NULL CHECK(bytes>0))")
-            config = (capacity, minimum_free, str(self.volume))
+            config = (capacity, minimum_free, str(self.volume), maximum_job)
             old = self.db.execute("SELECT * FROM disk_budget_config").fetchall()
             if old and old != [config]:
                 raise ValueError("budget_config_changed_requires_reconciliation")
             if not old:
-                self.db.execute("INSERT INTO disk_budget_config VALUES (?,?,?)", config)
+                self.db.execute("INSERT INTO disk_budget_config VALUES (?,?,?,?)", config)
             self.db.execute("COMMIT")
         except BaseException:
             self.db.close()
@@ -55,6 +60,8 @@ class DiskBudget:
     def reserve(self, key: str, size: int):
         if not key or type(size) is not int or size <= 0:
             raise ValueError("positive_byte_reservation_required")
+        if size > self.maximum_job:
+            raise ValueError("per_job_budget_exceeded")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             old = self.db.execute("SELECT bytes FROM disk_reservations WHERE job_id=?", (key,)).fetchone()

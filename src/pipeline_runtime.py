@@ -29,7 +29,7 @@ class StageRunner:
     def __init__(self, db_path: pathlib.Path, receipts, *, gpu_lock: pathlib.Path,
                  handlers: dict, owner: str, budget=None, reserve_bytes=None,
                  lease_seconds: float = 300, retry_seconds: float = 60,
-                 max_attempts: int = 5, clock=None):
+                 max_attempts: int = 5, clock=None, gpu_recovery_check=None):
         if set(handlers) != {"discovered", "ready", "publish_pending"}:
             raise ValueError("all_stage_handlers_required")
         if lease_seconds < 0.3 or retry_seconds <= 0 or max_attempts < 1:
@@ -42,6 +42,7 @@ class StageRunner:
         self.reserve_bytes = reserve_bytes
         self.lease_seconds, self.retry_seconds = lease_seconds, retry_seconds
         self.max_attempts, self.clock = max_attempts, clock
+        self.gpu_recovery_check = gpu_recovery_check
 
     def close(self):
         self.queue.close()
@@ -68,6 +69,11 @@ class StageRunner:
                 self._resources(resources, stage)
             except ResourceBusy:
                 return "resource_busy"
+            if stage == "ready" and self.queue.inflight("ready"):
+                # Parent death can release flock while its ASR subprocess is
+                # still alive. Any unreconciled ASR attempt blocks NEW GPU work,
+                # even before lease expiry, and even when flock appears free.
+                return "recovery_required"
             job = self.queue.claim(stage, self.owner, lease_seconds=self.lease_seconds)
             if job is None:
                 return "idle"
@@ -154,6 +160,9 @@ class StageRunner:
         stage = job["resume_stage"]
         with ExitStack() as resources:
             self._resources(resources, stage, key)
+            if stage == "ready" and (self.gpu_recovery_check is None or
+                                     self.gpu_recovery_check(job) is not True):
+                raise EvidenceError("gpu_process_release_proof_required")
             def verify(current, current_stage):
                 receipt = self.receipts.read(current, current_stage)
                 if receipt is None:

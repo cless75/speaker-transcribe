@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from pipeline_budget import DiskBudget, DiskPressure
-from pipeline_delivery import DualDelivery, NasArea
+from pipeline_delivery import DualDelivery, NasArea, verify_mount
 from pipeline_queue import LeaseLost, PipelineQueue
 from pipeline_runtime import RetryJob, StageRunner
 from pipeline_storage import EvidenceError, ReceiptStore, ResourceBusy, atomic_json, file_lock
@@ -99,7 +99,7 @@ def test_shared_gpu_lock_blocks_claim_without_new_lease(tmp_path):
 
 def test_reconcile_expired_asr_only_after_proving_gpu_free(tmp_path):
     now = [100.0]
-    runner, store, key = setup(tmp_path, clock=lambda: now[0])
+    runner, store, key = setup(tmp_path, clock=lambda: now[0], gpu_recovery_check=lambda job: True)
     assert runner.tick("discovered") == "finished"
     job = runner.queue.claim("ready", "dead-worker", lease_seconds=1)
     runner.handlers["ready"](job, store.directory(key), lambda: None)
@@ -248,6 +248,18 @@ def test_budget_pressure_never_calls_stager(tmp_path):
     budget.close()
 
 
+def test_per_job_budget_is_enforced_before_reservation(tmp_path):
+    budget = DiskBudget(tmp_path / "budget.db", capacity=100, minimum_free=10,
+                        maximum_job=20, volume=tmp_path, free_bytes=lambda: 1000)
+    try:
+        with pytest.raises(ValueError, match="per_job_budget"):
+            budget.reserve("too-large", 21)
+        assert budget.db.execute("SELECT count(*) FROM disk_reservations").fetchone()[0] == 0
+        budget.reserve("allowed", 20)
+    finally:
+        budget.close()
+
+
 class Sink:
     def __init__(self):
         self.calls, self.verifications, self.fail = 0, 0, False
@@ -371,3 +383,42 @@ def test_degraded_without_review_cannot_write_asr_receipt(tmp_path):
         store.write(job, "ready", {"quality": "degraded"})
     assert not store.path(key, "ready").exists()
     runner.close()
+
+
+def test_orphaned_asr_blocks_other_ready_jobs_even_if_lock_is_free(tmp_path):
+    now = [100.0]
+    runner, store, first = setup(tmp_path, clock=lambda: now[0])
+    assert runner.tick("discovered") == "finished"
+    now[0] += .1
+    second = enqueue(runner.queue, "second")
+    assert runner.tick("discovered") == "finished"
+    abandoned = runner.queue.claim("ready", "lost-parent", lease_seconds=1)
+    assert runner.tick("ready") == "recovery_required"
+    now[0] = 102
+    assert runner.tick("ready") == "recovery_required"
+    assert runner.queue.get(second)["state"] == "ready"
+    runner.handlers["ready"](abandoned, store.directory(first), lambda: None)
+    store.write(abandoned, "ready", {"quality": "ok"})
+    with pytest.raises(EvidenceError, match="process_release_proof"):
+        runner.reconcile(first)
+    runner.gpu_recovery_check = lambda job: True  # synthetic deployment proof
+    assert runner.reconcile(first) == "reconciled"
+    assert runner.tick("ready") == "finished"
+    runner.close()
+
+
+def test_mount_guard_filters_autofs_but_requires_exact_cifs_identity(tmp_path, monkeypatch):
+    import pipeline_delivery as delivery
+    from types import SimpleNamespace
+    monkeypatch.setattr(delivery, "os", SimpleNamespace(
+        name="posix", path=SimpleNamespace(ismount=lambda _: True)))
+    class Result:
+        stdout = json.dumps({"filesystems": [{"target": str(tmp_path),
+                                               "source": "//test/share", "fstype": "cifs"}]}).encode()
+    def findmnt(args, **kwargs):
+        assert args[args.index("--types") + 1] == "cifs"
+        return Result()
+    monkeypatch.setattr(delivery.subprocess, "run", findmnt)
+    verify_mount(tmp_path, "//test/share")
+    with pytest.raises(OSError, match="identity_mismatch"):
+        verify_mount(tmp_path, "//different/share")

@@ -1,6 +1,6 @@
 # Hub → NAS: isolated I1 implementation
 
-Version: 0.0.1 · Status: development, NOT a production cutover
+Version: 0.0.2 · Status: development, NOT a production cutover
 
 The owner roadmap remains in the project vault (`801-p10`). This document
 describes technical interfaces and evidence, not a second owner roadmap.
@@ -23,10 +23,16 @@ describes technical interfaces and evidence, not a second owner roadmap.
 - `PipelineQueue.reconcile_finished`: explicit receipt-only reconciliation of
   expired completed stages, after acquiring job/resource locks. No evidence
   means no promotion or automatic retry. Expiry never grants GPU ownership.
+  Any unreconciled transcribing job blocks new GPU claims even if flock is free:
+  a dead parent may leave a running child. ASR reconciliation additionally
+  requires deployment-provided proof of resource release; a synthetic test
+  callback is not a production proof.
 - `pipeline_delivery.py`: NAS mount source/target/identity guard before writes,
   versioned copies, SHA-256 read-back BEFORE completion receipt, source READY
   last; existing conflicts are held, not replaced. The Windows guard supports
   explicit UNC share roots, not unverifiable mapped-drive identities.
+  Linux findmnt filters for CIFS: a systemd autofs layer at the same target is
+  not the mounted share identity and cannot substitute for an actual CIFS mount.
 - `DualDelivery`: independently receipted Hub/NAS sinks; failed delivery never
   repeats ASR; a verified sink is rechecked on resume, not blindly trusted.
   The terminal Hub marker finalizer runs only after BOTH destinations verify.
