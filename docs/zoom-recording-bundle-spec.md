@@ -1,6 +1,6 @@
 # Zoom recording bundles — исследование и спецификация входа 801
 
-Версия: 0.1.2 · Проверено: 2026-10-27 · Статус: проект спецификации
+Версия: 0.1.3 · Проверено: 2026-10-27 · Статус: проект спецификации
 
 Проверка реального downloader: [ZoomL / zoomrs acquisition audit](zoomrs-acquisition-audit.md).
 Он сейчас не получает participant audio и теряет часть временных метаданных;
@@ -247,3 +247,26 @@ python src/zoom_bundle.py /allowed/meeting --allowed-root /allowed
 принятие качества или публикацию; exit 1 — held. Она не изменяет очередь,
 не запускает ASR и не проверяет mount за вызывающий адаптер. Публичные fixtures
 синтетические; реальные речи/имена/Zoom URLs в репозиторий не включаются.
+
+### Результат проверки первой реализации
+
+Коммит кода `739a469`: весь Python-набор — **325 passed / 2 skipped** на
+Windows, **327 passed** на Linux. Windows skips относятся только к symlink
+privilege и case-sensitive collision; на Linux обе проверки исполнены.
+Обе платформы также выполнили настоящий ffprobe на синтетическом mono PCM WAV.
+В Linux проверялась копия worktree `~/out/nas-validator-739a469`, без переключения
+production release/сервисов/очереди. Этот прогон включает библиотеку очереди.
+
+Read-only прогон на трёх локальных комплектах downloader (2026-10-27):
+
+| Комплект | Integrity | План | Итог |
+|---|---|---|---|
+| 5 файлов, один MP4 | verified | video fallback, 1 unit | validated |
+| 5 файлов, один MP4 | verified | video fallback, 1 unit | validated |
+| 7 файлов, три MP4 | verified | overlapping video candidates | held: ambiguous_overlapping_media |
+
+Последнее удержание намеренное: без выбора/сверки аудио валидатор не объявляет
+три ракурса тремя независимыми речевыми заданиями. Отдельные дорожки участников
+проверены синтетическими fixtures, но живого multi-track примера всё ещё нет.
+Результат `validated` не является разрешением запускать код из manifest,
+стадировать без лимитов, обходить GPU-lock или завершать очередь без квитанции.
