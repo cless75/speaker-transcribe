@@ -25,14 +25,14 @@ import uuid
 from types import SimpleNamespace
 
 import hub_worker as hub
-from hub_intake import Drive
+from hub_intake import Drive, DriveError
 from hub_pipeline import implementation, old_intake_stopped
 from pipeline_budget import DiskBudget
 from pipeline_delivery import DualDelivery, NasArea, verify_mount
 from pipeline_hub_adapter import HubPipeline, duration_seconds
 from pipeline_process import gpu_idle
-from pipeline_queue import PipelineQueue
-from pipeline_runtime import HoldJob, StageRunner
+from pipeline_queue import LeaseLost, PipelineQueue
+from pipeline_runtime import HoldJob, RetryJob, StageRunner
 from pipeline_storage import (EvidenceError, ReceiptStore, atomic_json, canonical,
                               digest, file_lock, no_links, safe_path, sync_directory)
 
@@ -355,6 +355,16 @@ class HubSink:
         self.p = pipeline
 
     def publish(self, job, result, check):
+        try:
+            return self._publish(job, result, check)
+        except DriveError as exc:
+            raise RetryJob("hub_delivery_unavailable") from exc
+        except (RetryJob, LeaseLost):
+            raise
+        except RuntimeError as exc:
+            raise HoldJob("hub_publication_unverified") from exc
+
+    def _publish(self, job, result, check):
         check()
         self.p.claims.check(job)
         target = self.p.route(job)["target"]
@@ -368,6 +378,16 @@ class HubSink:
                 "result_sha256": digest(self.p.store.path(job["id"], "ready"))}
 
     def verify(self, job, evidence, check):
+        try:
+            return self._verify(job, evidence, check)
+        except DriveError as exc:
+            raise RetryJob("hub_verification_unavailable") from exc
+        except (RetryJob, LeaseLost):
+            raise
+        except RuntimeError as exc:
+            raise HoldJob("hub_publication_integrity_unverified") from exc
+
+    def _verify(self, job, evidence, check):
         check()
         if (evidence.get("target") != self.p.route(job)["target"] or
                 evidence.get("result_sha256") != digest(self.p.store.path(job["id"], "ready"))):

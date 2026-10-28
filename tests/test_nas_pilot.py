@@ -149,6 +149,30 @@ def test_nas_outage_never_marks_source_done(tmp_path):
         runner.close()
 
 
+def test_hub_outage_still_delivers_nas_and_never_repeats_asr(tmp_path):
+    from hub_intake import DriveTransient
+    import time
+    a, pipeline, store, drive, runner, calls = fixture(tmp_path)
+    original = drive.call
+    try:
+        key = pipeline.discover(runner.queue)["job_id"]
+        assert runner.tick("discovered") == runner.tick("ready") == "finished"
+        def outage(*args):
+            if args[0] == "copy":
+                raise DriveTransient("offline")
+            return original(*args)
+        drive.call = outage
+        assert runner.tick("publish_pending") == "retry_wait"
+        assert (store.directory(key) / "delivery-nas.json").exists()
+        assert not (pipeline.area.root / "source-state.json").exists()
+        drive.call = original
+        time.sleep(.01)
+        assert runner.tick("publish_pending") == "finished"
+        assert len(calls) == 1
+    finally:
+        runner.close()
+
+
 def test_foreign_persistent_claim_is_never_stolen(tmp_path):
     a, pipeline, store, drive, runner, calls = fixture(tmp_path)
     atomic_json(pipeline.area.root / "source-claim.json", {"token": "foreign"})
