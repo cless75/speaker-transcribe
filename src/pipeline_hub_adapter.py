@@ -44,6 +44,19 @@ class HubPipeline:
     def source(self, job):
         return self.intake._source(job)
 
+    def worker_config(self, job, directory):
+        return self.cfg, self.config_path
+
+    def validate_engine_result(self, job, metadata, output):
+        """Source adapters may enforce additional frozen execution policy."""
+
+    def public_source(self, job):
+        _, item = self.source(job)
+        return pathlib.Path(self.cfg["hub_root"]) / item.project / pathlib.Path(item.path)
+
+    def result_review(self, job, metadata):
+        return "needs_review" if metadata["status"] == "degraded" else "not_reviewed"
+
     def route(self, job):
         data, item = self.source(job)
         started = hub.watcher.parse_started_from_name(pathlib.PurePosixPath(item.path).stem)
@@ -173,16 +186,17 @@ class HubPipeline:
         output = work / "transcripts"
         output.mkdir(exist_ok=True)
         control = AsrProcess(directory, check=check, ownership_check=lambda: self.claims.check(job))
+        worker_config, config_path = self.worker_config(job, directory)
         if self.executor is None:
             fd = os.open(directory / "private-asr.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as log, contextlib.redirect_stderr(log):
                 ok, _, transcript, meta = hub.watcher.run_asr(
-                    local, self.cfg, item.project, local.parent, output,
-                    self.config_path, process_control=control)
+                    local, worker_config, item.project, local.parent, output,
+                    config_path, process_control=control)
             if not ok:
                 raise HoldJob("asr_did_not_complete")
         else:
-            transcript, meta = self.executor(local, output, self.cfg, self.config_path, item.project)
+            transcript, meta = self.executor(local, output, worker_config, config_path, item.project)
         if (not isinstance(meta, dict) or meta.get("status") not in {"ok", "degraded"} or
                 transcript is None or not transcript.is_file() or transcript.stat().st_size == 0 or
                 not transcript.is_relative_to(output)):
@@ -192,6 +206,7 @@ class HubPipeline:
             raise HoldJob("missing_degraded_quality")
         if not list(output.glob("*-run-meta.json")):
             raise HoldJob("missing_run_metadata")
+        self.validate_engine_result(job, meta, output)
         artifacts = meta.get("outputs")
         if not isinstance(artifacts, dict) or not artifacts.get("md") or not artifacts.get("run_meta"):
             raise HoldJob("mandatory_output_manifest_missing")
@@ -211,9 +226,9 @@ class HubPipeline:
         route = self.route(job)
         public = pathlib.Path(self.cfg["hub_root"])
         hub.rewrite_output_paths(output, local, str(public / route["target"] / "transcripts"),
-                                 str(public / item.project / pathlib.Path(item.path)),
-                                 related=[(str(local.parent), str(public / item.project / pathlib.Path(item.path).parent))])
-        review = "needs_review" if meta["status"] == "degraded" else "not_reviewed"
+                                 str(self.public_source(job)),
+                                 related=[(str(local.parent), str(self.public_source(job).parent))])
+        review = self.result_review(job, meta)
         atomic_json(output / "quality.json", {"status": meta["status"], "review": review, "details": quality})
         metadata = {"quality": meta["status"], "review": review, "transcript_quality": quality,
                     "transcript": "transcripts/" + transcript.name, **route}
