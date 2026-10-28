@@ -1,6 +1,6 @@
 # NAS intake and independent ASR pipeline
 
-Version: 0.1.3 · Status: design draft · Project: 801
+Version: 0.1.4 · Status: design draft · Project: 801
 
 ## 1. Scope and owner decisions
 
@@ -307,15 +307,19 @@ The owner-facing release plan is maintained in the project vault:
 Do not maintain a second editable release roadmap here. This repository owns
 technical contracts, implementation and tests.
 
-As of 2026-10-27:
+As of 2026-10-28:
 
 - Initial I1 stage runtime, local receipts/resource locks, transactional byte
   reservations, guarded NAS copies, dual-delivery protocol and read/copy-only
-  Hub source adapter are implemented in isolation. See
+  Hub source adapter are implemented. Concrete Hub claims, controlled ASR,
+  dual publishers and a gated supervisor have been added (`680ffc3`), with
+  373 passed / 2 skipped on Windows and 375 passed on Linux. See
   [I1 interfaces, limitations and safety gates](hub-nas-i1.md). Real ASR/Hub
-  publication/claim adapters and production services are NOT connected.
+  publication/claim adapters are running in a bounded live E2E; successful
+  completion/attestation and enabled production services are NOT yet confirmed.
   An exact pilot-project exclusion is available in the old intake, but its
-  long GPU critical section still needs a safe split before mixed-route use.
+  long GPU critical section would need a safe split before future mixed-route
+  use. The owner stopped the old intake instead for this first pilot.
 
 - `src/pipeline_queue.py`: isolated SQLite schema v1, fenced claims, leases,
   heartbeat, retry/held and explicit evidence-based expired completion. Runtime
@@ -328,8 +332,9 @@ As of 2026-10-27:
   without supporting evidence. See the bundle specification for test results.
 - The separate GPL downloader exports complete observed local Zoom inventories;
   this does not implement NAS transfer or the new ASR consumer.
-- Production still uses the existing intake; the independent pipeline has not
-  been enabled. Source contracts remain subordinate to shared GPU ownership.
+- The owner stopped the old intake for the bounded new-route E2E; its release
+  and state remain preserved. The new unattended service has not been enabled.
+  Source contracts remain subordinate to shared GPU ownership.
 
 Open before NAS pilot: exact collection roots/mount identity, allowed write
 areas, Zoom timeline/coverage fixtures, profile/output set, byte budgets and local NAS-job

@@ -1,6 +1,6 @@
 # Hub → NAS: isolated I1 implementation
 
-Version: 0.0.5 · Status: development, NOT a production cutover
+Version: 0.0.6 · Status: development, NOT a production cutover
 
 The owner roadmap remains in the project vault (`801-p10`). This document
 describes technical interfaces and evidence, not a second owner roadmap.
@@ -52,7 +52,7 @@ describes technical interfaces and evidence, not a second owner roadmap.
   away from old discovery. The exclusion is exact (no wildcards) and included
   in release identity; adding it does not bypass the old attestation gate.
 
-## Concrete pilot adapters (2026-10-28, awaiting live E2E)
+## Concrete pilot adapters (2026-10-28, live E2E in progress)
 
 `pipeline_hub_claims.py` maintains token-bound Hub claims across stage gaps with
 verified heartbeats. Foreign expired claims are never preempted. Persisted
@@ -189,6 +189,20 @@ READY timing and absence of Drive writes are tested. These tests do not start
 the ASR model, alter live timers, or prove deployment-level GPU ownership.
 
 ### Verified development evidence
+
+Concrete adapter candidate `680ffc3`: **373 passed / 2 skipped** on Windows;
+**375 passed** on Linux. Includes real controlled-child subprocess tests,
+foreign-expired-claim fencing, concrete memory-Drive → NAS → engine-fixture →
+dual publication, crash after durable engine completion, each destination
+outage, exact E2E source filtering and attestation/startup gates.
+
+A bounded live E2E has been started for one owner-selected, previously unmarked
+source. NAS source copy and staging receipt verified; ASR is running on media
+of 3834.107 seconds. Live PID/group inspection confirmed the GPU worker belongs
+to this invocation. **No completed E2E, successful output publication,
+attestation or enabled new service is claimed by this checkpoint.**
+
+Earlier foundation/storage candidate:
 
 Code candidate `abcde0f`:
 
