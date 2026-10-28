@@ -17,7 +17,7 @@ from pipeline_delivery import DualDelivery
 from pipeline_process import AsrProcess, gpu_idle
 from pipeline_queue import LeaseLost
 from pipeline_runtime import HoldJob, RetryJob
-from pipeline_storage import EvidenceError, atomic_json, digest, no_links
+from pipeline_storage import EvidenceError, atomic_json, digest, no_links, required_destinations
 
 
 def duration_seconds(path):
@@ -265,6 +265,9 @@ class HubPipeline:
         return metadata
 
     def finalize(self, job, deliveries, check):
+        destinations = list(required_destinations(job))
+        if set(deliveries) != set(destinations) or any(v.get("verified") is not True for v in deliveries.values()):
+            raise EvidenceError("delivery_policy_mismatch")
         _, item = self.source(job)
         self.claims.ensure(job, item)
         self.claims.check(job)
@@ -281,6 +284,8 @@ class HubPipeline:
         path = self.store.directory(job["id"]) / "final-state.json"
         if path.exists():
             state = json.loads(path.read_bytes())
+            if state.get("deliveries_verified") != destinations:
+                raise EvidenceError("local_final_delivery_policy_mismatch")
             if (state.get("source_id"), state.get("source_revision"), state.get("pipeline_job_id"),
                     state.get("pid"), state.get("session_id"), state.get("status"), state.get("review")) != (
                     item.file_id, item.revision, job["id"], item.project, route["session_id"], "asr-done", meta["review"]):
@@ -290,7 +295,7 @@ class HubPipeline:
                      "source_id": item.file_id, "source_revision": item.revision,
                      "pipeline_job_id": job["id"], "host": self.claims.host,
                      "worker_completed": True, "publication_verified": True,
-                     "deliveries_verified": ["hub", "nas"], "review": meta["review"],
+                     "deliveries_verified": destinations, "review": meta["review"],
                      "transcript_quality": {**meta["transcript_quality"], "status": meta["quality"]},
                      "transcript_url": "https://drive.google.com/file/d/" + deliveries["hub"]["evidence"]["transcript_id"] + "/view",
                      "transcript_path": str(pathlib.Path(self.cfg["hub_root"]) / route["target"] / meta["transcript"]),
@@ -363,6 +368,8 @@ class _NasSink:
         self.p = pipeline
 
     def arguments(self, job):
+        if "nas" not in required_destinations(job):
+            raise EvidenceError("nas_forbidden_by_job_policy")
         source = self.p.store.read(job, "discovered")["metadata"]
         evidence = source["nas_source"]
         relative = evidence["relative"] + "/" + source["primary_name"] + ".asr/" + job["id"]

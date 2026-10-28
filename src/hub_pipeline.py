@@ -28,7 +28,7 @@ from pipeline_hub_claims import HubClaims
 from pipeline_process import gpu_idle
 from pipeline_queue import PipelineQueue
 from pipeline_runtime import StageRunner
-from pipeline_storage import EvidenceError, ReceiptStore, atomic_json, canonical, digest, file_lock, no_links
+from pipeline_storage import EvidenceError, ReceiptStore, atomic_json, canonical, digest, file_lock, no_links, required_destinations
 
 
 def old_intake_stopped(*, serving=False):
@@ -120,6 +120,7 @@ class Pilot:
                                 host=str((self.node.get("node") or {}).get("host_label", "node")) + "-PIPELINE")
         self.intake = HubNasIntake(drive(), self.nas, projects=list(config["source_paths"]),
                                    source_paths=config["source_paths"], node_config=self.node,
+                                   project_delivery=config.get("project_delivery"),
                                    legacy_worker_root=pathlib.Path(config["legacy_worker_root"]),
                                    scan_cache=self.root / "scan-cache", profile_digest=self.profile,
                                    engine_digest=self.engine)
@@ -231,7 +232,8 @@ class Pilot:
             receipt = self.store.read(job, "publish_pending")
             if receipt is None:
                 raise EvidenceError("missing_e2e_delivery_receipt")
-            for name, sink in self.pipeline.delivery.sinks.items():
+            for name in required_destinations(job):
+                sink = self.pipeline.delivery.sinks[name]
                 if sink.verify(job, receipt["metadata"]["deliveries"][name]["evidence"], lambda: None) is not True:
                     raise EvidenceError("e2e_delivery_changed")
             from hub_worker import source_unchanged
@@ -254,7 +256,8 @@ class Pilot:
             raise EvidenceError("durable_local_state_filesystem_required")
         if self.root.is_relative_to(pathlib.Path(self.node["hub_root"]).resolve()) or self.root.is_relative_to(self.nas.root):
             raise EvidenceError("pipeline_state_overlaps_source_mount")
-        self.nas.guard()
+        # Each NAS stage guards its own mount. A NAS outage must not block
+        # independent Hub-only jobs at supervisor startup.
         if not e2e:
             if self.config.get("enabled") is not True:
                 raise EvidenceError("pilot_disabled")

@@ -17,7 +17,7 @@ import re
 
 from pipeline_runtime import RetryJob
 from pipeline_storage import (EvidenceError, atomic_json, canonical, digest, no_links,
-                              safe_path, sync_directory)
+                              safe_path, sync_directory, required_destinations)
 
 
 def verify_mount(mountpoint: pathlib.Path, source: str):
@@ -238,14 +238,18 @@ class DualDelivery:
     """Each sink implements publish(job, result_dir, check) and verify(job, evidence, check).
 
     publish must NOT mark the Hub source as asr-done. finalize is called only
-    after BOTH deliveries verify; it must be idempotent and read-back checked.
+    after every frozen required destination verifies (legacy: Hub+NAS).
+    It must be idempotent and read-back checked.
     """
     def __init__(self, store, *, hub, nas, finalize):
         self.store, self.sinks, self.finalize = store, {"hub": hub, "nas": nas}, finalize
 
     def verify_completed(self, job, receipt, check):
         deliveries = receipt["metadata"]["deliveries"]
-        for name, sink in self.sinks.items():
+        if set(deliveries) != set(required_destinations(job)):
+            raise EvidenceError("delivery_policy_mismatch")
+        for name in required_destinations(job):
+            sink = self.sinks[name]
             check()
             if sink.verify(job, deliveries[name]["evidence"], check) is not True:
                 raise EvidenceError("destination_verification_failed")
@@ -260,7 +264,8 @@ class DualDelivery:
         binding = {**self.store.binding(job),
                    "result_receipt_sha256": digest(self.store.path(job["id"], "ready"))}
         completed, transient = {}, []
-        for name, sink in self.sinks.items():
+        for name in required_destinations(job):
+            sink = self.sinks[name]
             path = no_links(directory / f"delivery-{name}.json")
             try:
                 check()

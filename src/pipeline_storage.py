@@ -130,6 +130,17 @@ def file_lock(path: pathlib.Path):
 STAGES = ("discovered", "ready", "publish_pending")
 
 
+def required_destinations(job):
+    """Frozen job policy; missing field preserves the original dual contract."""
+    payload = json.loads(job["payload"])
+    policy = payload.get("delivery_policy", "hub-nas")
+    if policy not in ("hub-only", "hub-nas"):
+        raise EvidenceError("invalid_delivery_policy")
+    if policy == "hub-only" and payload.get("adapter") != "hub-nas-v1":
+        raise EvidenceError("hub_only_requires_hub_adapter")
+    return ("hub",) if policy == "hub-only" else ("hub", "nas")
+
+
 class ReceiptStore:
     def __init__(self, root: pathlib.Path):
         self.root = no_links(root)
@@ -180,7 +191,7 @@ class ReceiptStore:
                 "payload_sha256": hashlib.sha256(job["payload"].encode()).hexdigest()}
 
     @staticmethod
-    def _metadata(stage, metadata):
+    def _metadata(stage, metadata, job):
         if not isinstance(metadata, dict):
             raise EvidenceError("invalid_receipt_metadata")
         if stage == "discovered" and metadata.get("source_verified") is not True:
@@ -192,7 +203,7 @@ class ReceiptStore:
                 raise EvidenceError("degraded_requires_review")
         if stage == "publish_pending":
             deliveries = metadata.get("deliveries")
-            if (not isinstance(deliveries, dict) or set(deliveries) != {"hub", "nas"} or
+            if (not isinstance(deliveries, dict) or set(deliveries) != set(required_destinations(job)) or
                     any(not isinstance(v, dict) or v.get("verified") is not True
                         for v in deliveries.values())):
                 raise EvidenceError("both_verified_destinations_required")
@@ -209,7 +220,7 @@ class ReceiptStore:
             if (not isinstance(receipt, dict) or receipt.get("schema") != 1 or
                     receipt.get("stage") != stage or receipt.get("binding") != self.binding(job)):
                 raise EvidenceError("receipt_identity_mismatch")
-            self._metadata(stage, receipt.get("metadata"))
+            self._metadata(stage, receipt.get("metadata"), job)
             previous = STAGES.index(stage) - 1
             upstream = None
             if previous >= 0:
@@ -224,7 +235,7 @@ class ReceiptStore:
                 raise EvidenceError("receipt_artifacts_changed")
             if stage == "publish_pending":
                 deliveries = receipt.get("metadata", {}).get("deliveries")
-                if not isinstance(deliveries, dict) or set(deliveries) != {"hub", "nas"}:
+                if not isinstance(deliveries, dict) or set(deliveries) != set(required_destinations(job)):
                     raise EvidenceError("both_destinations_required")
                 if any(not isinstance(v, dict) or v.get("verified") is not True
                        for v in deliveries.values()):
@@ -237,7 +248,7 @@ class ReceiptStore:
         old = self.read(job, stage)
         if old is not None:
             return old
-        self._metadata(stage, metadata)
+        self._metadata(stage, metadata, job)
         previous = STAGES.index(stage) - 1
         upstream = None
         if previous >= 0:

@@ -105,4 +105,54 @@ def test_shared_inbox_cannot_implicitly_inherit_project_routing(tmp_path):
     with pytest.raises(ValueError, match="explicit_project"):
         HubNasIntake(None, None, projects=["_inbox"], node_config={},
                      legacy_worker_root=tmp_path, scan_cache=tmp_path,
-                     profile_digest="a" * 64, engine_digest="b" * 64)
+                      profile_digest="a" * 64, engine_digest="b" * 64)
+
+
+@pytest.mark.parametrize("policy", [{"Unknown": "hub-only"}, {"Example": "no"},
+                                    {"Example": None}, [], False])
+def test_invalid_project_delivery_rejected(tmp_path, policy):
+    with pytest.raises(ValueError, match="invalid_project_delivery"):
+        HubNasIntake(None, None, projects=["Example"], node_config={},
+                     legacy_worker_root=tmp_path, scan_cache=tmp_path,
+                     profile_digest="a" * 64, engine_digest="b" * 64,
+                     project_delivery=policy)
+
+
+@pytest.mark.parametrize("policy", [None, [], {}, False, "unknown"])
+def test_invalid_frozen_policy_rejected_before_io(tmp_path, policy):
+    from pipeline_storage import EvidenceError
+    drive = MemoryDrive({"Example/voice.m4a": b"synthetic"})
+    intake = adapter(tmp_path, drive, nas_area(tmp_path))
+    q = PipelineQueue(tmp_path / "queue.db")
+    try:
+        key = intake.admit_exact(q, "Example", "voice.m4a")
+        job = q.get(key)
+        payload = json.loads(job["payload"])
+        payload["delivery_policy"] = policy
+        job["payload"] = json.dumps(payload)
+        with pytest.raises(EvidenceError, match="invalid_delivery_policy"):
+            intake.stage(job, tmp_path / "job", lambda: None)
+    finally:
+        q.close()
+
+
+def test_policy_changes_processing_identity_and_cannot_relabel_legacy(tmp_path):
+    from pipeline_storage import EvidenceError
+    drive = MemoryDrive({"Example/voice.m4a": b"synthetic"})
+    intake = adapter(tmp_path, drive, nas_area(tmp_path))
+    q = PipelineQueue(tmp_path / "queue.db")
+    try:
+        dual = intake.admit_exact(q, "Example", "voice.m4a")
+        intake.project_delivery["Example"] = "hub-only"
+        only = intake.admit_exact(q, "Example", "voice.m4a")
+        assert dual != only
+        intake._source(q.get(dual))  # old frozen jobs still validate
+        intake._source(q.get(only))
+        job = q.get(dual)
+        payload = json.loads(job["payload"])
+        payload["delivery_policy"] = "hub-only"
+        job["payload"] = json.dumps(payload)
+        with pytest.raises(EvidenceError, match="processing_identity"):
+            intake._source(job)
+    finally:
+        q.close()

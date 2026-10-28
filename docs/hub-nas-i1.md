@@ -1,6 +1,35 @@
 # Hub → NAS: isolated I1 implementation
 
-Version: 0.0.8 · Status: limited I1 pilot accepted; NOT the full pipeline release
+Version: 0.0.9 · Status: limited I1 pilot accepted; Hub-only update not deployed
+
+## Project destination policy (2026-10-28, candidate only)
+
+Owner requirement: Gelya recordings must NOT be copied to NAS. Keep ASR and
+verified Hub publication; this is not exclusion from processing. Configure:
+
+```json
+"project_delivery": {"Gelya-Asr": "hub-only", "34": "hub-nas"}
+```
+
+Omitted projects retain `hub-nas`; unknown project keys or invalid policies fail
+configuration validation. `hub-only` does local checksum-verified staging and
+Hub publication without NAS source/result operations. Each job freezes its
+policy in its payload and processing identity. Existing dual jobs/receipts keep
+their original contract; changing configuration does not relabel them. Terminal
+markers list only actually verified required destinations. A NAS outage cannot
+block Hub-only stages, while dual jobs still require verified NAS delivery.
+
+This candidate has NOT replaced the active immutable `680ffc3` release. A code
+or policy change invalidates its same-candidate attestation. Do not overwrite the
+active code directory, edit old receipts, reattest old completed work as new code,
+or rerun the completed E2E. Safe activation needs a separately tested candidate,
+an approved fresh E2E source, drain/consistent state backup and owner installation.
+No old Gelya sources/results are to be bulk-migrated; their existing `asr-done`
+markers remain authoritative against automatic ASR repetition.
+
+Candidate regressions: Windows **387 passed / 2 skipped**, Linux **389 passed**.
+Linux validation is isolated in `out/nas-hub-only-validation-20261028`; it does
+not replace the production code or change the live configuration/attestation.
 
 The owner roadmap remains in the project vault (`801-p10`). This document
 describes technical interfaces and evidence, not a second owner roadmap.

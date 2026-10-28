@@ -16,14 +16,14 @@ from dataclasses import asdict
 import hub_worker as hub
 from hub_intake import MediaFile, MEDIA
 from pipeline_runtime import HoldJob
-from pipeline_storage import EvidenceError, digest, no_links, safe_path, sync_directory
+from pipeline_storage import EvidenceError, digest, no_links, safe_path, sync_directory, required_destinations
 
 
 class HubNasIntake:
     def __init__(self, drive, nas, *, projects: list[str], node_config: dict,
                  legacy_worker_root: pathlib.Path, scan_cache: pathlib.Path,
                  profile_digest: str, engine_digest: str, source_paths: dict | None = None,
-                 owned_state=None):
+                 owned_state=None, project_delivery: dict | None = None):
         if not projects or len(set(projects)) != len(projects):
             raise ValueError("explicit_unique_projects_required")
         for project in projects:
@@ -34,6 +34,12 @@ class HubNasIntake:
         self.drive, self.nas, self.projects, self.cfg = drive, nas, tuple(projects), node_config
         self.legacy_worker_root, self.scan_cache = legacy_worker_root, scan_cache
         self.profile_digest, self.engine_digest = profile_digest, engine_digest
+        if project_delivery is None:
+            project_delivery = {}
+        if (not isinstance(project_delivery, dict) or set(project_delivery) - set(projects) or
+                any(v not in ("hub-only", "hub-nas") for v in project_delivery.values())):
+            raise ValueError("invalid_project_delivery_policy")
+        self.project_delivery = dict(project_delivery)
         if source_paths is not None:
             if set(source_paths) != set(projects):
                 raise ValueError("scope_required_for_every_project")
@@ -81,9 +87,7 @@ class HubNasIntake:
                 submission = f"drive:{project}:{item.file_id}"
                 relative = "sources/" + hashlib.sha256(
                     f"{submission}\0{item.revision}".encode()).hexdigest()
-                queue.enqueue(submission, item.revision, self.profile_digest, self.engine_digest,
-                              {"adapter": "hub-nas-v1", "source": source,
-                               "primary_name": name, "nas_relative": relative})
+                self._enqueue(queue, submission, item.revision, source, name, relative)
                 report["candidates"] += 1
         return report
 
@@ -106,15 +110,28 @@ class HubNasIntake:
         safe_path(name)
         submission = f"drive:{project}:{item.file_id}"
         relative = "sources/" + hashlib.sha256(f"{submission}\0{item.revision}".encode()).hexdigest()
-        return queue.enqueue(submission, item.revision, self.profile_digest, self.engine_digest,
-                             {"adapter": "hub-nas-v1", "source": source,
-                              "primary_name": name, "nas_relative": relative})
+        return self._enqueue(queue, submission, item.revision, source, name, relative)
+
+    def _policy_engine(self, policy):
+        if policy == "hub-nas":
+            return self.engine_digest
+        return hashlib.sha256(f"{self.engine_digest}\0delivery:{policy}".encode()).hexdigest()
+
+    def _enqueue(self, queue, submission, revision, source, name, relative):
+        policy = self.project_delivery.get(source["project"], "hub-nas")
+        payload = {"adapter": "hub-nas-v1", "source": source,
+                   "primary_name": name, "nas_relative": relative}
+        # Keep legacy dual payloads/identities byte-compatible.
+        if policy != "hub-nas":
+            payload["delivery_policy"] = policy
+        return queue.enqueue(submission, revision, self.profile_digest, self._policy_engine(policy), payload)
 
     def _source(self, job):
         data = json.loads(job["payload"])
         source = data.get("source")
         if not isinstance(source, dict) or data.get("adapter") != "hub-nas-v1":
             raise EvidenceError("invalid_hub_submission")
+        required_destinations(job)  # reject malformed frozen policies before any I/O
         item = MediaFile(**source, marker=False)
         if item.project not in self.projects:
             raise EvidenceError("project_outside_pilot_scope")
@@ -122,7 +139,7 @@ class HubNasIntake:
         if allowed is not None and item.path not in allowed:
             raise EvidenceError("source_outside_pilot_scope")
         expected = [f"drive:{item.project}:{item.file_id}", item.revision,
-                    self.profile_digest, self.engine_digest]
+                    self.profile_digest, self._policy_engine(data.get("delivery_policy", "hub-nas"))]
         if json.loads(job["identity"]) != expected:
             raise EvidenceError("hub_processing_identity_mismatch")
         name = str(safe_path(data["primary_name"]))
@@ -141,7 +158,9 @@ class HubNasIntake:
         data, item = self._source(job)
         check()
         # Do not create even a local partial if the destination mount is absent.
-        self.nas.guard()
+        use_nas = "nas" in required_destinations(job)
+        if use_nas:
+            self.nas.guard()
         hub.source_unchanged(self.drive, item)
         # Recheck terminal/owner markers at copy time, not only during discovery.
         state = self.drive.state(item.project, item.path)
@@ -176,6 +195,8 @@ class HubNasIntake:
         check()
         hub.source_unchanged(self.drive, item)
         files = [{"path": primary, "size": item.size, "sha256": digest(target)}]
+        if not use_nas:
+            return {"source_verified": True, "primary_name": primary}
         evidence = self.nas.publish_source(data["nas_relative"], local_dir, files,
                                            {"submission": json.loads(job["identity"])[0],
                                             "revision": item.revision, "primary_name": primary,

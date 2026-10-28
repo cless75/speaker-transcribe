@@ -9,7 +9,7 @@ from test_hub_worker import MemoryDrive, fake_asr
 from test_pipeline_runtime import nas_area
 
 
-def fixture(tmp_path):
+def fixture(tmp_path, *, project_delivery=None):
     drive = MemoryDrive({"Example/voice.m4a": b"synthetic",
                          "Example/voice.m4a.state.json": json.dumps({"status": "queued"}).encode(),
                          "Example/not-authorized.m4a": b"other"})
@@ -18,7 +18,7 @@ def fixture(tmp_path):
     intake = HubNasIntake(drive, area, projects=["Example"], node_config={},
                           legacy_worker_root=tmp_path / "legacy", scan_cache=tmp_path / "scan",
                           profile_digest="a" * 64, engine_digest="b" * 64,
-                          source_paths={"Example": ["voice.m4a"]})
+                          source_paths={"Example": ["voice.m4a"]}, project_delivery=project_delivery)
     claims = HubClaims(drive, tmp_path / "claims", host="test-PIPELINE", convergence_seconds=0)
     calls = []
     fake = fake_asr(calls)
@@ -124,6 +124,92 @@ def test_hub_transient_failure_still_delivers_nas_without_rerunning_asr(tmp_path
         time.sleep(.01)
         assert runner.tick("publish_pending") == "finished"
         assert len(calls) == 1
+    finally:
+        runner.close()
+        claims.close()
+
+
+def test_hub_only_completes_and_reverifies_without_any_nas_access(tmp_path):
+    drive, store, intake, claims, pipeline, runner, calls = fixture(
+        tmp_path, project_delivery={"Example": "hub-only"})
+    class ForbiddenNas:
+        def __getattr__(self, name):
+            raise AssertionError("Hub-only must not access NAS: " + name)
+    intake.nas = ForbiddenNas()
+    try:
+        intake.discover(runner.queue)
+        key = runner.queue.db.execute("SELECT id FROM pipeline_jobs").fetchone()[0]
+        job = runner.queue.get(key)
+        assert json.loads(job["payload"])["delivery_policy"] == "hub-only"
+        assert json.loads(job["identity"])[3] != intake.engine_digest
+        # Changing config cannot change an admitted job's destination contract.
+        intake.project_delivery["Example"] = "hub-nas"
+        assert runner.tick("discovered") == runner.tick("ready") == "finished"
+        assert drive.state("Example", "voice.m4a")["status"] == "in-progress"
+        assert runner.tick("publish_pending") == "finished"
+        job = runner.queue.get(key)
+        assert job["state"] == "done" and len(calls) == 1
+        receipt = store.read(job, "publish_pending")
+        assert set(receipt["metadata"]["deliveries"]) == {"hub"}
+        assert drive.state("Example", "voice.m4a")["deliveries_verified"] == ["hub"]
+        assert "nas_source" not in store.read(job, "discovered")["metadata"]
+        assert not (store.directory(key) / "delivery-nas.json").exists()
+        import pytest
+        from pipeline_storage import EvidenceError
+        with pytest.raises(EvidenceError, match="nas_forbidden"):
+            pipeline.delivery.sinks["nas"].publish(job, store.directory(key) / "result", lambda: None)
+        with pytest.raises(EvidenceError, match="delivery_policy_mismatch"):
+            pipeline.delivery.verify_completed(job, {"metadata": {"deliveries": {
+                **receipt["metadata"]["deliveries"], "nas": {"verified": True}}}}, lambda: None)
+        # Recovery repeats read-back/finalization only, not ASR.
+        assert pipeline.delivery.verify_completed(job, receipt, lambda: None)
+        assert len(calls) == 1
+    finally:
+        runner.close()
+        claims.close()
+
+
+def test_hub_only_retries_hub_outage_without_nas_fallback(tmp_path):
+    import time
+    from hub_intake import DriveTransient
+    drive, store, intake, claims, pipeline, runner, calls = fixture(
+        tmp_path, project_delivery={"Example": "hub-only"})
+    original = drive.call
+    try:
+        intake.discover(runner.queue)
+        key = runner.queue.db.execute("SELECT id FROM pipeline_jobs").fetchone()[0]
+        assert runner.tick("discovered") == runner.tick("ready") == "finished"
+        def outage(*args):
+            if args[0] == "copy":
+                raise DriveTransient("temporary")
+            return original(*args)
+        drive.call = outage
+        assert runner.tick("publish_pending") == "retry_wait"
+        assert drive.state("Example", "voice.m4a")["status"] != "asr-done"
+        assert not (store.directory(key) / "delivery-nas.json").exists()
+        drive.call = original
+        time.sleep(.01)
+        assert runner.tick("publish_pending") == "finished"
+        assert len(calls) == 1
+    finally:
+        runner.close()
+        claims.close()
+
+
+def test_legacy_dual_receipts_cannot_omit_nas(tmp_path):
+    import pytest
+    from pipeline_storage import EvidenceError, atomic_json
+    drive, store, intake, claims, pipeline, runner, calls = fixture(tmp_path)
+    try:
+        intake.discover(runner.queue)
+        key = runner.queue.db.execute("SELECT id FROM pipeline_jobs").fetchone()[0]
+        assert runner.tick("discovered") == runner.tick("ready") == runner.tick("publish_pending") == "finished"
+        job = runner.queue.get(key)
+        receipt = store.read(job, "publish_pending")
+        receipt["metadata"]["deliveries"].pop("nas")
+        atomic_json(store.path(key, "publish_pending"), receipt)
+        with pytest.raises(EvidenceError, match="both_verified_destinations_required"):
+            store.read(job, "publish_pending")
     finally:
         runner.close()
         claims.close()

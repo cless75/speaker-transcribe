@@ -7,6 +7,7 @@
   "state_root": "/home/USER/out/hub-pipeline-pilot",
   "gpu_lock": "/home/USER/out/hub-worker/.worker.lock",
   "source_paths": {"Example": ["_Example_inbox/recording.webm"]},
+  "project_delivery": {"Example": "hub-nas"},
   "e2e_source": {"project": "Example", "path": "_Example_inbox/recording.webm"},
   "buffer_capacity": 107374182400,
   "local_minimum_free": 53687091200,
