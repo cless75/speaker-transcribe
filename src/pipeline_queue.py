@@ -103,16 +103,18 @@ class PipelineQueue:
         if not math.isfinite(value) or value <= 0:
             raise ValueError("duration must be finite and positive")
 
-    def claim(self, stage: str, owner: str, *, lease_seconds: float = 300) -> dict | None:
+    def claim(self, stage: str, owner: str, *, lease_seconds: float = 300,
+              key: str | None = None) -> dict | None:
         if stage not in TRANSITIONS or not owner:
             raise ValueError("valid stage and owner required")
         self._duration(lease_seconds)
         when = self.clock()
         with self._transaction():
             row = self.db.execute("SELECT id FROM pipeline_jobs WHERE eligible<=? AND "
-                                  "(state=? OR (state='retry_wait' AND resume_stage=?)) "
-                                  "ORDER BY priority,created,id LIMIT 1",
-                                  (when, stage, stage)).fetchone()
+                                   "(state=? OR (state='retry_wait' AND resume_stage=?)) "
+                                   "AND (? IS NULL OR id=?) "
+                                   "ORDER BY priority,created,id LIMIT 1",
+                                   (when, stage, stage, key, key)).fetchone()
             if row is None:
                 return None
             key, token = row["id"], uuid.uuid4().hex

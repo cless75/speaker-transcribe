@@ -211,6 +211,13 @@ class NasArea:
                     pathlib.Path(name).unlink()
         return evidence
 
+    def verify_publication(self, evidence: dict, files: list[dict], binding: dict, check):
+        manifest = {"schema": 1, "binding": binding, "files": files}
+        if evidence.get("manifest_sha256") != hashlib.sha256(canonical(manifest)).hexdigest():
+            raise EvidenceError("nas_delivery_binding_mismatch")
+        self._verify(self._target(evidence["relative"]), manifest, check)
+        return True
+
     def verify_source(self, evidence: dict, check):
         target = self._target(evidence["relative"])
         path = no_links(target / "receipt.json")

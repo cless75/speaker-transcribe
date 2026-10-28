@@ -134,6 +134,8 @@ class ReceiptStore:
     def __init__(self, root: pathlib.Path):
         self.root = no_links(root)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        sync_directory(self.root)
+        sync_directory(self.root.parent)
 
     def directory(self, key: str) -> pathlib.Path:
         if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
@@ -146,7 +148,7 @@ class ReceiptStore:
         return self.directory(key) / f"receipt-{stage}.json"
 
     def inventory(self, key: str, scope: str) -> list[dict]:
-        if scope not in {"input", "result"}:
+        if scope not in {"input", "result", "work/transcripts"}:
             raise EvidenceError("invalid_artifact_scope")
         root = self.directory(key) / scope
         no_links(root)
@@ -249,9 +251,17 @@ class ReceiptStore:
                    "artifacts": self.inventory(job["id"], scope) if scope else [],
                    "metadata": metadata}
         # Files must reach local storage before their receipt becomes durable.
+        directories = {self.directory(job["id"])}
         for item in receipt["artifacts"]:
             with (self.directory(job["id"]) / item["path"]).open("r+b" if os.name == "nt" else "rb") as stream:
                 os.fsync(stream.fileno())
-            sync_directory((self.directory(job["id"]) / item["path"]).parent)
+            parent = (self.directory(job["id"]) / item["path"]).parent
+            while parent.is_relative_to(self.root):
+                directories.add(parent)
+                if parent == self.root:
+                    break
+                parent = parent.parent
+        for directory in sorted(directories, key=lambda p: len(p.parts), reverse=True):
+            sync_directory(directory)
         atomic_json(self.path(job["id"], stage), receipt)
         return self.read(job, stage)

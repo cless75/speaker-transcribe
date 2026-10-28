@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile/start independent Hub NAS pilot for %i
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*-*-* *:0/5:00
+Persistent=true
+Unit=hub-pipeline@%i.service
+
+[Install]
+WantedBy=timers.target

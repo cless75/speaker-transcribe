@@ -260,6 +260,32 @@ def test_per_job_budget_is_enforced_before_reservation(tmp_path):
         budget.close()
 
 
+def test_completed_retained_files_stay_counted_without_cleanup(tmp_path):
+    budget = DiskBudget(tmp_path / "budget.db", capacity=100, minimum_free=10,
+                        maximum_job=60, volume=tmp_path, free_bytes=lambda: 1000)
+    try:
+        budget.reserve("one", 60)
+        with pytest.raises(DiskPressure):
+            budget.reserve("two", 60)
+        budget.settle("one", 20)
+        budget.reserve("two", 60)
+        assert budget.db.execute("SELECT SUM(bytes) FROM disk_reservations").fetchone()[0] == 80
+        with pytest.raises(DiskPressure):
+            budget.settle("one", 21)
+    finally:
+        budget.close()
+
+
+def test_e2e_runner_cannot_claim_another_queued_source(tmp_path):
+    runner, store, first = setup(tmp_path)
+    second = enqueue(runner.queue, "second")
+    runner.job_key = second
+    assert runner.tick("discovered") == "finished"
+    assert runner.queue.get(first)["state"] == "discovered"
+    assert runner.queue.get(second)["state"] == "ready"
+    runner.close()
+
+
 class Sink:
     def __init__(self):
         self.calls, self.verifications, self.fail = 0, 0, False

@@ -1,0 +1,23 @@
+[Unit]
+Description=Independent Hub NAS ASR pilot for %i
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i
+# Node-local drop-in must provide the exact tested immutable code and config.
+# No default ExecStart: installing this template alone cannot start ASR.
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=infinity
+KillMode=mixed
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

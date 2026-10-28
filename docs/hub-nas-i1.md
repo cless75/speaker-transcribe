@@ -1,6 +1,6 @@
 # Hub → NAS: isolated I1 implementation
 
-Version: 0.0.4 · Status: development, NOT a production cutover
+Version: 0.0.5 · Status: development, NOT a production cutover
 
 The owner roadmap remains in the project vault (`801-p10`). This document
 describes technical interfaces and evidence, not a second owner roadmap.
@@ -52,30 +52,93 @@ describes technical interfaces and evidence, not a second owner roadmap.
   away from old discovery. The exclusion is exact (no wildcards) and included
   in release identity; adding it does not bypass the old attestation gate.
 
-## Hard boundaries
+## Concrete pilot adapters (2026-10-28, awaiting live E2E)
 
-The source adapter has **no real ASR handler, Hub publisher/finalizer, shared
-claim implementation, production CLI, enabled service or provisioned NAS
-identity attached**. It can copy sources but cannot itself enable execution.
-The runtime is an executable library tested with synthetic handlers, not an
-operational release. This change is not a completed I1.
+`pipeline_hub_claims.py` maintains token-bound Hub claims across stage gaps with
+verified heartbeats. Foreign expired claims are never preempted. Persisted
+tokens allow reconciliation of an ambiguous first write. ASR uses a bounded-age
+local ownership proof, not a recursive Drive scan; stale ownership aborts only
+its own controlled child. The supervisor singleton excludes competing local
+coordinators, and the common GPU lock remains unchanged.
+
+`pipeline_hub_adapter.py` connects the real engine and both publishers:
+
+- Explicit source scope, legacy-journal exclusion and source marker/ID checks
+  precede copying. Single-media admission holds bundles/unsupported inputs.
+- Media-duration admission plus ongoing scratch/log/free-space accounting
+  enforce the job reservation. Input receipts remain immutable; the engine
+  receives a separate local work input, never the receipted input directory.
+- `audio_inbox_watch.run_asr` accepts an optional process controller; the legacy
+  path is unchanged. Controlled children run in their own POSIX process group.
+  Ownership/disk/lease failure terminates only that invocation, not another
+  worker. `pipeline_process.py` records its start and observed exit privately.
+- Engine output completion is bound to job identity and a flushed work artifact
+  inventory BEFORE snapshot/publication. Interrupted result copying resumes
+  verified files without running the model again. Unknown/conflicting files
+  are held, never overwritten or inferred complete from mere presence.
+- Full declared output files, transcript and run metadata are checked. Quality
+  details are preserved; degraded output explicitly needs review.
+- Hub results use a new full-processing-ID session suffix, not the old output
+  path, so another profile/revision cannot replace an earlier publication.
+  NAS results remain beside the immutable source mirror in `.asr/<job-id>`.
+- Drive transport errors permit independent NAS delivery; read-back/integrity
+  conflicts are held. Terminal source markers are written LAST, only after
+  both destinations verify. Restart verification checks real destinations again.
+- Completed jobs retain their files. Only unused reservation is settled down to
+  retained logical bytes; there is no automatic file deletion/cleanup.
+
+`hub_pipeline.py` runs scanner/stager/ASR/publisher independently, with one
+connection/ledger per consumer, bounded idle polling and a private health file.
+The scanner uses explicit source policies; E2E admits only the configured exact
+source and can pin expected Drive ID/hash/size. Source names never select code.
+
+Prepare → explicit E2E → explicit attest → enable/serve are distinct actions:
+
+```sh
+python src/hub_pipeline.py --config /private/pilot.local.json --prepare
+python src/hub_pipeline.py --config /private/pilot.local.json --e2e
+python src/hub_pipeline.py --config /private/pilot.local.json --attest JOB_ID
+# Only after evidence and routing/service approval:
+python src/hub_pipeline.py --config /private/pilot.local.json --serve
+```
+
+Default example is disabled. Serving pins code/unit closure, Python/package
+identity, profile, queue compatibility, routing/budgets and a verified completed
+E2E receipt. The enable switch itself does not relabel evidence. Config/profile
+drift blocks startup rather than silently regenerating attestations.
+
+The disabled systemd template requires a node-local ExecStart drop-in. A bounded
+restart policy plus recovery timer retries a failed component after external
+conditions recover, without restarting a healthy active instance every five
+minutes. Before serving, old consumer timers must be disabled, not just stopped.
+This is the first Linux-current pilot, not removal of Windows-legacy support.
+
+## Remaining hard boundaries before serving
+
+Concrete adapters, supervisor and service templates now exist, but **no live
+ASR E2E/attestation or enabled new service is claimed at this code checkpoint**.
+The NAS identity/storage probe is verified separately below. Completing library
+tests is not an operational release or permission to bypass these live gates.
 
 Before connecting production handlers:
 
-1. Implement durable handoff of legacy journal/source ownership. A source copy
+1. Verify live durable source ownership and explicit legacy-journal exclusion.
+   Full import/handoff of unfinished legacy work remains I4. A source copy
    is not an ASR claim. Preserve cross-node claims, VTT ownership, exact markers,
    accepted legacy history and unfinished publication. The old cloud claim
    helper can preempt expired remote claims; do not inherit that as permission
    for automatic GPU takeover or treat a copied source as a new unowned input.
-2. Attach real source-specific ASR and publication adapters, with mandatory
+2. Exercise the concrete ASR and publication adapters in a real E2E, with mandatory
    outputs, full quality details and `needs_review` for degraded results. No
    exception during delivery may reset ASR to an unfinished stage.
-3. Shorten the old scheduler's GPU critical section for a mixed-route pilot.
+3. For any future mixed-route operation, shorten the old GPU critical section.
    It currently holds the common GPU lock across discovery, copy, ASR AND
    publication. Project exclusion alone prevents duplicate routing but DOES
    NOT remove that scheduling bottleneck. Do not remove its lock globally:
-   retain scheduler/job serialization and lock actual GPU use separately.
-4. Approve local/NAS budgets and pilot source. The download adapter currently
+   retain scheduler/job serialization and lock actual GPU use separately. The
+   owner instead stopped the old intake for the first new pilot; no mixed mode
+   or implicit restoration of the old scheduler is enabled by this implementation.
+4. Apply approved local/NAS budgets and exact pilot scope. The download adapter currently
    uses bounded-request rclone copyto, not a per-byte storage quota. Its node
    admission estimator must cover source, WAV/intermediates, outputs, copies
    and retained data; enforce media expansion bounds before enabling it.

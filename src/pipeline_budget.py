@@ -90,3 +90,18 @@ class DiskBudget:
     def release(self, key: str):
         """Explicit operator/retention action after ownership+disk accounting; no files removed."""
         self.db.execute("DELETE FROM disk_reservations WHERE job_id=?", (key,))
+
+    def settle(self, key: str, retained_bytes: int):
+        """After verified completion, keep counting retained files, free only unused reservation."""
+        if type(retained_bytes) is not int or retained_bytes <= 0:
+            raise ValueError("retained_byte_count_required")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            old = self.db.execute("SELECT bytes FROM disk_reservations WHERE job_id=?", (key,)).fetchone()
+            if not old or retained_bytes > old[0]:
+                raise DiskPressure("retained_data_exceeds_reservation")
+            self.db.execute("UPDATE disk_reservations SET bytes=? WHERE job_id=?", (retained_bytes, key))
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise

@@ -22,7 +22,8 @@ from pipeline_storage import EvidenceError, digest, no_links, safe_path, sync_di
 class HubNasIntake:
     def __init__(self, drive, nas, *, projects: list[str], node_config: dict,
                  legacy_worker_root: pathlib.Path, scan_cache: pathlib.Path,
-                 profile_digest: str, engine_digest: str):
+                 profile_digest: str, engine_digest: str, source_paths: dict | None = None,
+                 owned_state=None):
         if not projects or len(set(projects)) != len(projects):
             raise ValueError("explicit_unique_projects_required")
         for project in projects:
@@ -33,20 +34,45 @@ class HubNasIntake:
         self.drive, self.nas, self.projects, self.cfg = drive, nas, tuple(projects), node_config
         self.legacy_worker_root, self.scan_cache = legacy_worker_root, scan_cache
         self.profile_digest, self.engine_digest = profile_digest, engine_digest
+        if source_paths is not None:
+            if set(source_paths) != set(projects):
+                raise ValueError("scope_required_for_every_project")
+            for paths in source_paths.values():
+                if paths is not None and (not isinstance(paths, list) or not paths):
+                    raise ValueError("nonempty_explicit_source_paths_required")
+                for value in paths or []:
+                    safe_path(value)
+        self.source_paths, self.owned_state = source_paths, owned_state
 
     def discover(self, queue) -> dict:
         report = {"candidates": 0, "held": 0}
         for project in self.projects:
+            allowed = self.source_paths.get(project) if self.source_paths is not None else None
+            if allowed is not None:
+                for path in allowed:
+                    try:
+                        self.admit_exact(queue, project, path)
+                        report["candidates"] += 1
+                    except (EvidenceError, HoldJob, ValueError, StopIteration):
+                        report["held"] += 1
+                continue
             items, held = hub.pending_inputs(self.drive, project, self.cfg,
                                              self.scan_cache / project,
                                              worker_root=self.legacy_worker_root)
             report["held"] += len(held)
             for item, peers in items:
+                allowed = self.source_paths.get(project) if self.source_paths is not None else None
+                if allowed is not None and item.path not in allowed:
+                    continue
                 # I1 does not silently inherit the old size-based multi-video
                 # heuristic. I2 must provide alignment/coverage evidence first.
                 if peers or pathlib.PurePosixPath(item.path).suffix.lower() not in MEDIA:
                     report["held"] += 1
                     continue
+                journal = self.legacy_worker_root / "intake" / item.project / item.file_id / item.revision / "job.json"
+                if journal.exists():
+                    report["held"] += 1
+                    continue  # migration is explicit, not another ASR of old work
                 name = pathlib.PurePosixPath(item.path).name
                 safe_path(name)
                 # marker presence is volatile, not part of frozen source identity.
@@ -61,6 +87,29 @@ class HubNasIntake:
                 report["candidates"] += 1
         return report
 
+    def admit_exact(self, queue, project: str, path: str):
+        if project not in self.projects:
+            raise EvidenceError("project_outside_pilot_scope")
+        safe_path(path)
+        allowed = self.source_paths.get(project) if self.source_paths is not None else None
+        if allowed is not None and path not in allowed:
+            raise EvidenceError("source_outside_pilot_scope")
+        item, peers = hub.choose_group(self.drive, project, path, allow_vtt=False)
+        if item.path != path or peers or pathlib.PurePosixPath(path).suffix.lower() not in MEDIA:
+            raise HoldJob("i1_requires_single_explicit_media")
+        journal = self.legacy_worker_root / "intake" / item.project / item.file_id / item.revision / "job.json"
+        if journal.exists():
+            raise HoldJob("legacy_journal_requires_migration")
+        source = asdict(item)
+        source.pop("marker")
+        name = pathlib.PurePosixPath(path).name
+        safe_path(name)
+        submission = f"drive:{project}:{item.file_id}"
+        relative = "sources/" + hashlib.sha256(f"{submission}\0{item.revision}".encode()).hexdigest()
+        return queue.enqueue(submission, item.revision, self.profile_digest, self.engine_digest,
+                             {"adapter": "hub-nas-v1", "source": source,
+                              "primary_name": name, "nas_relative": relative})
+
     def _source(self, job):
         data = json.loads(job["payload"])
         source = data.get("source")
@@ -69,6 +118,9 @@ class HubNasIntake:
         item = MediaFile(**source, marker=False)
         if item.project not in self.projects:
             raise EvidenceError("project_outside_pilot_scope")
+        allowed = self.source_paths.get(item.project) if self.source_paths is not None else None
+        if allowed is not None and item.path not in allowed:
+            raise EvidenceError("source_outside_pilot_scope")
         expected = [f"drive:{item.project}:{item.file_id}", item.revision,
                     self.profile_digest, self.engine_digest]
         if json.loads(job["identity"]) != expected:
@@ -93,7 +145,8 @@ class HubNasIntake:
         hub.source_unchanged(self.drive, item)
         # Recheck terminal/owner markers at copy time, not only during discovery.
         state = self.drive.state(item.project, item.path)
-        if state.get("status") not in {"unknown", "queued"}:
+        if (state.get("status") not in {"unknown", "queued"} and
+                (self.owned_state is None or self.owned_state(job, state) is not True)):
             raise HoldJob("hub_state_changed_since_discovery")
         primary = data["primary_name"]
         local_dir = no_links(directory / "input")

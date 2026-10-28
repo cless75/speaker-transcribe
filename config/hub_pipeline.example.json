@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "enabled": false,
+  "remote": "gdrive:Hub",
+  "node_config": "/home/USER/speaker-transcribe/config/node.local.json",
+  "legacy_worker_root": "/home/USER/out/hub-worker",
+  "state_root": "/home/USER/out/hub-pipeline-pilot",
+  "gpu_lock": "/home/USER/out/hub-worker/.worker.lock",
+  "source_paths": {"Example": ["_Example_inbox/recording.webm"]},
+  "e2e_source": {"project": "Example", "path": "_Example_inbox/recording.webm"},
+  "buffer_capacity": 107374182400,
+  "local_minimum_free": 53687091200,
+  "nas_minimum_free": 53687091200,
+  "maximum_job": 21474836480,
+  "scan_seconds": 300,
+  "e2e_timeout_seconds": 7200,
+  "nas": {
+    "root": "/mnt/nas/hub-input",
+    "mountpoint": "/mnt/nas",
+    "source": "//NAS/SHARE",
+    "collection_id": "example-pilot-v1",
+    "marker": ".speaker-transcribe-hub-input"
+  }
+}

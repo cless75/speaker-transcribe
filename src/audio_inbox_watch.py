@@ -2495,9 +2495,10 @@ def _log_result_summary(audio: pathlib.Path, pid: str | None, proc_sec: float,
 
 
 def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
-            source_root: pathlib.Path, output_dir: pathlib.Path,
-            config_path: pathlib.Path,
-            execution_mode: str | None = None) -> tuple[bool, str, pathlib.Path | None, dict | None]:
+             source_root: pathlib.Path, output_dir: pathlib.Path,
+             config_path: pathlib.Path,
+             execution_mode: str | None = None, *,
+             process_control=None) -> tuple[bool, str, pathlib.Path | None, dict | None]:
     """Invoke media_transcribe_cli for one file. Returns (ok, error_tail, transcript, meta).
 
     ``meta`` is the worker's parsed result JSON (audio duration, diarization, alignment),
@@ -2577,6 +2578,7 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
+            **({"start_new_session": True} if process_control is not None and os.name == "posix" else {}),
         )
     except Exception as exc:
         msg = f"subprocess error: {exc}"
@@ -2599,9 +2601,44 @@ def run_asr(audio: pathlib.Path, cfg: dict, pid: str | None,
     t_err = threading.Thread(target=_tee, args=(proc.stderr, stderr_lines), daemon=True)
     t_out.start()
     t_err.start()
-    proc.wait()
-    t_out.join()
-    t_err.join()
+    try:
+        if process_control is None:
+            proc.wait()
+        else:
+            process_control.started(proc.pid)
+            while proc.poll() is None:
+                process_control.check()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+    except BaseException:
+        if process_control is not None:
+            # Only this invocation's new process group, never another worker.
+            if os.name == "posix":
+                import signal
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            else:
+                proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            if os.name == "posix":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        raise
+    finally:
+        t_out.join()
+        t_err.join()
+        if process_control is not None and proc.poll() is not None:
+            process_control.finished(proc.returncode)
 
     full_stdout = "".join(stdout_lines)
     full_stderr = "".join(stderr_lines)

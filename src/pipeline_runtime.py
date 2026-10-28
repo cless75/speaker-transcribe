@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import threading
 from contextlib import ExitStack
 
@@ -29,7 +30,7 @@ class StageRunner:
     def __init__(self, db_path: pathlib.Path, receipts, *, gpu_lock: pathlib.Path,
                  handlers: dict, owner: str, budget=None, reserve_bytes=None,
                  lease_seconds: float = 300, retry_seconds: float = 60,
-                 max_attempts: int = 5, clock=None, gpu_recovery_check=None):
+                 max_attempts: int = 5, clock=None, gpu_recovery_check=None, job_key=None):
         if set(handlers) != {"discovered", "ready", "publish_pending"}:
             raise ValueError("all_stage_handlers_required")
         if lease_seconds < 0.3 or retry_seconds <= 0 or max_attempts < 1:
@@ -43,6 +44,7 @@ class StageRunner:
         self.lease_seconds, self.retry_seconds = lease_seconds, retry_seconds
         self.max_attempts, self.clock = max_attempts, clock
         self.gpu_recovery_check = gpu_recovery_check
+        self.job_key = job_key
 
     def close(self):
         self.queue.close()
@@ -60,6 +62,16 @@ class StageRunner:
         if key is not None:
             stack.enter_context(file_lock(self.receipts.directory(key) / "resource.lock"))
 
+    def used_bytes(self, key):
+        used = 0
+        for path in self.receipts.directory(key).rglob("*"):
+            try:
+                if path.is_file():
+                    used += path.stat().st_size
+            except FileNotFoundError:
+                pass  # an owned engine temporary was renamed between stat calls
+        return used
+
     def tick(self, stage: str) -> str:
         if stage not in self.handlers:
             raise ValueError("unknown_stage")
@@ -74,7 +86,7 @@ class StageRunner:
                 # still alive. Any unreconciled ASR attempt blocks NEW GPU work,
                 # even before lease expiry, and even when flock appears free.
                 return "recovery_required"
-            job = self.queue.claim(stage, self.owner, lease_seconds=self.lease_seconds)
+            job = self.queue.claim(stage, self.owner, lease_seconds=self.lease_seconds, key=self.job_key)
             if job is None:
                 return "idle"
             try:
@@ -102,10 +114,10 @@ class StageRunner:
                     raise LeaseLost("heartbeat_failed")
                 self.queue._owned(job["id"], job["token"])
                 if self.budget is not None:
-                    directory = self.receipts.directory(job["id"])
-                    used = sum(p.stat().st_size for scope in ("input", "result")
-                               for p in (directory / scope).rglob("*") if p.is_file())
-                    self.budget.check(job["id"], used)
+                    # Includes engine scratch/logs and retained intermediates,
+                    # not just immutable input/result snapshots. Hardlinks count
+                    # conservatively twice in this logical-byte accounting.
+                    self.budget.check(job["id"], self.used_bytes(job["id"]))
 
             pulse = threading.Thread(target=heartbeat, name="pipeline-lease", daemon=True)
             pulse.start()
@@ -131,15 +143,23 @@ class StageRunner:
                     self.receipts.write(job, stage, metadata)
                 check()
                 self.queue.finish(job["id"], job["token"])
+                if stage == "publish_pending" and self.budget is not None:
+                    self.budget.settle(job["id"], self.used_bytes(job["id"]))
                 return "finished"
             except LeaseLost:
                 # Keep token/receipt for reconciliation, never automatically steal.
                 return "lease_lost"
             except (EvidenceError, HoldJob, ValueError) as exc:
-                return self._fail(job, type(exc).__name__)
-            except (DiskPressure, RetryJob, OSError, RuntimeError) as exc:
+                reason = str(exc) if isinstance(exc, (EvidenceError, HoldJob)) and re.fullmatch(r"[a-z][a-z0-9_]{0,99}", str(exc)) else type(exc).__name__
+                return self._fail(job, reason)
+            except DiskPressure as exc:
+                # Backpressure is not a bad source and must not exhaust its
+                # attempt budget merely because retained data fills the buffer.
+                return self._fail(job, str(exc), self.retry_seconds)
+            except (RetryJob, OSError, RuntimeError) as exc:
                 retry = self.retry_seconds if job["attempts"] < self.max_attempts else None
-                return self._fail(job, type(exc).__name__, retry)
+                reason = str(exc) if isinstance(exc, (RetryJob, DiskPressure)) and re.fullmatch(r"[a-z][a-z0-9_]{0,99}", str(exc)) else type(exc).__name__
+                return self._fail(job, reason, retry)
             finally:
                 stopped.set()
                 pulse.join()
