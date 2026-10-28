@@ -1,6 +1,6 @@
 # NAS intake and independent ASR pipeline
 
-Version: 0.1.4 · Status: design draft · Project: 801
+Version: 0.1.6 · Status: design draft; limited I1 pilot accepted · Project: 801
 
 ## 1. Scope and owner decisions
 
@@ -315,8 +315,11 @@ As of 2026-10-28:
   dual publishers and a gated supervisor have been added (`680ffc3`), with
   373 passed / 2 skipped on Windows and 375 passed on Linux. See
   [I1 interfaces, limitations and safety gates](hub-nas-i1.md). Real ASR/Hub
-  publication/claim adapters are running in a bounded live E2E; successful
-  completion/attestation and enabled production services are NOT yet confirmed.
+  publication/claim adapters passed the bounded real E2E with verified dual
+  delivery and explicit degraded/needs_review quality. The same candidate was
+  attested and the owner enabled its limited-scope service+recovery timer.
+  Two normal discovery passes passed without reclaiming the done job; this is NOT the
+  full Hub/Zoom/archive/multi-track release or the crash/reboot matrix.
   An exact pilot-project exclusion is available in the old intake, but its
   long GPU critical section would need a safe split before future mixed-route
   use. The owner stopped the old intake instead for this first pilot.
@@ -332,8 +335,9 @@ As of 2026-10-28:
   without supporting evidence. See the bundle specification for test results.
 - The separate GPL downloader exports complete observed local Zoom inventories;
   this does not implement NAS transfer or the new ASR consumer.
-- The owner stopped the old intake for the bounded new-route E2E; its release
-  and state remain preserved. The new unattended service has not been enabled.
+- The owner stopped/disabled old intake and enabled the limited new service;
+  old release/state remain preserved. Untouched Hub/Zoom ASR routes have not
+  been migrated; the separate downloader remains active.
   Source contracts remain subordinate to shared GPU ownership.
 
 Open before NAS pilot: exact collection roots/mount identity, allowed write

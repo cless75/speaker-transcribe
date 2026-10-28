@@ -1,6 +1,6 @@
 # Hub → NAS: isolated I1 implementation
 
-Version: 0.0.6 · Status: development, NOT a production cutover
+Version: 0.0.8 · Status: limited I1 pilot accepted; NOT the full pipeline release
 
 The owner roadmap remains in the project vault (`801-p10`). This document
 describes technical interfaces and evidence, not a second owner roadmap.
@@ -52,7 +52,7 @@ describes technical interfaces and evidence, not a second owner roadmap.
   away from old discovery. The exclusion is exact (no wildcards) and included
   in release identity; adding it does not bypass the old attestation gate.
 
-## Concrete pilot adapters (2026-10-28, live E2E in progress)
+## Concrete pilot adapters (2026-10-28, bounded E2E verified)
 
 `pipeline_hub_claims.py` maintains token-bound Hub claims across stage gaps with
 verified heartbeats. Foreign expired claims are never preempted. Persisted
@@ -115,10 +115,13 @@ This is the first Linux-current pilot, not removal of Windows-legacy support.
 
 ## Remaining hard boundaries before serving
 
-Concrete adapters, supervisor and service templates now exist, but **no live
-ASR E2E/attestation or enabled new service is claimed at this code checkpoint**.
-The NAS identity/storage probe is verified separately below. Completing library
-tests is not an operational release or permission to bypass these live gates.
+The bounded real E2E is verified/attested and the owner enabled the new service
+and recovery timer for the approved pilot scope. The old intake timer is
+disabled, not merely paused. **This is not migration of every Hub/Zoom route,
+the full NAS archive scanner, multi-track acceptance, or the full crash/reboot
+matrix.** The two-discovery-pass service acceptance check passed without
+reclaiming/retranscribing the completed source. Completing library tests alone
+never bypasses live gates.
 
 Before connecting production handlers:
 
@@ -196,11 +199,29 @@ foreign-expired-claim fencing, concrete memory-Drive → NAS → engine-fixture 
 dual publication, crash after durable engine completion, each destination
 outage, exact E2E source filtering and attestation/startup gates.
 
-A bounded live E2E has been started for one owner-selected, previously unmarked
-source. NAS source copy and staging receipt verified; ASR is running on media
-of 3834.107 seconds. Live PID/group inspection confirmed the GPU worker belongs
-to this invocation. **No completed E2E, successful output publication,
-attestation or enabled new service is claimed by this checkpoint.**
+A bounded live E2E completed for one owner-selected, previously unmarked source
+of 3834.107 seconds: all three stage receipts, both Hub/NAS content read-backs
+and the LAST source marker were independently verified. 87 result artifacts,
+139395542 bytes; worker returncode 0 and resource release proof confirmed.
+Quality is **degraded / needs_review**, gaps 207.22 seconds against a 30-second
+threshold, no suspect-loop duration. Publication is not owner quality acceptance.
+
+The queue made four stage claims. There were two ASR starts, but only one
+confirmed output completion: an unfinished first attempt was retried
+automatically. Do not describe this as exactly one engine invocation. The
+specific first retry cause was not retained by the mutable queue reason field;
+durable per-attempt event auditing remains an explicit follow-up. The completed
+result was not rerun for delivery. Retained logical bytes 483991508 stay counted;
+only unused reservation was released, no source/result cleanup was enabled.
+
+The same-candidate attestation was issued; the owner installed/enabled the new
+service+timer. The new supervisor loaded the persisted done job without
+reclaiming it. Old intake is inactive/disabled, downloader remains active.
+Two normal automatic discovery passes completed with no source quarantine or
+component failure; the completed source remained done with unchanged claim/start
+counts. The limited I1 gate is accepted. No reboot/fault-injection acceptance,
+full legacy migration, arbitrary NAS archive intake or multi-track release is
+implied. Prior processed Hub files were not bulk-migrated or removed.
 
 Earlier foundation/storage candidate:
 
