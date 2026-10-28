@@ -1,6 +1,6 @@
 # Hub → NAS: isolated I1 implementation
 
-Version: 0.0.9 · Status: limited I1 pilot accepted; Hub-only update not deployed
+Version: 0.0.10 · Status: limited I1 pilot accepted; Hub-only update not deployed
 
 ## Project destination policy (2026-10-28, candidate only)
 
@@ -27,9 +27,20 @@ an approved fresh E2E source, drain/consistent state backup and owner installati
 No old Gelya sources/results are to be bulk-migrated; their existing `asr-done`
 markers remain authoritative against automatic ASR repetition.
 
-Candidate regressions: Windows **387 passed / 2 skipped**, Linux **389 passed**.
+Candidate regressions: Windows **394 passed / 2 skipped**, Linux **396 passed**.
 Linux validation is isolated in `out/nas-hub-only-validation-20261028`; it does
 not replace the production code or change the live configuration/attestation.
+Mixed-queue tests confirm Hub-only completion during a NAS outage while a dual
+job waits, then resumes after NAS recovery. E2E admission rejects `asr-done`
+sources before enqueue, so candidate changes cannot duplicate completed work.
+
+Private `pilot.hub-only.proposed.local.json` and `activation-blockers.json` are
+prepared in that validation directory. Proposed configuration is disabled and
+has `e2e_source: null` deliberately: the completed Telemost source must not be
+reused. These files are NOT installed. Missing E2E selection fails closed with
+`fresh_e2e_source_required`. The existing snapshot/queue/budget/attestation must
+be preserved and migrated explicitly under drain/locks, never overwritten by
+running `--prepare` against the active root or copying a fresh empty queue.
 
 The owner roadmap remains in the project vault (`801-p10`). This document
 describes technical interfaces and evidence, not a second owner roadmap.

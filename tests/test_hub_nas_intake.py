@@ -50,10 +50,12 @@ def test_real_adapter_copies_to_nas_before_ready_without_drive_writes(tmp_path):
         r.close()
 
 
-def test_terminal_history_is_not_queued_for_asr(tmp_path):
+@pytest.mark.parametrize("policy", ["hub-nas", "hub-only"])
+def test_terminal_history_is_not_queued_for_asr(tmp_path, policy):
     done = json.dumps({"status": "asr-done", "publication_verified": True}).encode()
     drive = MemoryDrive({"Example/voice.m4a": b"synthetic", "Example/voice.m4a.state.json": done})
     intake = adapter(tmp_path, drive, nas_area(tmp_path))
+    intake.project_delivery["Example"] = policy
     q = PipelineQueue(tmp_path / "queue.db")
     try:
         assert intake.discover(q) == {"candidates": 0, "held": 0}

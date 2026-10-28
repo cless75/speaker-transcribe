@@ -219,6 +219,28 @@ class Pilot:
             queue.close()
         return value
 
+    def e2e_target(self):
+        target = self.config.get("e2e_source")
+        if (not isinstance(target, dict) or
+                any(not isinstance(target.get(k), str) or not target[k] for k in ("project", "path"))):
+            raise EvidenceError("fresh_e2e_source_required")
+        return target
+
+    def admit_e2e(self, queue):
+        target = self.e2e_target()
+        # A code/policy update must never turn a completed source into a new
+        # E2E ASR. Keep its original receipts and select a fresh source instead.
+        state = self.intake.drive.state(target["project"], target["path"])
+        if state.get("status") == "asr-done":
+            raise EvidenceError("completed_source_forbidden_for_e2e")
+        key = self.intake.admit_exact(queue, target["project"], target["path"])
+        _, selected = self.pipeline.source(queue.get(key))
+        for field, actual in (("expected_id", selected.file_id), ("expected_md5", selected.md5),
+                              ("expected_size", selected.size)):
+            if field in target and target[field] != actual:
+                raise EvidenceError("selected_e2e_source_changed")
+        return key
+
     def attest(self, key):
         queue = PipelineQueue(self.db)
         try:
@@ -226,7 +248,7 @@ class Pilot:
             if job is None or job["state"] != "done":
                 raise EvidenceError("completed_e2e_required")
             payload, item = self.pipeline.source(job)
-            expected = self.config["e2e_source"]
+            expected = self.e2e_target()
             if (item.project, item.path) != (expected["project"], expected["path"]):
                 raise EvidenceError("wrong_e2e_source")
             receipt = self.store.read(job, "publish_pending")
@@ -272,13 +294,7 @@ class Pilot:
         threads = []
         try:
             if e2e:
-                target = self.config["e2e_source"]
-                key = self.intake.admit_exact(queue, target["project"], target["path"])
-                _, selected = self.pipeline.source(queue.get(key))
-                for field, actual in (("expected_id", selected.file_id), ("expected_md5", selected.md5),
-                                      ("expected_size", selected.size)):
-                    if field in target and target[field] != actual:
-                        raise EvidenceError("selected_e2e_source_changed")
+                key = self.admit_e2e(queue)
             self.reconcile_completed(queue)
             # Restore only persisted ownership of already-ready stages. This does
             # not re-execute or automatically reclaim expired ASR attempts.

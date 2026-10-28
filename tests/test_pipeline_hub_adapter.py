@@ -213,3 +213,39 @@ def test_legacy_dual_receipts_cannot_omit_nas(tmp_path):
     finally:
         runner.close()
         claims.close()
+
+
+def test_mixed_queue_hub_only_finishes_while_dual_waits_for_nas(tmp_path):
+    import time
+    drive, store, intake, claims, pipeline, runner, calls = fixture(
+        tmp_path, project_delivery={"Example": "hub-only"})
+    drive.files["Other/voice.m4a"] = b"other synthetic source"
+    drive.files["Other/voice.m4a.state.json"] = json.dumps({"status": "queued"}).encode()
+    intake.projects = ("Example", "Other")
+    intake.source_paths["Other"] = ["voice.m4a"]
+    mount = intake.nas.mount_check
+    intake.nas.mount_check = lambda *args: (_ for _ in ()).throw(OSError("NAS unavailable"))
+    try:
+        assert intake.discover(runner.queue) == {"candidates": 2, "held": 0}
+        jobs = [dict(r) for r in runner.queue.db.execute("SELECT * FROM pipeline_jobs")]
+        by_project = {json.loads(j["payload"])["source"]["project"]: j["id"] for j in jobs}
+        runner.job_key = by_project["Other"]
+        assert runner.tick("discovered") == "retry_wait"
+        assert not (store.directory(runner.job_key) / "input").exists()
+        runner.job_key = by_project["Example"]
+        assert runner.tick("discovered") == runner.tick("ready") == runner.tick("publish_pending") == "finished"
+        assert drive.state("Example", "voice.m4a")["deliveries_verified"] == ["hub"]
+        assert not list(intake.nas.root.rglob("READY"))
+        assert not list(intake.nas.root.rglob("quality.json"))
+        intake.nas.mount_check = mount
+        runner.job_key = by_project["Other"]
+        time.sleep(.01)
+        assert runner.tick("discovered") == runner.tick("ready") == runner.tick("publish_pending") == "finished"
+        assert drive.state("Other", "voice.m4a")["deliveries_verified"] == ["hub", "nas"]
+        assert list(intake.nas.root.rglob("quality.json"))
+        assert len(calls) == 2
+        for key in by_project.values():
+            assert runner.queue.get(key)["state"] == "done"
+    finally:
+        runner.close()
+        claims.close()

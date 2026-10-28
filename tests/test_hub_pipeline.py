@@ -65,3 +65,24 @@ def test_live_serving_requires_old_timer_disabled_not_merely_stopped(monkeypatch
     app.old_intake_stopped(serving=False)
     with pytest.raises(RuntimeError, match="not_disabled"):
         app.old_intake_stopped(serving=True)
+
+
+@pytest.mark.parametrize("target", [None, {}, {"project": "Example"},
+                                    {"project": "Example", "path": None}])
+def test_candidate_without_new_e2e_source_fails_closed(target):
+    pilot = app.Pilot.__new__(app.Pilot)
+    pilot.config = {"e2e_source": target}
+    with pytest.raises(EvidenceError, match="fresh_e2e_source_required"):
+        pilot.admit_e2e(None)
+
+
+def test_e2e_refuses_completed_source_before_enqueue_or_asr(tmp_path):
+    from test_hub_worker import MemoryDrive
+    pilot = app.Pilot.__new__(app.Pilot)
+    pilot.config = {"e2e_source": {"project": "Example", "path": "voice.m4a"}}
+    drive = MemoryDrive({"Example/voice.m4a": b"synthetic",
+                         "Example/voice.m4a.state.json": json.dumps({"status": "asr-done"}).encode()})
+    pilot.intake = SimpleNamespace(drive=drive)
+    # No admit_exact/pipeline/queue objects exist: no side effects are permitted.
+    with pytest.raises(EvidenceError, match="completed_source_forbidden"):
+        pilot.admit_e2e(None)
