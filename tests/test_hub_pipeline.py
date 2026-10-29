@@ -86,3 +86,43 @@ def test_e2e_refuses_completed_source_before_enqueue_or_asr(tmp_path):
     # No admit_exact/pipeline/queue objects exist: no side effects are permitted.
     with pytest.raises(EvidenceError, match="completed_source_forbidden"):
         pilot.admit_e2e(None)
+
+
+def test_isolated_supervisors_share_budget_without_losing_retained_bytes(tmp_path):
+    from pipeline_budget import DiskPressure
+    cfg = config(tmp_path)
+    root = app.prepare(cfg)
+    first = app.Pilot.__new__(app.Pilot)
+    first.root, first.config = root, cfg
+    a = first.budget()
+    a.reserve("retained-original", 100)
+    second = app.Pilot.__new__(app.Pilot)
+    second.root = tmp_path / "isolated"
+    second.root.mkdir()
+    second.config = {**cfg, "budget_path": str(root / "budget.sqlite3"), "budget_volume": str(root)}
+    b = second.budget()
+    try:
+        assert b.db.execute("SELECT bytes FROM disk_reservations WHERE job_id=?",
+                            ("retained-original",)).fetchone() == (100,)
+        b.reserve("isolated", 100)
+        assert a.db.execute("SELECT sum(bytes) FROM disk_reservations").fetchone() == (200,)
+        b.settle("isolated", 50)
+        assert a.db.execute("SELECT sum(bytes) FROM disk_reservations").fetchone() == (150,)
+        b.free_bytes = lambda: 150
+        with pytest.raises(DiskPressure):
+            b.reserve("blocked", 100)
+    finally:
+        a.close()
+        b.close()
+
+
+def test_shared_budget_rejects_different_limits(tmp_path):
+    cfg = config(tmp_path)
+    root = app.prepare(cfg)
+    pilot = app.Pilot.__new__(app.Pilot)
+    pilot.root, pilot.config = root, cfg
+    pilot.budget().close()
+    pilot.config = {**cfg, "buffer_capacity": 1000,
+                    "budget_path": str(root / "budget.sqlite3"), "budget_volume": str(root)}
+    with pytest.raises(ValueError, match="budget_config_changed"):
+        pilot.budget()

@@ -137,8 +137,12 @@ class Pilot:
                 "policy_sha256": hashlib.sha256(canonical(policy)).hexdigest()}
 
     def budget(self):
-        return DiskBudget(self.root / "budget.sqlite3", capacity=self.config["buffer_capacity"],
-                          minimum_free=self.config["local_minimum_free"], volume=self.root,
+        # Isolated supervisors must still reserve against the same local volume
+        # ledger. DiskBudget validates its persisted limits/volume fail-closed.
+        path = pathlib.Path(self.config.get("budget_path", self.root / "budget.sqlite3"))
+        volume = pathlib.Path(self.config.get("budget_volume", self.root))
+        return DiskBudget(path, capacity=self.config["buffer_capacity"],
+                          minimum_free=self.config["local_minimum_free"], volume=volume,
                           maximum_job=self.config["maximum_job"])
 
     def private_error(self):
