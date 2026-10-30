@@ -1,6 +1,36 @@
 # Admission-package NAS pilot
 
-Version: 0.0.1 · Status: candidate, not a service deployment
+Version: 0.0.2 · Status: candidate, not a service deployment
+
+## Read-only compatibility (no execution)
+
+`nas_pilot.py --config /private/package-check.json --check-package` supports
+admission formats `0.0.1` (one input) and `0.0.2` (two inputs with separate
+`source-validation-initial.json` / `source-validation-philipp.json`). The config
+needs only `project`, `corpus_root`, `mountpoint`, `mount_source`,
+`package_relative`, and the exact `manifest_sha256`. It is not a service config
+and must not replace a live config.
+
+This path verifies the NAS identity, all manifest members and source hashes,
+per-source validation bindings, exclusions, native timeline and off policy.
+It reads adjacent terminal state/receipt/output inventories before considering
+the current engine/profile. A verified completion returns `reuse_completed`
+with its ORIGINAL job/manifest/receipt reference; an unexecuted source returns
+`execution_held`. Partial, mismatched or corrupt completion evidence is blocked,
+never treated as a new candidate. Historical package fields are not rewritten.
+
+Compatibility acceptance never authorizes execution or semantic acceptance.
+The path does not construct a queue, worker, claim, result area, READY or service;
+it reads the corpus and prints JSON only. The result includes integrity,
+compatibility, source-preparation/disposition, completion refs and explicit
+`execution_authorized=false`, `runtime_ready=false`. Missing or unpinned inputs
+fail closed; no fallback to older packages.
+
+`--preflight` and `--run-pilot` below deliberately remain limited to the original
+single-input `0.0.1` execution contract. Supporting `0.0.2` for inspection does
+not permit a second/batch run, remove execution-held, or modify the old run.
+
+## Original bounded execution contract
 
 `nas_pilot.py` adds an explicit bounded E2E route from an owner-approved, checksum-pinned
 admission package to the existing stage queue/receipts/engine and Hub+NAS sinks.

@@ -444,6 +444,192 @@ def prepare_area(area):
     area.guard()
 
 
+def _completed_reference(source, entry, project):
+    """Read terminal evidence without creating an area, claim or queue."""
+    area = no_links(pathlib.Path(str(source) + ".asr"))
+    state_path = area / "source-state.json"
+    if not state_path.exists():
+        if area.exists() and any(area.iterdir()):
+            raise EvidenceError("existing_asr_requires_reconciliation")
+        return None
+    state = read_json(state_path)
+    state_hash = digest(state_path, strict_snapshot=False)
+    if (state.get("status") != "asr-done" or
+            state.get("source_sha256") != entry["source_sha256"] or
+            state.get("source_id") != entry["source_id"] or
+            str(state.get("project")) != str(project) or state.get("speaker_policy") != POLICY):
+        raise EvidenceError("completed_source_requires_reconciliation")
+    key = state.get("pipeline_job_id", "")
+    if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key):
+        raise EvidenceError("invalid_completed_job_id")
+    directory = no_links(area / key)
+    receipt_path = directory / "receipt.json"
+    receipt = read_json(receipt_path)
+    receipt_hash = digest(receipt_path, strict_snapshot=False)
+    binding = receipt.get("binding", {})
+    identity = json.loads(binding.get("identity", "null"))
+    if (receipt.get("schema") != 1 or binding.get("job_id") != key or
+            binding.get("source_sha256") != entry["source_sha256"] or
+            not isinstance(identity, list) or len(identity) != 4 or
+            identity[:2] != [f"nas:{project}:{entry['source_id']}", entry["source_sha256"]] or
+            any(not re.fullmatch(r"[a-f0-9]{64}", str(x)) for x in identity[2:]) or
+            not re.fullmatch(r"[a-f0-9]{64}", str(binding.get("manifest_sha256", ""))) or
+            binding.get("manifest_sha256") != state.get("manifest_sha256") or
+            state.get("deliveries_verified") != ["hub", "nas"]):
+        raise EvidenceError("completed_receipt_binding_changed")
+    files = receipt.get("files")
+    if not isinstance(files, list) or not files:
+        raise EvidenceError("completed_inventory_missing")
+    names, total = set(), 0
+    for row in files:
+        name = str(safe_path(row["path"]))
+        if name in names or type(row.get("size")) is not int or row["size"] <= 0:
+            raise EvidenceError("invalid_completed_inventory")
+        names.add(name)
+        target = no_links(directory / name)
+        if target.stat().st_size != row["size"] or digest(target, strict_snapshot=False) != row["sha256"]:
+            raise EvidenceError("completed_output_changed")
+        total += row["size"]
+    if (digest(receipt_path, strict_snapshot=False) != receipt_hash or
+            digest(state_path, strict_snapshot=False) != state_hash):
+        raise EvidenceError("completed_evidence_changed")
+    return {"job_id": key, "manifest_sha256": binding["manifest_sha256"],
+            "receipt_sha256": receipt_hash,
+            "outputs_verified": len(files), "output_bytes": total}
+
+
+def check_package(config, *, mount_check=verify_mount):
+    """Compatibility only. No execution authority, queue, READY or filesystem writes.
+
+    The old Admission/preflight/run-pilot remain bounded to the original single
+    pilot. Supporting a document here must never widen that execution path.
+    """
+    root = no_links(pathlib.Path(config["corpus_root"]))
+    mount = no_links(pathlib.Path(config["mountpoint"]))
+    if not root.is_relative_to(mount) or root == mount:
+        raise EvidenceError("dedicated_corpus_root_required")
+    mount_check(mount, config["mount_source"])
+    package = no_links(root / str(safe_path(config["package_relative"])))
+    manifest = package / "manifest.json"
+    expected = config["manifest_sha256"]
+    if digest(manifest, strict_snapshot=False) != expected:
+        raise EvidenceError("admission_manifest_changed")
+    data = read_json(manifest)
+    version, project = data.get("version"), str(config["project"])
+    if version not in {"0.0.1", "0.0.2"} or str(data.get("project")) != project:
+        raise EvidenceError("unsupported_admission_manifest")
+    members = {}
+    rows = data.get("files")
+    if not isinstance(rows, list) or not rows:
+        raise EvidenceError("missing_admission_members")
+    for row in rows:
+        name = str(safe_path(row["path"]))
+        if name in members or name in {"manifest.json", "manifest.sha256"}:
+            raise EvidenceError("duplicate_or_self_referencing_member")
+        path = no_links(package / name)
+        if (type(row.get("bytes")) is not int or row["bytes"] <= 0 or
+                path.stat().st_size != row["bytes"] or digest(path, strict_snapshot=False) != row["sha256"]):
+            raise EvidenceError("admission_member_changed")
+        members[name] = path
+    validation_names = ({"source-validation.json"} if version == "0.0.1" else
+                        {"source-validation-initial.json", "source-validation-philipp.json"})
+    if not {"whitelist.json", "speaker-policy.json", *validation_names} <= members.keys():
+        raise EvidenceError("missing_admission_members")
+    if {name for name in members if name.startswith("source-validation") and name.endswith(".json")} != validation_names:
+        raise EvidenceError("unsupported_validation_members")
+    whitelist = read_json(members["whitelist.json"])
+    speaker = read_json(members["speaker-policy.json"])
+    entries = whitelist.get("include")
+    if (str(whitelist.get("project")) != project or
+            whitelist.get("version", "0.0.1") != version or
+            whitelist.get("recursive_scan_allowed") is not False or
+            not isinstance(entries, list) or len(entries) != (1 if version == "0.0.1" else 2) or
+            whitelist.get("speaker_policy") != POLICY or speaker.get("policy") != POLICY or
+            str(speaker.get("project", project)) != project or
+            speaker.get("enrollment_admitted") is not False or
+            speaker.get("confirmed_persons", []) != [] or
+            speaker.get("approved_reference_intervals", []) != [] or
+            whitelist.get("transcripts_admitted") != [] or whitelist.get("offsets_applied") != []):
+        raise EvidenceError("unknown_off_package_policy_required")
+    validations = {}
+    for name in sorted(validation_names):
+        validation = read_json(members[name])
+        source_path = str(safe_path(validation["source"]))
+        if source_path in validations:
+            raise EvidenceError("ambiguous_source_validation")
+        validations[source_path] = (name, validation)
+    excludes = {str(safe_path(e["path"])) for e in whitelist.get("exclude", [])}
+    excluded_roots = [safe_path(s.rstrip("/")) for s in whitelist.get("excluded_roots", [])]
+    ids, paths, sources, snapshots = set(), set(), [], []
+    held_states = {"held-awaiting-801-ack-and-runtime-gates",
+                   "held-awaiting-shared-pilot-acceptance-updated-801-ack-and-runtime-gates"}
+    for entry in entries:
+        source_id, rel = str(safe_path(entry["source_id"])), str(safe_path(entry["source_path"]))
+        authority = entry.get("execution_admission")
+        if ("/" in source_id or source_id in ids or rel in paths or rel in excludes or
+                any(pathlib.PurePosixPath(rel).is_relative_to(prefix) for prefix in excluded_roots)):
+            raise EvidenceError("duplicate_or_excluded_source")
+        ids.add(source_id)
+        paths.add(rel)
+        if (str(entry.get("project")) != project or entry.get("admission") != "admitted" or
+                entry.get("admission_scope") not in {"single-initial-pilot-only",
+                    "501-source-prepared-no-vtt-unknown-no-enrollment"} or
+                entry.get("speaker_policy") != POLICY or type(entry.get("bytes")) is not int or
+                entry["bytes"] <= 0 or type(entry.get("duration_sec")) not in {int, float} or
+                not math.isfinite(entry["duration_sec"]) or entry["duration_sec"] <= 0 or
+                not re.fullmatch(r"[a-f0-9]{64}", str(entry.get("source_sha256", ""))) or
+                (authority not in held_states and not (version == "0.0.1" and authority is None))):
+            raise EvidenceError("unsupported_source_admission")
+        timeline = entry.get("timeline", {})
+        if (timeline.get("basis") != "native-source-media" or timeline.get("trim") is not False or
+                timeline.get("speed_change") is not False or timeline.get("offset_applied_sec") != 0 or
+                timeline.get("external_transcript_bindings") != [] or
+                timeline.get("external_transcript_offsets", []) != []):
+            raise EvidenceError("native_timeline_required")
+        if rel not in validations:
+            raise EvidenceError("source_validation_missing")
+        name, validation = validations[rel]
+        if (str(validation.get("project", project)) != project or
+                validation.get("source_sha256") != entry["source_sha256"] or
+                validation.get("source_matches_archive_hash") is not True or
+                type(validation.get("full_audio_video_decode_exit_code")) is not int or
+                validation["full_audio_video_decode_exit_code"] != 0 or
+                validation.get("status") != "passed-technical-source-validation"):
+            raise EvidenceError("source_validation_required")
+        source = no_links(root / rel)
+        if source.suffix.lower() not in {".mp4", ".webm", ".m4a", ".wav", ".mp3"}:
+            raise EvidenceError("unsupported_pilot_media")
+        if source.stat().st_size != entry["bytes"] or digest(source, strict_snapshot=False) != entry["source_sha256"]:
+            raise EvidenceError("admitted_source_changed")
+        completed = _completed_reference(source, entry, project)
+        snapshots.append((source, entry))
+        sources.append({"source_id": source_id, "source_sha256": entry["source_sha256"],
+                        "source_preparation": "verified", "validation_ref": name,
+                        "disposition": "reuse_completed" if completed else "execution_held",
+                        "completed_run_ref": completed, "package_execution_admission": authority,
+                        "execution_authorized": False,
+                        "blockers": [] if completed else ["execution_admission_required",
+                            "shared_pilot_acceptance_required", "fresh_runtime_gates_required"]})
+    if set(validations) != paths:
+        raise EvidenceError("unbound_source_validation")
+    # Close the read window: no mixed-version member/source snapshot is accepted.
+    for row in rows:
+        if digest(members[row["path"]], strict_snapshot=False) != row["sha256"]:
+            raise EvidenceError("admission_member_changed")
+    for source, entry in snapshots:
+        if digest(source, strict_snapshot=False) != entry["source_sha256"]:
+            raise EvidenceError("admitted_source_changed")
+    if digest(manifest, strict_snapshot=False) != expected:
+        raise EvidenceError("admission_manifest_changed")
+    mount_check(mount, config["mount_source"])
+    return {"schema": 1, "package_version": version, "manifest_sha256": expected,
+            "project": project, "integrity": "verified", "compatibility": "accepted",
+            "members_verified": len(members), "sources": sources,
+            "runtime_ready": False, "execution_authorized": False, "execution_started": False,
+            "semantic_acceptance": "not-assessed",
+            "scope": "read-only-compatibility-not-execution-or-semantic-acceptance"}
+
+
 def preflight(config, *, mount_check=verify_mount):
     admission = Admission(config, mount_check=mount_check)
     report = admission.report()
@@ -592,10 +778,14 @@ def main():
     parser.add_argument("--config", type=pathlib.Path, required=True)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--preflight", action="store_true")
+    action.add_argument("--check-package", action="store_true",
+                        help="read-only compatibility/reuse/held report; never creates jobs")
     action.add_argument("--run-pilot", action="store_true")
     args = parser.parse_args()
     config = read_json(args.config)
-    if args.preflight:
+    if args.check_package:
+        print(json.dumps(check_package(config)))
+    elif args.preflight:
         _, _, report = preflight(config)
         print(json.dumps(report))
     else:
