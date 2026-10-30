@@ -1,6 +1,6 @@
 # Admission-package NAS pilot
 
-Version: 0.0.2 · Status: candidate, not a service deployment
+Version: 0.0.3 · Status: candidate, not a service deployment
 
 ## Read-only compatibility (no execution)
 
@@ -15,9 +15,20 @@ This path verifies the NAS identity, all manifest members and source hashes,
 per-source validation bindings, exclusions, native timeline and off policy.
 It reads adjacent terminal state/receipt/output inventories before considering
 the current engine/profile. A verified completion returns `reuse_completed`
-with its ORIGINAL job/manifest/receipt reference; an unexecuted source returns
-`execution_held`. Partial, mismatched or corrupt completion evidence is blocked,
+with its ORIGINAL job/manifest/receipt reference; a source without verified
+adjacent NAS completion returns `execution_held`. This is NOT evidence that the
+source was never processed by Hub, legacy or another node: the report explicitly
+limits completion evidence to `adjacent-nas-only`, with external searches not
+performed. Shared semantic acceptance is not assessed; even reuse carries a
+`shared_semantic_acceptance_required` blocker, not a claim of accepted content.
+Partial, mismatched or corrupt completion evidence is blocked,
 never treated as a new candidate. Historical package fields are not rewritten.
+
+Read-back checks the source-bound collection marker and the exact set of result
+files (receipt plus inventory); unlisted artifacts are rejected. Empty receipted
+files are allowed, consistent with the existing delivery contract. Scope/held
+combinations are format-specific, and exclusions conservatively match NFC/case
+aliases for shared Windows/CIFS corpora. Malformed documents raise EvidenceError.
 
 Compatibility acceptance never authorizes execution or semantic acceptance.
 The path does not construct a queue, worker, claim, result area, READY or service;

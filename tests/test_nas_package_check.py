@@ -51,6 +51,9 @@ def completed(first, entry, manifest):
     d.mkdir(parents=True)
     output = d / "transcript.md"
     output.write_text("original output")
+    atomic_json(area / ".speaker-transcribe-nas-pilot", {"schema": 1,
+                "collection_id": "nas-pilot:" + entry["source_id"] + ":" + entry["source_sha256"],
+                "mount_source": "//test/share"})
     state = {"status": "asr-done", "project": 501, "source_id": entry["source_id"],
              "source_sha256": entry["source_sha256"], "pipeline_job_id": key,
              "manifest_sha256": manifest, "deliveries_verified": ["hub", "nas"],
@@ -94,6 +97,10 @@ def test_multi_package_completed_reuse_precedes_new_profile_or_engine(tmp_path, 
         assert first["disposition"] == "reuse_completed"
         assert first["completed_run_ref"]["job_id"] == key
         assert first["completed_run_ref"]["manifest_sha256"] == "e" * 64
+        assert first["completion_evidence_scope"] == "adjacent-nas-only"
+        assert first["external_completion_search"] == "not-performed"
+        assert first["semantic_acceptance"] == "not-assessed"
+        assert first["blockers"] == ["shared_semantic_acceptance_required"]
         assert second["disposition"] == "execution_held" and second["completed_run_ref"] is None
         assert all(not s["execution_authorized"] for s in report["sources"])
     assert tree(tmp_path) == before
@@ -197,3 +204,103 @@ def test_cli_check_never_calls_execution_or_preflight(tmp_path, monkeypatch, cap
     report = json.loads(capsys.readouterr().out)
     assert report["compatibility"] == "accepted" and not report["execution_authorized"]
     assert tree(tmp_path) == before
+
+
+def test_C4_M1_unlisted_file_rejects_completed_reuse(tmp_path):
+    cfg, source, p = multi_package(tmp_path)
+    entry = json.loads((p / "whitelist.json").read_bytes())["include"][0]
+    area, key = completed(source, entry, "e" * 64)
+    (area / key / "editorial-copy.md").write_text("not in receipt")
+    before = tree(tmp_path)
+    with pytest.raises(EvidenceError, match="nas_unlisted_artifacts"):
+        app.check_package(cfg, mount_check=lambda *a: None)
+    assert tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("change", ["foreign", "schema", "missing"])
+def test_C4_m2_requires_completed_collection_marker(tmp_path, change):
+    cfg, source, p = multi_package(tmp_path)
+    entry = json.loads((p / "whitelist.json").read_bytes())["include"][0]
+    area, key = completed(source, entry, "e" * 64)
+    marker = area / ".speaker-transcribe-nas-pilot"
+    if change == "missing": marker.unlink()
+    else:
+        value = json.loads(marker.read_bytes())
+        value["collection_id" if change == "foreign" else "schema"] = "wrong"
+        atomic_json(marker, value)
+    with pytest.raises((EvidenceError, FileNotFoundError)):
+        app.check_package(cfg, mount_check=lambda *a: None)
+
+
+def test_C4_m3_zero_byte_receipted_output_is_valid(tmp_path):
+    cfg, source, p = multi_package(tmp_path)
+    entry = json.loads((p / "whitelist.json").read_bytes())["include"][0]
+    area, key = completed(source, entry, "e" * 64)
+    output = area / key / "empty.txt"
+    output.write_bytes(b"")
+    receipt = area / key / "receipt.json"
+    value = json.loads(receipt.read_bytes())
+    value["files"].append({"path": "empty.txt", "size": 0, "sha256": digest(output)})
+    atomic_json(receipt, value)
+    report = app.check_package(cfg, mount_check=lambda *a: None)
+    assert report["sources"][0]["completed_run_ref"]["outputs_verified"] == 2
+
+
+@pytest.mark.parametrize("where", ["receipt_identity", "receipt_row", "manifest_row", "whitelist_entry", "validation_root"])
+def test_C4_m4_malformed_types_are_evidence_errors(tmp_path, where):
+    cfg, source, p = multi_package(tmp_path)
+    entry = json.loads((p / "whitelist.json").read_bytes())["include"][0]
+    area, key = completed(source, entry, "e" * 64)
+    if where.startswith("receipt"):
+        path = area / key / "receipt.json"; value = json.loads(path.read_bytes())
+        if where == "receipt_identity": value["binding"]["identity"] = ["not-a-string"]
+        else: value["files"] = ["not-an-object"]
+        atomic_json(path, value)
+    elif where == "manifest_row":
+        path = p / "manifest.json"; value = json.loads(path.read_bytes()); value["files"] = [42]
+        atomic_json(path, value); cfg["manifest_sha256"] = digest(path)
+    elif where == "whitelist_entry":
+        path = p / "whitelist.json"; value = json.loads(path.read_bytes()); value["include"][0] = None
+        atomic_json(path, value); resign(cfg, p)
+    else:
+        atomic_json(p / "source-validation-initial.json", ["not-an-object"]); resign(cfg, p)
+    with pytest.raises(EvidenceError, match="malformed_admission_document"):
+        app.check_package(cfg, mount_check=lambda *a: None)
+
+
+@pytest.mark.parametrize("change", ["exclude", "excluded_root", "include_alias"])
+def test_C4_m5_case_aliases_cannot_bypass_source_exclusion(tmp_path, change):
+    cfg, source, p = multi_package(tmp_path)
+    path = p / "whitelist.json"; w = json.loads(path.read_bytes())
+    if change == "exclude": w["exclude"].append({"path": w["include"][0]["source_path"].upper()})
+    elif change == "excluded_root": w["excluded_roots"] = ["SOURCES/"]
+    else: w["include"][1]["source_path"] = w["include"][0]["source_path"].upper()
+    atomic_json(path, w); resign(cfg, p)
+    with pytest.raises(EvidenceError, match="duplicate_or_excluded_source"):
+        app.check_package(cfg, mount_check=lambda *a: None)
+
+
+def test_C4_m6_v1_does_not_accept_secondary_source_scope(tmp_path):
+    cfg, source, p = package(tmp_path)
+    path = p / "whitelist.json"; w = json.loads(path.read_bytes())
+    w["include"][0].update(admission_scope="501-source-prepared-no-vtt-unknown-no-enrollment",
+        execution_admission="held-awaiting-shared-pilot-acceptance-updated-801-ack-and-runtime-gates")
+    atomic_json(path, w); resign(cfg, p)
+    with pytest.raises(EvidenceError, match="unsupported_source_admission"):
+        app.check_package(cfg, mount_check=lambda *a: None)
+
+
+@pytest.mark.parametrize("change", ["hold", "two_initial", "validation_scope"])
+def test_C4_m6_v2_scope_and_held_combinations_are_bounded(tmp_path, change):
+    cfg, source, p = multi_package(tmp_path)
+    path = p / "whitelist.json"; w = json.loads(path.read_bytes())
+    if change == "hold": w["include"][1]["execution_admission"] = w["include"][0]["execution_admission"]
+    elif change == "two_initial":
+        for field in ["admission_scope", "execution_admission"]:
+            w["include"][1][field] = w["include"][0][field]
+    else:
+        a, b = p / "source-validation-initial.json", p / "source-validation-philipp.json"
+        x, y = a.read_bytes(), b.read_bytes(); a.write_bytes(y); b.write_bytes(x)
+    atomic_json(path, w); resign(cfg, p)
+    with pytest.raises(EvidenceError, match="source_validation_scope_mismatch|unsupported_source_admission"):
+        app.check_package(cfg, mount_check=lambda *a: None)

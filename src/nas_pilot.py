@@ -22,6 +22,7 @@ import threading
 import time
 import traceback
 import uuid
+import unicodedata
 from types import SimpleNamespace
 
 import hub_worker as hub
@@ -452,6 +453,10 @@ def _completed_reference(source, entry, project):
         if area.exists() and any(area.iterdir()):
             raise EvidenceError("existing_asr_requires_reconciliation")
         return None
+    marker = read_json(area / ".speaker-transcribe-nas-pilot")
+    if (marker.get("schema") != 1 or marker.get("collection_id") !=
+            "nas-pilot:" + entry["source_id"] + ":" + entry["source_sha256"]):
+        raise EvidenceError("completed_collection_identity_changed")
     state = read_json(state_path)
     state_hash = digest(state_path, strict_snapshot=False)
     if (state.get("status") != "asr-done" or
@@ -483,13 +488,21 @@ def _completed_reference(source, entry, project):
     names, total = set(), 0
     for row in files:
         name = str(safe_path(row["path"]))
-        if name in names or type(row.get("size")) is not int or row["size"] <= 0:
+        if name in names or type(row.get("size")) is not int or row["size"] < 0:
             raise EvidenceError("invalid_completed_inventory")
         names.add(name)
         target = no_links(directory / name)
         if target.stat().st_size != row["size"] or digest(target, strict_snapshot=False) != row["sha256"]:
             raise EvidenceError("completed_output_changed")
         total += row["size"]
+    actual = set()
+    for parent, dirs, walk_files in os.walk(directory, followlinks=False):
+        for name in [*dirs, *walk_files]:
+            path = no_links(pathlib.Path(parent) / name)
+            if path.is_file():
+                actual.add(path.relative_to(directory).as_posix())
+    if actual != names | {"receipt.json"}:
+        raise EvidenceError("nas_unlisted_artifacts")
     if (digest(receipt_path, strict_snapshot=False) != receipt_hash or
             digest(state_path, strict_snapshot=False) != state_hash):
         raise EvidenceError("completed_evidence_changed")
@@ -499,6 +512,16 @@ def _completed_reference(source, entry, project):
 
 
 def check_package(config, *, mount_check=verify_mount):
+    """Public input boundary: malformed documents are evidence failures, not jobs."""
+    try:
+        return _check_package(config, mount_check=mount_check)
+    except EvidenceError:
+        raise
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise EvidenceError("malformed_admission_document") from exc
+
+
+def _check_package(config, *, mount_check):
     """Compatibility only. No execution authority, queue, READY or filesystem writes.
 
     The old Admission/preflight/run-pilot remain bounded to the original single
@@ -558,19 +581,32 @@ def check_package(config, *, mount_check=verify_mount):
         if source_path in validations:
             raise EvidenceError("ambiguous_source_validation")
         validations[source_path] = (name, validation)
-    excludes = {str(safe_path(e["path"])) for e in whitelist.get("exclude", [])}
-    excluded_roots = [safe_path(s.rstrip("/")) for s in whitelist.get("excluded_roots", [])]
+    # The same corpus is consumed over CIFS/Windows: conservatively honour
+    # exclusions and collisions across NFC/case aliases on either client.
+    def path_key(value):
+        return unicodedata.normalize("NFC", str(safe_path(value))).casefold()
+    excludes = {path_key(e["path"]) for e in whitelist.get("exclude", [])}
+    excluded_roots = [pathlib.PurePosixPath(path_key(s.rstrip("/")))
+                      for s in whitelist.get("excluded_roots", [])]
     ids, paths, sources, snapshots = set(), set(), [], []
     held_states = {"held-awaiting-801-ack-and-runtime-gates",
                    "held-awaiting-shared-pilot-acceptance-updated-801-ack-and-runtime-gates"}
     for entry in entries:
         source_id, rel = str(safe_path(entry["source_id"])), str(safe_path(entry["source_path"]))
         authority = entry.get("execution_admission")
-        if ("/" in source_id or source_id in ids or rel in paths or rel in excludes or
-                any(pathlib.PurePosixPath(rel).is_relative_to(prefix) for prefix in excluded_roots)):
+        if ("/" in source_id or source_id in ids or path_key(rel) in {path_key(p) for p in paths} or
+                path_key(rel) in excludes or
+                any(pathlib.PurePosixPath(path_key(rel)).is_relative_to(prefix) for prefix in excluded_roots)):
             raise EvidenceError("duplicate_or_excluded_source")
         ids.add(source_id)
         paths.add(rel)
+        scope = entry.get("admission_scope")
+        initial = scope == "single-initial-pilot-only"
+        expected_hold = ("held-awaiting-801-ack-and-runtime-gates" if initial else
+                         "held-awaiting-shared-pilot-acceptance-updated-801-ack-and-runtime-gates")
+        if (version == "0.0.1" and not initial or
+                authority != expected_hold and not (version == "0.0.1" and authority is None)):
+            raise EvidenceError("unsupported_source_admission")
         if (str(entry.get("project")) != project or entry.get("admission") != "admitted" or
                 entry.get("admission_scope") not in {"single-initial-pilot-only",
                     "501-source-prepared-no-vtt-unknown-no-enrollment"} or
@@ -589,6 +625,9 @@ def check_package(config, *, mount_check=verify_mount):
         if rel not in validations:
             raise EvidenceError("source_validation_missing")
         name, validation = validations[rel]
+        if version == "0.0.2" and name != (
+                "source-validation-initial.json" if initial else "source-validation-philipp.json"):
+            raise EvidenceError("source_validation_scope_mismatch")
         if (str(validation.get("project", project)) != project or
                 validation.get("source_sha256") != entry["source_sha256"] or
                 validation.get("source_matches_archive_hash") is not True or
@@ -607,8 +646,11 @@ def check_package(config, *, mount_check=verify_mount):
                         "source_preparation": "verified", "validation_ref": name,
                         "disposition": "reuse_completed" if completed else "execution_held",
                         "completed_run_ref": completed, "package_execution_admission": authority,
+                        "completion_evidence_scope": "adjacent-nas-only",
+                        "external_completion_search": "not-performed",
+                        "semantic_acceptance": "not-assessed",
                         "execution_authorized": False,
-                        "blockers": [] if completed else ["execution_admission_required",
+                        "blockers": ["shared_semantic_acceptance_required"] if completed else ["execution_admission_required",
                             "shared_pilot_acceptance_required", "fresh_runtime_gates_required"]})
     if set(validations) != paths:
         raise EvidenceError("unbound_source_validation")
