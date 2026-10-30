@@ -1,6 +1,6 @@
 ---
 artifact_type: review
-version: 0.0.2
+version: 0.0.3
 requested_by: owner
 reviewer: opus-read-only
 reviewer_model: opencode/claude-opus-5-5
@@ -67,3 +67,9 @@ Independent exact NAS: штатный verify_mount/UNC, manifest1dd5d710…3a3f3
 | C4-m7 | **Принято:** per-source completion_evidence_scope=adjacent-nas-only, external_completion_search=not-performed, semantic_acceptance=not-assessed; reuse несёт shared_semantic_acceptance_required. Документ не утверждает «никогда не исполнялся» из отсутствия.asr |
 
 Все7находок приняты. Порог G4v выполнен; исправления будут предъявлены exact SHA, файл остаётся answered до G4v/P. Первичный Windows full regression после исправлений:504passed/2skip. Не закрывать review по одному этому self-check; человеческое semantic acceptance501 остаётся HELD.
+
+### Предъявленный срез и внешний blocker G4v
+
+Автор предъявил `45bbebe90faf9e00cf44b1a81f679a2b75e80bf8` тому же reviewer `ses_e7213c159ffeInKQ49YKi3Vf87`; повторный мандат включает обязательное чтение/ACK R-3 перед G4v и проверку всех7исправлений. Upstream вернул **Insufficient account funds**. Проверочный раунд не состоялся; нет ACK свежего SHA, findings closure или reviewer acceptance. Отсутствующий G4v не заменён авторским self-check, outcome/closed/P не проставлены.
+
+Независимо от provider blocker выполнен author Linux regression frozen `/home/clessd/out/nas-compat-45bbebe`:506passed. Два read-only check_package на exact NAS0.0.2 дали одинаковый accepted/reuse40outputs/secondheld; shared_semantic_acceptance_required теперь явно виден, completion evidence scope adjacent-nas-only. Protected queue/WAL/live-config/node-snapshot501 hashes до/после совпали. Proofs: `linux-test-result.txt`, `compatibility-result.json` в этом isolated check-root. Эти результаты не дают права закрыть C4-M1 без G4v; службы не устанавливались, ASR/READY/jobs не создавались.
