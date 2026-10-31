@@ -478,6 +478,7 @@ def _completed_reference(source, entry, project):
             not isinstance(identity, list) or len(identity) != 4 or
             identity[:2] != [f"nas:{project}:{entry['source_id']}", entry["source_sha256"]] or
             any(not re.fullmatch(r"[a-f0-9]{64}", str(x)) for x in identity[2:]) or
+            hashlib.sha256(canonical(identity)).hexdigest() != key or
             not re.fullmatch(r"[a-f0-9]{64}", str(binding.get("manifest_sha256", ""))) or
             binding.get("manifest_sha256") != state.get("manifest_sha256") or
             state.get("deliveries_verified") != ["hub", "nas"]):
@@ -496,7 +497,9 @@ def _completed_reference(source, entry, project):
             raise EvidenceError("completed_output_changed")
         total += row["size"]
     actual = set()
-    for parent, dirs, walk_files in os.walk(directory, followlinks=False):
+    def unreadable_inventory(error):
+        raise EvidenceError("completed_inventory_unreadable") from error
+    for parent, dirs, walk_files in os.walk(directory, followlinks=False, onerror=unreadable_inventory):
         for name in [*dirs, *walk_files]:
             path = no_links(pathlib.Path(parent) / name)
             if path.is_file():

@@ -1,10 +1,11 @@
 import copy
+import hashlib
 import json
 
 import pytest
 
 import nas_pilot as app
-from pipeline_storage import EvidenceError, atomic_json, digest
+from pipeline_storage import EvidenceError, atomic_json, canonical, digest
 from test_nas_pilot import package
 
 
@@ -46,7 +47,8 @@ def multi_package(tmp_path):
 
 def completed(first, entry, manifest):
     area = first.with_name(first.name + ".asr")
-    key = "d" * 64
+    identity = ["nas:501:" + entry["source_id"], entry["source_sha256"], "a" * 64, "b" * 64]
+    key = hashlib.sha256(canonical(identity)).hexdigest()
     d = area / key
     d.mkdir(parents=True)
     output = d / "transcript.md"
@@ -60,7 +62,7 @@ def completed(first, entry, manifest):
              "speaker_policy": app.POLICY}
     atomic_json(area / "source-state.json", state)
     atomic_json(d / "receipt.json", {"schema": 1, "binding": {
-        "identity": json.dumps(["nas:501:" + entry["source_id"], entry["source_sha256"], "a" * 64, "b" * 64]),
+        "identity": json.dumps(identity),
         "job_id": key, "source_sha256": entry["source_sha256"], "manifest_sha256": manifest},
         "files": [{"path": output.name, "size": output.stat().st_size, "sha256": digest(output)}]})
     return area, key
@@ -303,4 +305,37 @@ def test_C4_m6_v2_scope_and_held_combinations_are_bounded(tmp_path, change):
         x, y = a.read_bytes(), b.read_bytes(); a.write_bytes(y); b.write_bytes(x)
     atomic_json(path, w); resign(cfg, p)
     with pytest.raises(EvidenceError, match="source_validation_scope_mismatch|unsupported_source_admission"):
+        app.check_package(cfg, mount_check=lambda *a: None)
+
+
+def test_C4_T1_scan_errors_cannot_hide_unlisted_artifacts(tmp_path, monkeypatch):
+    cfg, source, p = multi_package(tmp_path)
+    entry = json.loads((p / "whitelist.json").read_bytes())["include"][0]
+    area, key = completed(source, entry, "e" * 64)
+    nested = area / key / "nested"
+    nested.mkdir()
+    (nested / "unlisted.txt").write_text("not in receipt")
+    real_scandir = app.os.scandir
+    def unreadable(path):
+        if app.pathlib.Path(path) == nested:
+            raise PermissionError("synthetic directory access denied")
+        return real_scandir(path)
+    monkeypatch.setattr(app.os, "scandir", unreadable)
+    with pytest.raises(EvidenceError, match="completed_inventory_unreadable"):
+        app.check_package(cfg, mount_check=lambda *a: None)
+
+
+def test_C4_T2_job_id_must_hash_the_processing_identity(tmp_path):
+    cfg, source, p = multi_package(tmp_path)
+    entry = json.loads((p / "whitelist.json").read_bytes())["include"][0]
+    area, key = completed(source, entry, "e" * 64)
+    wrong_key = "f" * 64
+    assert wrong_key != key
+    d = (area / key).rename(area / wrong_key)
+    for path, field in [(area / "source-state.json", "pipeline_job_id"), (d / "receipt.json", "job_id")]:
+        value = json.loads(path.read_bytes())
+        target = value if field == "pipeline_job_id" else value["binding"]
+        target[field] = wrong_key
+        atomic_json(path, value)
+    with pytest.raises(EvidenceError, match="completed_receipt_binding_changed"):
         app.check_package(cfg, mount_check=lambda *a: None)

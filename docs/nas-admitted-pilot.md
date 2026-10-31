@@ -1,6 +1,6 @@
 # Admission-package NAS pilot
 
-Version: 0.0.3 · Status: candidate, not a service deployment
+Version: 0.0.4 · Status: candidate, not a service deployment
 
 ## Read-only compatibility (no execution)
 
@@ -25,7 +25,9 @@ Partial, mismatched or corrupt completion evidence is blocked,
 never treated as a new candidate. Historical package fields are not rewritten.
 
 Read-back checks the source-bound collection marker and the exact set of result
-files (receipt plus inventory); unlisted artifacts are rejected. Empty receipted
+files (receipt plus inventory); unlisted artifacts and traversal errors are
+rejected. The original job ID must equal the SHA-256 of its canonical processing
+identity, using the queue's existing rule. Empty receipted
 files are allowed, consistent with the existing delivery contract. Scope/held
 combinations are format-specific, and exclusions conservatively match NFC/case
 aliases for shared Windows/CIFS corpora. Malformed documents raise EvidenceError.

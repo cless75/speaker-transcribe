@@ -1,9 +1,9 @@
 ---
 artifact_type: review
-version: 0.0.3
+version: 0.0.5
 requested_by: owner
-reviewer: opus-read-only
-reviewer_model: opencode/claude-opus-5-5
+reviewer: terra-read-only
+reviewer_model: m4-ccr/gpt-6.1-terra
 author: codex-sol
 author_model: m4-ccr/gpt-6.1-sol
 owner_project: 801
@@ -54,6 +54,17 @@ Independent exact NAS: штатный verify_mount/UNC, manifest1dd5d710…3a3f3
 
 Все роли отработаны отдельно. Reviewer подтвердил read-only нового пути и неприкосновенность старого execution0.0.1; находок Blocker нет. Независимое семантическое принятие/production install не заявлены. При принятии C4-M1 срабатывает G4v того же reviewer.
 
+### Раунд2 — независимая проверка исправлений Terra, 31.10.2026
+
+Источник — `ses_e6e2a6444ffe0f7fIzxAFMlQSL`, модель `m4-ccr/gpt-6.1-terra`, явно выбранная владельцем. ACK45bbebe/original4ae8e6f/baseline66afe9d, R-3/канон/контракт прочитаны; G2 блокирующих противоречий нет. HEAD0cd3a44 и локальная metadata delta не подменяют code SHA. Собственные probes `C:/Users/corne/AppData/Local/Temp/opencode/terra-c4/test_terra.py`:4passed; целевые author tests43passed. Проверено сохранение old Admission0.0.1 и отказ0.0.2, held/runtime-false границы, отсутствие synthetic tree changes. ExactNAS/Linux/Hub/livefiles/human semantic acceptance независимо не проверялись.
+
+| ID / уровень | Адрес и воспроизведение / последствие |
+|---|---|
+| **C4-T1 · Major** | `src/nas_pilot.py:499–505` в45bbebe: os.walk без onerror пропускает PermissionError вложенного каталога, скрывая nested/unlisted.txt; checker возвращает reuse_completed. C4-M1 закрыта только для доступного лишнего файла, но не для ошибки чтения; требуется fail-closed traversal |
+| **C4-T2 · Major** | `src/nas_pilot.py:467–483` в45bbebe: job ID не вычисляется из processing identity по правилу pipeline_queue.py:81–83. Произвольный hexjob dddd… принят вместе с иной canonical identity; report может подтвердить неверную пару original job/identity |
+
+Terra подтвердила m2–m7 в проверенном объёме, M1 — частично; технический вердикт45bbebe **returned**. Это не verdict Opus и не formal closure. Новые T1/T2 имеют проверяемые последствия и приняты автором; новый SHA предъявляется той же Terra по её разрешённому мандату.
+
 ## Вердикты
 
 | ID | Вердикт автора / изменение |
@@ -65,10 +76,14 @@ Independent exact NAS: штатный verify_mount/UNC, manifest1dd5d710…3a3f3
 | C4-m5 | **Принято:** NFC/casefold сравнение excludes/roots/source aliases консервативно для shared CIFS-корпуса; tests3alias forms |
 | C4-m6 | **Принято:** format-specific scope/held pairs, v1толькоinitial; v2validation initial/secondary привязана к scope; positiveoldformat и negativev1/v2матрица |
 | C4-m7 | **Принято:** per-source completion_evidence_scope=adjacent-nas-only, external_completion_search=not-performed, semantic_acceptance=not-assessed; reuse несёт shared_semantic_acceptance_required. Документ не утверждает «никогда не исполнялся» из отсутствия.asr |
+| C4-T1 | **Принято:** os.walk получает onerror, любое scandir error→completed_inventory_unreadable; regression создаёт nested/unlisted.txt и моделирует PermissionError, не меняя реальные права/данные |
+| C4-T2 | **Принято:** job ID сверяется с sha256(canonical(identity)) точно по правилу PipelineQueue; completed fixture также исправлен на настоящий identity-derived ID. Regression согласованно подменяет ID в directory/state/receipt, оставляя identity прежней, и требует blocked |
 
 Все7находок приняты. Порог G4v выполнен; исправления будут предъявлены exact SHA, файл остаётся answered до G4v/P. Первичный Windows full regression после исправлений:504passed/2skip. Не закрывать review по одному этому self-check; человеческое semantic acceptance501 остаётся HELD.
 
 ### Предъявленный срез и внешний blocker G4v
+
+**Delta31.10:** владелец явно выбрал заменяющего независимого reviewer **GPT-6.1 Terra (CCR)** после недоступности Opus. Передаётся весь единственный review-файл: исходные7findings, авторские вердикты, code4ae8e6f и исправления45bbebe. Требуется новый ACK/R-3/G2 и самостоятельная проверка всех исправлений/отсутствия новых дефектов; это не вымышленное подтверждение прежнего Opus. Разрешён только read-only review/synthetic probes/NAS read-only, без runtime/ASR/job/READY/служб. Parent остаётся единственным writer; новый reviewer возвращает evidence текстом.
 
 Автор предъявил `45bbebe90faf9e00cf44b1a81f679a2b75e80bf8` тому же reviewer `ses_e7213c159ffeInKQ49YKi3Vf87`; повторный мандат включает обязательное чтение/ACK R-3 перед G4v и проверку всех7исправлений. Upstream вернул **Insufficient account funds**. Проверочный раунд не состоялся; нет ACK свежего SHA, findings closure или reviewer acceptance. Отсутствующий G4v не заменён авторским self-check, outcome/closed/P не проставлены.
 
