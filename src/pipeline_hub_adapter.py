@@ -134,43 +134,57 @@ class HubPipeline:
         raise RetryJob("progress_state_not_yet_verified")
 
     def stage(self, job, directory, check):
-        data, item = self.source(job)
-        state = self._state(job)
-        if state and state.get("status") != "queued":
-            # Do not acquire or alter claims for a terminal foreign source.
-            if (state.get("status") not in {"copying", "in-progress", "awaiting-publication"} or
-                    state.get("host") != self.claims.host or state.get("pipeline_job_id") != job["id"]):
-                raise HoldJob("source_no_longer_queued")
-            if job["id"] not in self.claims.active:
-                self.claims.ensure(job, item)
-            if not self.owned_state(job, state):
-                raise HoldJob("source_no_longer_queued")
-        self.claims.ensure(job, item)
-        metadata = self.intake.stage(job, directory, check)
-        duration = self.probe(directory / "input" / data["primary_name"])
-        # Conservative admission for source+work copy, several PCM intermediates,
-        # interval frames/OCR and retained output snapshot. Checks continue while
-        # the owned child runs; this is not permission to expand without a bound.
-        interval = max(1, float((self.cfg.get("video_frames") or {}).get("interval_sec", 60)))
-        estimate = 2 * item.size + math.ceil(duration * 256000) + math.ceil(duration / interval) * 8 * 1024**2 + 1024**3
-        if estimate > self.maximum_job:
-            raise HoldJob("media_expansion_exceeds_job_budget")
-        self.progress(job, "in-progress")
-        return {**metadata, "duration_seconds": duration, "estimated_bytes": estimate, **self.route(job)}
+        try:
+            data, item = self.source(job)
+            state = self._state(job)
+            if state and state.get("status") != "queued":
+                # Do not acquire or alter claims for a terminal foreign source.
+                if (state.get("status") not in {"copying", "in-progress", "awaiting-publication"} or
+                        state.get("host") != self.claims.host or state.get("pipeline_job_id") != job["id"]):
+                    raise HoldJob("source_no_longer_queued")
+                if job["id"] not in self.claims.active:
+                    self.claims.ensure(job, item)
+                if not self.owned_state(job, state):
+                    raise HoldJob("source_no_longer_queued")
+            self.claims.ensure(job, item)
+            metadata = self.intake.stage(job, directory, check)
+            duration = self.probe(directory / "input" / data["primary_name"])
+            # Conservative admission for source+work copy, several PCM intermediates,
+            # interval frames/OCR and retained output snapshot. Checks continue while
+            # the owned child runs; this is not permission to expand without a bound.
+            interval = max(1, float((self.cfg.get("video_frames") or {}).get("interval_sec", 60)))
+            estimate = 2 * item.size + math.ceil(duration * 256000) + math.ceil(duration / interval) * 8 * 1024**2 + 1024**3
+            if estimate > self.maximum_job:
+                raise HoldJob("media_expansion_exceeds_job_budget")
+            self.progress(job, "in-progress")
+            return {**metadata, "duration_seconds": duration, "estimated_bytes": estimate, **self.route(job)}
+        except BaseException:
+            try:
+                self.claims.abandon(job)
+            except Exception:
+                pass
+            raise
 
     def asr(self, job, directory, check):
-        data, item = self.source(job)
-        self.claims.check(job)
-        check()
-        self.gpu_check()
-        completion = directory / "engine-completion.json"
-        if completion.exists():
-            value = json.loads(completion.read_bytes())
-            if value.get("binding") != self.store.binding(job) or value.get("files") != self.store.inventory(job["id"], "work/transcripts"):
-                raise EvidenceError("engine_completion_changed")
-            return self.snapshot_result(job, directory, value, check)
-        if (directory / "result").exists():
-            raise HoldJob("unreceipted_result_requires_reconciliation")
+        try:
+            data, item = self.source(job)
+            self.claims.check(job)
+            check()
+            self.gpu_check()
+            completion = directory / "engine-completion.json"
+            if completion.exists():
+                value = json.loads(completion.read_bytes())
+                if value.get("binding") != self.store.binding(job) or value.get("files") != self.store.inventory(job["id"], "work/transcripts"):
+                    raise EvidenceError("engine_completion_changed")
+                return self.snapshot_result(job, directory, value, check)
+            if (directory / "result").exists():
+                raise HoldJob("unreceipted_result_requires_reconciliation")
+        except BaseException:
+            try:
+                self.claims.abandon(job)
+            except Exception:
+                pass
+            raise
         source = directory / "input" / data["primary_name"]
         work = no_links(directory / "work")
         local = work / "input" / data["primary_name"]

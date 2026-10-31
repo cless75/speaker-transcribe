@@ -117,7 +117,8 @@ class Pilot:
         def drive():
             return Drive(config["remote"], config.get("rclone_config"), timeout=config.get("drive_timeout", 60))
         self.claims = HubClaims(drive(), self.root / "claims",
-                                host=str((self.node.get("node") or {}).get("host_label", "node")) + "-PIPELINE")
+                                host=str((self.node.get("node") or {}).get("host_label", "node")) + "-PIPELINE",
+                                staleness_seconds=300)
         self.intake = HubNasIntake(drive(), self.nas, projects=list(config["source_paths"]),
                                    source_paths=config["source_paths"], node_config=self.node,
                                    project_delivery=config.get("project_delivery"),

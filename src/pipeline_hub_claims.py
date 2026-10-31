@@ -6,6 +6,7 @@ singleton lock; source claims remain held until verified dual publication.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
 import json
 import pathlib
@@ -32,7 +33,8 @@ class _Owned:
 
 class HubClaims:
     def __init__(self, drive, root: pathlib.Path, *, host: str, lease_seconds=1800,
-                 heartbeat_seconds=30, convergence_seconds=8, clock=time.monotonic):
+                  heartbeat_seconds=30, convergence_seconds=8, clock=time.monotonic,
+                  staleness_seconds=None):
         if (not host or lease_seconds < 60 or not 0 < heartbeat_seconds < lease_seconds / 3
                 or convergence_seconds < 0):
             raise ValueError("invalid_claim_policy")
@@ -41,7 +43,11 @@ class HubClaims:
         sync_directory(self.root.parent)
         self.lease_seconds, self.heartbeat_seconds = lease_seconds, heartbeat_seconds
         self.convergence_seconds = convergence_seconds
+        self.staleness_seconds = 120 if staleness_seconds is None else staleness_seconds
+        if self.staleness_seconds <= 0:
+            raise ValueError("invalid_staleness")
         self.active = {}
+        self._active_lock = threading.Lock()
         self.stop = threading.Event()
         self.thread = None
 
@@ -95,13 +101,15 @@ class HubClaims:
             raise HoldJob("hub_claim_lost_or_id_changed")
         owned.remote_id = remote_id
         atomic_json(owned.path, {"schema": 1, "host": self.host, "token": owned.token,
-                                "source_id": owned.item.file_id, "revision": owned.item.revision,
-                                "remote_id": remote_id})
+                                 "source_id": owned.item.file_id, "revision": owned.item.revision,
+                                 "remote_id": remote_id})
         owned.verified = self.clock()
 
     def ensure(self, job, item):
         key = job["id"]
-        if key in self.active:
+        with self._active_lock:
+            already = key in self.active
+        if already:
             self.check(job)
             return
         path = no_links(self.root / f"{key}.json")
@@ -140,35 +148,63 @@ class HubClaims:
         if value.get("claim", {}).get("pipeline_token") != owned.token or remote_id != owned.remote_id:
             raise HoldJob("hub_claim_convergence_lost")
         owned.verified = self.clock()
-        self.active[key] = owned
+        with self._active_lock:
+            self.active[key] = owned
 
     def check(self, job):
-        owned = self.active.get(job["id"])
+        with self._active_lock:
+            owned = self.active.get(job["id"])
         if owned is None or owned.failed:
             raise HoldJob("hub_ownership_unverified")
         # No network calls in the ASR consumer's fast path. A stalled heartbeat
         # expires this local proof well before the remote lease expires.
-        if self.clock() - owned.verified > min(120, self.lease_seconds / 3):
+        if self.clock() - owned.verified > self.staleness_seconds:
             raise RetryJob("hub_ownership_heartbeat_stale")
 
-    def refresh(self):
-        for owned in list(self.active.values()):
-            with owned.lock:
-                if owned.failed:
-                    continue
-                try:
-                    value, remote_id = self._remote(owned.item)
-                    if (remote_id != owned.remote_id or value.get("claim", {}).get("claimed_by") != self.host or
-                            value["claim"].get("pipeline_token") != owned.token):
-                        owned.failed = True
-                        continue
-                    self._write(owned)
-                except (EvidenceError, HoldJob, ValueError):
+    def abandon(self, job):
+        """Stop renewing a claim (e.g. after a held/retried stage)."""
+        with self._active_lock:
+            owned = self.active.pop(job["id"], None)
+        if owned is not None:
+            owned.failed = True
+
+    def _refresh_one(self, owned):
+        with owned.lock:
+            if owned.failed:
+                return
+            try:
+                value, remote_id = self._remote(owned.item)
+                if (remote_id != owned.remote_id or value.get("claim", {}).get("claimed_by") != self.host or
+                        value.get("claim", {}).get("pipeline_token") != owned.token):
                     owned.failed = True
-                except (OSError, RuntimeError):
-                    # Retain last verified time; check() becomes stale if this
-                    # persists. Never manufacture a fresh ownership proof.
+                    return
+                # If a claim has been stale for too long, stop renewing it so the
+                # next attempt re-establishes ownership instead of spamming Drive.
+                if self.clock() - owned.verified > 2 * self.staleness_seconds:
+                    owned.failed = True
+                    return
+                self._write(owned)
+            except (EvidenceError, HoldJob, ValueError):
+                owned.failed = True
+            except (OSError, RuntimeError):
+                # Retain last verified time; check() becomes stale if this
+                # persists. Never manufacture a fresh ownership proof.
+                pass
+
+    def refresh(self):
+        with self._active_lock:
+            owned_list = list(self.active.values())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(self._refresh_one, o) for o in owned_list]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    f.result()
+                except Exception:
                     pass
+        # Drop abandoned claims from the active set.
+        with self._active_lock:
+            for key in [k for k, v in self.active.items() if v.failed]:
+                del self.active[key]
 
     def start(self):
         if self.thread is not None:
@@ -188,7 +224,8 @@ class HubClaims:
                 raise HoldJob("hub_claim_changed_before_retire")
             self._write(owned, phase="done")
             owned.failed = True  # a heartbeat snapshot must not renew retired work
-            del self.active[job["id"]]
+            with self._active_lock:
+                self.active.pop(job["id"], None)
 
     def close(self):
         self.stop.set()
