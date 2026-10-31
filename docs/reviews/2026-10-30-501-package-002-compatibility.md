@@ -1,13 +1,13 @@
 ---
 artifact_type: review
-version: 0.0.5
+version: 0.0.6
 requested_by: owner
 reviewer: terra-read-only
 reviewer_model: m4-ccr/gpt-6.1-terra
 author: codex-sol
 author_model: m4-ccr/gpt-6.1-sol
 owner_project: 801
-subject: "Read-only package501 0.0.2 compatibility, code4ae8e6f"
+subject: "Read-only package501 0.0.2: initial4ae8e6f, fixes9245f7a"
 roles: [adversary, operator, regression, gate-keeper]
 status: answered
 opened: 2026-10-30
@@ -19,6 +19,8 @@ return_reason:
 ---
 
 # 501 package0.0.2 — независимый review
+
+**31.10.2026 · Технический итог:** G4v Terra на9245f7a подтвердил исправления всехMajor, новыхfindings нет;9findings приняты/исправлены, Windows506/2skip и Linux508passed автора. **Формальное закрытие:** answered, не closed; P/общий ds doctor0 не подтверждены из-за2ошибок реестра. Исходный запрос/раунды сохранены ниже; technical verdict не разрешает runtime/semantic acceptance.
 
 ## Запрос
 
@@ -65,6 +67,14 @@ Independent exact NAS: штатный verify_mount/UNC, manifest1dd5d710…3a3f3
 
 Terra подтвердила m2–m7 в проверенном объёме, M1 — частично; технический вердикт45bbebe **returned**. Это не verdict Opus и не formal closure. Новые T1/T2 имеют проверяемые последствия и приняты автором; новый SHA предъявляется той же Terra по её разрешённому мандату.
 
+### Раунд3 — G4v Terra, 31.10.2026
+
+Тот же reviewer `ses_e6e2a6444ffe0f7fIzxAFMlQSL` ACK exact `9245f7aada72e433b7245673a4848b7e67931af9`, перечитал R-3/канон, G2 препятствий нет. **Технический вердикт: исправления подтверждены**, C4-M1/T1/T2 закрыты в проверенном объёме, новых находок того же класса нет; m2–m7 подтверждены без выявленной регрессии.
+
+Собственный `C:/Users/corne/AppData/Local/Temp/opencode/terra-c4/test_terra_g4v.py` + целевой авторский набор:49passed/exit0 с PYTHONDONTWRITEBYTECODE=1/-p no:cacheprovider. M1: доступный extra file→nas_unlisted_artifacts. T1: положительный reuse с правильным derived jobID, затем PermissionError root и nested→completed_inventory_unreadable (не маскируется T2). T2: изменённый engine при прежнем ID и согласованно подменённые directory/state/receipt IDs→blocked; эквивалентная identity с иным JSON whitespace→accepted по canonical value. Положительные synthetic tree snapshots до/после совпадают.
+
+Terra не проверяла независимо exact NAS/Linux/fullWindows/Hub/livefiles/human semantic acceptance; не запускала real ASR/preflight/run-pilot. Это технический G4v, не полный production/human acceptance и не закрытие P/общего реестра.
+
 ## Вердикты
 
 | ID | Вердикт автора / изменение |
@@ -80,6 +90,8 @@ Terra подтвердила m2–m7 в проверенном объёме, M1 
 | C4-T2 | **Принято:** job ID сверяется с sha256(canonical(identity)) точно по правилу PipelineQueue; completed fixture также исправлен на настоящий identity-derived ID. Regression согласованно подменяет ID в directory/state/receipt, оставляя identity прежней, и требует blocked |
 
 Все7находок приняты. Порог G4v выполнен; исправления будут предъявлены exact SHA, файл остаётся answered до G4v/P. Первичный Windows full regression после исправлений:504passed/2skip. Не закрывать review по одному этому self-check; человеческое semantic acceptance501 остаётся HELD.
+
+**Актуальный итог31.10:** приняты и исправлены9findings (исходные1Major+6Minor, затем2Major Terra); последний G4v на9245f7a не дал новыхfindings и подтвердил все Major. Авторский финальный regression того жеcodeSHA: Windows506passed/2skip, Linux508passed; два exactNAS checks accepted/reuse40outputs/secondheld, protected501livefiles unchanged. Technical compatibility ACK может ссылаться на этот reviewer-verdict с ограничениями. `status=answered`, `closed/outcome` не заполнены: formal P/closure не объявлены, поскольку ds doctor проверил2526records и завершился2ошибками общего реестра (amend отменённого решения2026-09-30-first-cohort-named-stream-1; INDEX.md drift). Чужие записи/индекс не правились ради закрытия этого review; operational/semantic допуски не расширены.
 
 ### Предъявленный срез и внешний blocker G4v
 
