@@ -67,6 +67,8 @@ class HubClaims:
         if not found[0].get("ID"):
             raise EvidenceError("hub_claim_id_missing")
         raw = self.drive.call("cat", self.drive.path(item.project, self._relative(item)))
+        if not raw:
+            return {}, None
         if len(raw) > 65536:
             raise EvidenceError("oversized_hub_claim")
         value = json.loads(raw)
