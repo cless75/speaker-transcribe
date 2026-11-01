@@ -254,7 +254,7 @@ class MountDrive(Drive):
                 sp = self.mount / src.lstrip("/")
             dp.parent.mkdir(parents=True, exist_ok=True)
             import shutil as _sh
-            _sh.copy2(sp, dp)
+            _sh.copyfile(sp, dp)
             return b""
         if verb == "copy":
             # rclone copy src dst with filters; simplify to recursive copy
@@ -280,7 +280,7 @@ class MountDrive(Drive):
                         continue
                     target = dst / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    _sh.copy2(item, target)
+                    _sh.copyfile(item, target)
             return b""
         if verb in ("delete", "deletefile"):
             path = pathlib.Path(args[1])
@@ -310,7 +310,7 @@ class MountDrive(Drive):
             local = target.joinpath(*rel.parts)
             local.parent.mkdir(parents=True, exist_ok=True)
             import shutil as _sh
-            _sh.copy2(path, local)
+            _sh.copyfile(path, local)
 
 
 class MountDrive(Drive):
@@ -391,7 +391,7 @@ class MountDrive(Drive):
                 sp = self.mount / src.lstrip("/")
             dp.parent.mkdir(parents=True, exist_ok=True)
             import shutil as _sh
-            _sh.copy2(sp, dp)
+            _sh.copyfile(sp, dp)
             return b""
         if verb == "copy":
             # rclone copy src dst with filters; simplify to recursive copy
@@ -417,7 +417,7 @@ class MountDrive(Drive):
                         continue
                     target = dst / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    _sh.copy2(item, target)
+                    _sh.copyfile(item, target)
             return b""
         if verb in ("delete", "deletefile"):
             path = pathlib.Path(args[1])
@@ -447,7 +447,7 @@ class MountDrive(Drive):
             local = target.joinpath(*rel.parts)
             local.parent.mkdir(parents=True, exist_ok=True)
             import shutil as _sh
-            _sh.copy2(path, local)
+            _sh.copyfile(path, local)
 
 
 def projects(root: list[dict]) -> list[str]:
