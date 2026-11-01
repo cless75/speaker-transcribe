@@ -115,6 +115,10 @@ class Pilot:
                            source=nas["source"], collection_id=nas["collection_id"], marker=nas["marker"],
                            minimum_free=config["nas_minimum_free"])
         def drive():
+            mount = config.get("mount_path")
+            if mount:
+                from hub_intake import MountDrive
+                return MountDrive(mount, timeout=config.get("drive_timeout", 60))
             return Drive(config["remote"], config.get("rclone_config"), timeout=config.get("drive_timeout", 60))
         self.claims = HubClaims(drive(), self.root / "claims",
                                 host=str((self.node.get("node") or {}).get("host_label", "node")) + "-PIPELINE",
