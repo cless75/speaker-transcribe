@@ -135,6 +135,11 @@ class HubNasIntake:
         item = MediaFile(**source, marker=False)
         if item.project not in self.projects:
             raise EvidenceError("project_outside_pilot_scope")
+        # A stricter privacy policy is a hard fence, not a relabelling of an
+        # old job: it must never publish or stage an old dual-destination job.
+        if (self.project_delivery.get(item.project) == "hub-only" and
+                data.get("delivery_policy", "hub-nas") != "hub-only"):
+            raise HoldJob("hub_only_policy_conflicts_with_frozen_job")
         allowed = self.source_paths.get(item.project) if self.source_paths is not None else None
         if allowed is not None and item.path not in allowed:
             raise EvidenceError("source_outside_pilot_scope")

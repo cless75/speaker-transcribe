@@ -148,7 +148,8 @@ def test_policy_changes_processing_identity_and_cannot_relabel_legacy(tmp_path):
         intake.project_delivery["Example"] = "hub-only"
         only = intake.admit_exact(q, "Example", "voice.m4a")
         assert dual != only
-        intake._source(q.get(dual))  # old frozen jobs still validate
+        with pytest.raises(HoldJob, match="hub_only_policy_conflicts"):
+            intake._source(q.get(dual))  # preserve identity; never run with the wrong destination
         intake._source(q.get(only))
         job = q.get(dual)
         payload = json.loads(job["payload"])
@@ -156,5 +157,22 @@ def test_policy_changes_processing_identity_and_cannot_relabel_legacy(tmp_path):
         job["payload"] = json.dumps(payload)
         with pytest.raises(EvidenceError, match="processing_identity"):
             intake._source(job)
+    finally:
+        q.close()
+
+
+def test_hub_only_policy_fences_legacy_stage_before_nas_or_source_io(tmp_path, monkeypatch):
+    drive = MemoryDrive({"Example/voice.m4a": b"synthetic"})
+    area = nas_area(tmp_path)
+    intake = adapter(tmp_path, drive, area)
+    q = PipelineQueue(tmp_path / "queue.db")
+    try:
+        key = intake.admit_exact(q, "Example", "voice.m4a")
+        intake.project_delivery["Example"] = "hub-only"
+        monkeypatch.setattr(area, "guard", lambda: pytest.fail("NAS must not be touched"))
+        monkeypatch.setattr(drive, "call", lambda *a: pytest.fail("source must not be read"))
+        with pytest.raises(HoldJob, match="hub_only_policy_conflicts"):
+            intake.stage(q.get(key), tmp_path / "job", lambda: None)
+        assert not (tmp_path / "job").exists()
     finally:
         q.close()
