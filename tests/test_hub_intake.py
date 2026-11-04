@@ -47,6 +47,21 @@ def test_mount_metadata_failure_is_not_silent(tmp_path, monkeypatch):
         mount.list("34", recursive=True)
 
 
+def test_mount_bulk_sync_uses_remote_filtered_marker_copy(tmp_path, monkeypatch):
+    calls = []
+    def record(self, *args):
+        calls.append((self.remote, args))
+        return b""
+    monkeypatch.setattr(Drive, "call", record)
+    mount = hub_intake.MountDrive(tmp_path, remote="gdrive:Hub")
+    cache = tmp_path / "cache"
+    mount.states_bulk("34", cache)
+    assert calls == [("gdrive:Hub", ("copy", "gdrive:Hub/34", str(cache),
+                       "--filter", "- /sessions/**", "--filter", "- /profiles/**",
+                       "--filter", "+ *.state.json", "--filter", "+ **/*.state.json",
+                       "--filter", "- **"))]
+
+
 def test_entire_hub_includes_completed_and_named_projects():
     root = [{"Name": "506", "IsDir": True}, {"Name": "Example-Course", "IsDir": True},
             {"Name": "_meta", "IsDir": True}, {"Name": "_inbox", "IsDir": True},

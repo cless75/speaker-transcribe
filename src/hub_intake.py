@@ -267,10 +267,9 @@ class MountDrive(Drive):
             return {"status": "unknown", "detail": type(exc).__name__}
 
     def states_bulk(self, project: str, target: pathlib.Path) -> None:
-        target.mkdir(parents=True, exist_ok=True)
-        # FUSE mount: only create a lock file, do not bulk-copy state files.
-        lock = target / ".scan.lock"
-        lock.touch(exist_ok=True)
+        # pending_inputs validates cached markers against remote MD5 metadata.
+        # Copy only markers via the same backend that supplied the inventory.
+        self.metadata_drive.states_bulk(project, target)
 
 
 def projects(root: list[dict]) -> list[str]:
