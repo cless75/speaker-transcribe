@@ -134,6 +134,8 @@ def required_destinations(job):
     """Frozen job policy; missing field preserves the original dual contract."""
     payload = json.loads(job["payload"])
     policy = payload.get("delivery_policy", "hub-nas")
+    if policy == "nas-only" and payload.get("adapter") == "nas-inbox-v1":
+        return ("nas",)
     if policy not in ("hub-only", "hub-nas"):
         raise EvidenceError("invalid_delivery_policy")
     if policy == "hub-only" and payload.get("adapter") != "hub-nas-v1":

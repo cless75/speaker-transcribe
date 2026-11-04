@@ -1,0 +1,16 @@
+[Unit]
+Description=Offline NAS Inbox ASR for %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=%i
+# Node-local drop-in supplies an immutable release and private config.
+Restart=no
+TimeoutStopSec=infinity
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
