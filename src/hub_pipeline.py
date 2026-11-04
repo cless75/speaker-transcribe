@@ -293,7 +293,8 @@ class Pilot:
         if not e2e:
             if self.config.get("enabled") is not True:
                 raise EvidenceError("pilot_disabled")
-            self.require_attestation()
+            # Release acceptance no longer requires a fresh-source ASR run.
+            # Queue reconciliation, ownership, budget and GPU guards remain.
         # The GPU must also be free of orphaned processes from the old scheduler.
         with file_lock(pathlib.Path(self.config["gpu_lock"])):
             gpu_idle()

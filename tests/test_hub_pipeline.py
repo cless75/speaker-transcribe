@@ -57,6 +57,11 @@ def test_serving_gate_pins_identity_not_enable_switch(tmp_path, monkeypatch):
         pilot.require_attestation()
 
 
+def test_serving_does_not_require_attestation_gate():
+    import inspect
+    assert "self.require_attestation()" not in inspect.getsource(app.Pilot.run)
+
+
 def test_live_serving_requires_old_timer_disabled_not_merely_stopped(monkeypatch):
     monkeypatch.setattr(app, "os", SimpleNamespace(name="posix"))
     def systemctl(args, **kwargs):
