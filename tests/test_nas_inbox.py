@@ -96,3 +96,18 @@ def test_archive_conflict_never_removes_source(tmp_path):
 def test_nas_only_not_allowed_for_arbitrary_adapter():
     with pytest.raises(EvidenceError):
         required_destinations({'payload':json.dumps({'adapter':'hub-nas-v1','delivery_policy':'nas-only'})})
+
+
+def test_mount_guard_allows_autofs_overlay_but_checks_actual_cifs(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import nas_inbox
+    _,p,r,_=setup(tmp_path)
+    try:
+        p.config.update(test_local_filesystem=False,mount_source='//nas/Archive',nas_minimum_free=0)
+        entries=[{'target':str(tmp_path),'source':'systemd-1','fstype':'autofs'},
+                 {'target':str(tmp_path),'source':'//nas/Archive','fstype':'cifs'}]
+        monkeypatch.setattr(nas_inbox.subprocess,'run',lambda *a,**k:SimpleNamespace(stdout=json.dumps({'filesystems':entries})))
+        p.guard()
+        entries[1]['source']='//wrong/share'
+        with pytest.raises(HoldJob,match='mount_identity'):p.guard()
+    finally:r.close()

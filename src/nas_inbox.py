@@ -115,7 +115,7 @@ class NasInboxPipeline(HubPipeline):
             return
         r = subprocess.run(['findmnt', '--json', '--target', str(mount), '--output', 'TARGET,SOURCE,FSTYPE'],
                            capture_output=True, text=True, timeout=15, check=True)
-        entries = json.loads(r.stdout)['filesystems']
+        entries = [x for x in json.loads(r.stdout)['filesystems'] if x['fstype'] != 'autofs']
         if len(entries) != 1 or entries[0]['target'] != str(mount) or entries[0]['source'] != self.config['mount_source'] or entries[0]['fstype'] != 'cifs':
             raise HoldJob('nas_mount_identity_changed')
         if shutil.disk_usage(mount).free < self.config['nas_minimum_free']:
