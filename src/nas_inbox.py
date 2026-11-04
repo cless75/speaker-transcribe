@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import unicodedata
+import uuid
 from types import SimpleNamespace
 
 from hub_pipeline import implementation
@@ -156,7 +157,10 @@ class NasInboxPipeline(HubPipeline):
         self.guard()
         data, _ = self.source(job)
         path = pathlib.Path(self.config['heavy_root']) / '_801-claims' / (hashlib.sha256(data['submission'].encode()).hexdigest() + '.json')
-        if not path.is_file() or json.loads(path.read_bytes()) != self.store.binding(job):
+        local = no_links(self.store.directory(job['id']) / 'source-ownership.json')
+        if (not local.is_file() or not path.is_file() or
+                json.loads(path.read_bytes()) != json.loads(local.read_bytes()) or
+                json.loads(local.read_bytes()).get('binding') != self.store.binding(job)):
             raise HoldJob('nas_source_claim_changed')
 
     def acquire(self, job):
@@ -165,9 +169,14 @@ class NasInboxPipeline(HubPipeline):
         folder = pathlib.Path(self.config['heavy_root']) / '_801-claims'
         no_links(folder).mkdir(exist_ok=True)
         path = folder / (hashlib.sha256(data['submission'].encode()).hexdigest() + '.json')
+        local = no_links(self.store.directory(job['id']) / 'source-ownership.json')
+        if not local.exists():
+            atomic_json(local, {'binding': self.store.binding(job), 'token': uuid.uuid4().hex,
+                               'state_root': str(self.store.root)})
+        ownership = json.loads(local.read_bytes())
         if not path.exists():
             with path.open('x', encoding='utf8') as out:
-                json.dump(self.store.binding(job), out)
+                json.dump(ownership, out)
                 out.flush()
                 os.fsync(out.fileno())
         self.check(job)
@@ -211,7 +220,15 @@ class NasInboxPipeline(HubPipeline):
         self.check(job)
         data, _ = self.source(job)
         archive = self.archive(job)
-        archive.mkdir(parents=True, exist_ok=True)
+        binding = archive / 'archive-binding.json'
+        if archive.exists():
+            if not binding.is_file() or json.loads(binding.read_bytes()) != self.store.binding(job):
+                raise HoldJob('archive_not_owned')
+        else:
+            archive.mkdir(parents=True, exist_ok=False)
+            # Persist ownership before any copies; an interrupted/unbound folder
+            # requires reconciliation, never an automatic adoption.
+            atomic_json(binding, self.store.binding(job))
         receipt = self.store.read(job, 'ready')
         if receipt is None:
             raise HoldJob('missing_asr_receipt')
@@ -245,6 +262,8 @@ class NasInboxPipeline(HubPipeline):
         self.check(job)
         data, _ = self.source(job)
         archive = self.archive(job)
+        if json.loads((archive / 'archive-binding.json').read_bytes()) != self.store.binding(job):
+            raise HoldJob('archive_not_owned')
         state = json.loads((archive / 'session.json').read_bytes())
         if state['binding'] != self.store.binding(job) or inventory(archive / 'source') != data['files']:
             raise HoldJob('archive_identity_changed')

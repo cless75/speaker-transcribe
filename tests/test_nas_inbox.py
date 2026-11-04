@@ -111,3 +111,51 @@ def test_mount_guard_allows_autofs_overlay_but_checks_actual_cifs(tmp_path, monk
         entries[1]['source']='//wrong/share'
         with pytest.raises(HoldJob,match='mount_identity'):p.guard()
     finally:r.close()
+
+
+def test_same_job_in_other_state_root_cannot_adopt_source_claim(tmp_path):
+    source,p,r,_=setup(tmp_path)
+    try:
+        p.discover(r.queue)
+        job=r.queue.get(r.queue.db.execute('select id from pipeline_jobs').fetchone()[0])
+        p.acquire(job)
+        other=NasInboxPipeline(p.config,ReceiptStore(tmp_path/'other-state'),p.cfg,p.config_path)
+        with pytest.raises(HoldJob,match='source_claim_changed'):
+            other.acquire(job)
+        p.check(job)
+    finally:r.close()
+
+
+def test_publish_resume_after_source_rename_does_not_repeat_asr(tmp_path, monkeypatch):
+    import nas_inbox
+    source,p,r,calls=setup(tmp_path)
+    try:
+        p.discover(r.queue)
+        job=r.queue.get(r.queue.db.execute('select id from pipeline_jobs').fetchone()[0])
+        assert r.tick('discovered')==r.tick('ready')=='finished'
+        original=nas_inbox.atomic_json
+        def interrupt(path,value):
+            if path.name=='session.json':raise OSError('interrupted after rename')
+            return original(path,value)
+        monkeypatch.setattr(nas_inbox,'atomic_json',interrupt)
+        with pytest.raises(OSError,match='after rename'):
+            p.publish(job,p.store.directory(job['id']),lambda:None)
+        assert not source.exists()
+        monkeypatch.setattr(nas_inbox,'atomic_json',original)
+        assert p.publish(job,p.store.directory(job['id']),lambda:None)['deliveries']['nas']['verified']
+        assert p.verify_completed(job,None,lambda:None)
+        assert len(calls)==1
+    finally:r.close()
+
+
+def test_corrupt_archived_result_fails_verification(tmp_path):
+    source,p,r,_=setup(tmp_path)
+    try:
+        p.discover(r.queue)
+        job=r.queue.get(r.queue.db.execute('select id from pipeline_jobs').fetchone()[0])
+        assert r.tick('discovered')==r.tick('ready')==r.tick('publish_pending')=='finished'
+        artifact=next((p.archive(job)/'transcripts').glob('*transcript.md'))
+        artifact.write_text('corrupt')
+        with pytest.raises(HoldJob,match='archived_result_changed'):
+            p.verify_completed(job,None,lambda:None)
+    finally:r.close()
