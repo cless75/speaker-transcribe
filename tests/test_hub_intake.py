@@ -17,6 +17,36 @@ def entry(path, *, ident="file-1", size=4, md5=None):
             "Hashes": {"md5": md5} if md5 else {}}
 
 
+def test_mount_discovery_uses_remote_metadata_without_reading_files(tmp_path, monkeypatch):
+    media = tmp_path / "meeting.m4a"
+    media.write_bytes(b"sensitive media")
+    expected = [entry("meeting.m4a", ident="drive-id", md5="a" * 32)]
+    calls = []
+
+    def metadata_list(self, *parts, recursive=False):
+        calls.append((self.remote, self.config, parts, recursive))
+        return expected
+
+    def no_content_reads(self):
+        raise AssertionError("listing must not read FUSE content")
+
+    monkeypatch.setattr(Drive, "list", metadata_list)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", no_content_reads)
+    mount = hub_intake.MountDrive(tmp_path, remote="gdrive:Hub", config="rclone.conf")
+    assert mount.list("34", recursive=True) == expected
+    assert calls == [("gdrive:Hub", "rclone.conf", ("34",), True)]
+
+
+def test_mount_metadata_failure_is_not_silent(tmp_path, monkeypatch):
+    def fail(*args, **kwargs):
+        raise hub_intake.DriveTransient("quota")
+
+    monkeypatch.setattr(Drive, "list", fail)
+    mount = hub_intake.MountDrive(tmp_path, remote="gdrive:Hub")
+    with pytest.raises(hub_intake.DriveTransient, match="quota"):
+        mount.list("34", recursive=True)
+
+
 def test_entire_hub_includes_completed_and_named_projects():
     root = [{"Name": "506", "IsDir": True}, {"Name": "Example-Course", "IsDir": True},
             {"Name": "_meta", "IsDir": True}, {"Name": "_inbox", "IsDir": True},

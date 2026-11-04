@@ -118,7 +118,8 @@ class Pilot:
             mount = config.get("mount_path")
             if mount:
                 from hub_intake import MountDrive
-                return MountDrive(mount, timeout=config.get("drive_timeout", 60))
+                return MountDrive(mount, timeout=config.get("drive_timeout", 60),
+                                  remote=config["remote"], config=config.get("rclone_config"))
             return Drive(config["remote"], config.get("rclone_config"), timeout=config.get("drive_timeout", 60))
         self.claims = HubClaims(drive(), self.root / "claims",
                                 host=str((self.node.get("node") or {}).get("host_label", "node")) + "-PIPELINE",

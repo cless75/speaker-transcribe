@@ -183,7 +183,7 @@ class MountDrive(Drive):
     The mount must already be available at *mount_path* (e.g. /home/clessd/hub).
     """
 
-    def __init__(self, mount_path, timeout: int = 180):
+    def __init__(self, mount_path, timeout: int = 180, *, remote: str, config: str | None = None):
         self.mount = pathlib.Path(mount_path)
         if not self.mount.is_dir():
             raise ValueError("mount_path must be an existing directory")
@@ -191,6 +191,7 @@ class MountDrive(Drive):
         self.config = None
         self.timeout = timeout
         self._last_call = 0.0
+        self.metadata_drive = Drive(remote, config, timeout=timeout)
 
     def path(self, *parts: str) -> str:
         return str(self.mount.joinpath(*(p for part in parts for p in safe_parts(part))))
@@ -199,46 +200,9 @@ class MountDrive(Drive):
         pass
 
     def list(self, *parts: str, recursive: bool = False) -> list[dict]:
-        target = pathlib.Path(self.path(*parts)) if parts else self.mount
-        output = []
-        if not target.exists():
-            return output
-        if not recursive:
-            for entry in sorted(target.iterdir(), key=lambda p: p.name):
-                if entry.is_dir():
-                    output.append({"Name": entry.name, "Path": entry.name, "IsDir": True})
-                else:
-                    try:
-                        st = entry.stat()
-                        import hashlib as _h
-                        md5 = _h.md5(entry.read_bytes()).hexdigest() if entry.stat().st_size < 64 * 1024 * 1024 else ""
-                    except OSError:
-                        st = None
-                        md5 = ""
-                    output.append({"Name": entry.name, "Path": entry.name, "IsDir": False,
-                                   "Size": st.st_size if st else 0,
-                                   "ModTime": dt.datetime.fromtimestamp(st.st_mtime, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if st else "",
-                                   "ID": entry.name,
-                                   "Hashes": {"md5": md5}})
-            return output
-        # recursive
-        for dirpath, dirnames, filenames in os.walk(target):
-            dirnames[:] = [d for d in dirnames if d not in ("sessions", "profiles")]
-            rel = pathlib.Path(dirpath).relative_to(target)
-            for name in filenames:
-                full = pathlib.Path(dirpath) / name
-                try:
-                    st = full.stat()
-                    md5 = hashlib.md5(full.read_bytes()).hexdigest() if st.st_size < 64 * 1024 * 1024 else ""
-                except OSError:
-                    st = None
-                    md5 = ""
-                output.append({"Name": name, "Path": (rel / name).as_posix() if str(rel) != "." else name,
-                               "IsDir": False, "Size": st.st_size if st else 0,
-                               "ModTime": dt.datetime.fromtimestamp(st.st_mtime, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if st else "",
-                               "ID": (rel / name).as_posix() if str(rel) != "." else name,
-                               "Hashes": {"md5": md5}})
-        return output
+        # FUSE exposes neither the Drive object ID nor its MD5. Ask Drive for
+        # metadata instead of reading arbitrary file contents to synthesize it.
+        return self.metadata_drive.list(*parts, recursive=recursive)
 
     def call(self, *args: str) -> bytes:
         verb = args[0] if args else ""
