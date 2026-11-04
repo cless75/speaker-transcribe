@@ -62,6 +62,31 @@ def test_mount_bulk_sync_uses_remote_filtered_marker_copy(tmp_path, monkeypatch)
                        "--filter", "- **"))]
 
 
+@pytest.mark.parametrize("retry_after,expected", [(None, 300), (30, 300), (600, 600)])
+def test_drive_quota_waits_at_least_cooldown(monkeypatch, retry_after, expected):
+    from types import SimpleNamespace
+    monkeypatch.delenv("DRIVE_RATE_LIMIT_COOLDOWN", raising=False)
+    drive = Drive("gdrive:Hub")
+    drive._max_retries = 2
+    monkeypatch.setattr(drive, "_pace", lambda: None)
+    waits = []
+    monkeypatch.setattr(hub_intake.time, "sleep", waits.append)
+    stderr = b"rateLimitExceeded"
+    if retry_after is not None:
+        stderr += f" Retry-After: {retry_after}".encode()
+    responses = iter([SimpleNamespace(returncode=1, stderr=stderr),
+                      SimpleNamespace(returncode=0, stdout=b"ok")])
+    monkeypatch.setattr(hub_intake.subprocess, "run", lambda *a, **kw: next(responses))
+    assert drive.call("lsjson", "gdrive:Hub") == b"ok"
+    assert waits == [expected]
+
+
+def test_drive_rejects_nonpositive_rate_limit_cooldown(monkeypatch):
+    monkeypatch.setenv("DRIVE_RATE_LIMIT_COOLDOWN", "0")
+    with pytest.raises(ValueError, match="COOLDOWN"):
+        Drive("gdrive:Hub")
+
+
 def test_entire_hub_includes_completed_and_named_projects():
     root = [{"Name": "506", "IsDir": True}, {"Name": "Example-Course", "IsDir": True},
             {"Name": "_meta", "IsDir": True}, {"Name": "_inbox", "IsDir": True},

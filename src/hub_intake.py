@@ -111,6 +111,9 @@ class Drive:
         self._max_retries = int(os.environ.get("DRIVE_MAX_RETRIES", "6"))
         self._base_backoff = float(os.environ.get("DRIVE_BASE_BACKOFF", "2.0"))
         self._max_backoff = float(os.environ.get("DRIVE_MAX_BACKOFF", "120.0"))
+        self._rate_limit_cooldown = float(os.environ.get("DRIVE_RATE_LIMIT_COOLDOWN", "300.0"))
+        if self._rate_limit_cooldown <= 0:
+            raise ValueError("DRIVE_RATE_LIMIT_COOLDOWN must be positive")
 
     def path(self, *parts: str) -> str:
         return "/".join((self.remote, *(p for part in parts for p in safe_parts(part))))
@@ -143,8 +146,11 @@ class Drive:
             last_exc = err
             if isinstance(err, DrivePermanent):
                 raise err
-            sleep_for = err.retry_after if isinstance(err, DriveRateLimited) and err.retry_after else None
-            if sleep_for is None:
+            if isinstance(err, DriveRateLimited):
+                # Retry-After is a minimum, not permission to retry sooner than
+                # our cooldown; quota can be shared with other node services.
+                sleep_for = max(self._rate_limit_cooldown, err.retry_after or 0)
+            else:
                 sleep_for = min(self._max_backoff, self._base_backoff * (2 ** attempt) * (0.8 + random.random() * 0.4))
             time.sleep(sleep_for)
         raise last_exc or DriveTransient(f"rclone {args[0]} failed after retries")
