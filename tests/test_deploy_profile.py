@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 import deploy_profile.profile as profile
@@ -20,9 +18,7 @@ def test_environment_override_selects_deployment_profile(monkeypatch):
     assert profile.is_linux_current()
 
 
-def test_posix_lock_rejects_second_nonblocking_owner(tmp_path):
-    if os.name != "posix":
-        pytest.skip("fcntl behavior is covered on Linux")
+def test_lock_rejects_second_nonblocking_owner(tmp_path):
     lock = tmp_path / "worker.lock"
     with exclusive_lock(lock):
         with pytest.raises(LockError, match="another process"):
