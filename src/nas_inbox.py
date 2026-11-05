@@ -118,14 +118,25 @@ def copy_verified(source, target, expected, check):
         return
     temp = target.with_name('.copy-' + target.name)
     if temp.exists():
-        raise HoldJob('partial_copy_requires_reconciliation')
+        # A crash can leave a fully flushed copy. Never discard or overwrite a
+        # partial/conflicting file; promote only an exact receipted match.
+        if temp.stat().st_size != expected['size'] or digest(temp, strict_snapshot=False) != expected['sha256']:
+            raise HoldJob('partial_copy_requires_reconciliation')
+        check()
+        if target.exists():
+            raise HoldJob('copy_destination_appeared')
+        os.replace(temp, target)
+        sync_directory(target.parent)
+        return
     with source.open('rb') as inp, temp.open('xb') as out:
         for block in iter(lambda: inp.read(1024 * 1024), b''):
             check()
             out.write(block)
         out.flush()
         os.fsync(out.fileno())
-    if temp.stat().st_size != expected['size'] or digest(temp) != expected['sha256']:
+    # CIFS may refresh inode/timestamps after flush. This is our exclusively
+    # created temporary file: its receipted length and content remain decisive.
+    if temp.stat().st_size != expected['size'] or digest(temp, strict_snapshot=False) != expected['sha256']:
         raise HoldJob('copy_checksum_mismatch')
     os.replace(temp, target)
     sync_directory(target.parent)

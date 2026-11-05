@@ -3,7 +3,7 @@ import pathlib
 
 import pytest
 
-from nas_inbox import NasInboxPipeline, inventory, select_input_plan, select_primary
+from nas_inbox import NasInboxPipeline, copy_verified, inventory, select_input_plan, select_primary
 from pipeline_queue import PipelineQueue
 from pipeline_runtime import HoldJob, StageRunner
 from pipeline_storage import ReceiptStore, required_destinations, EvidenceError
@@ -71,6 +71,38 @@ def test_prior_results_hold_whole_meeting(tmp_path):
 def test_no_multiple_audio_jobs(tmp_path):
     with pytest.raises(HoldJob,match='ambiguous'):
         select_primary([{'path':'a.m4a'},{'path':'b.m4a'}])
+
+
+def test_verified_interrupted_copy_is_resumed_without_overwrite(tmp_path):
+    import hashlib
+    source=tmp_path/'source'; source.write_bytes(b'payload')
+    target=tmp_path/'out'/'result'; target.parent.mkdir()
+    temp=target.with_name('.copy-'+target.name); temp.write_bytes(b'payload')
+    expected={'size':7,'sha256':hashlib.sha256(b'payload').hexdigest()}
+    copy_verified(source,target,expected,lambda:None)
+    assert target.read_bytes() == b'payload' and not temp.exists()
+
+
+def test_conflicting_interrupted_copy_is_preserved(tmp_path):
+    import hashlib
+    source=tmp_path/'source'; source.write_bytes(b'payload')
+    target=tmp_path/'out'/'result'; target.parent.mkdir()
+    temp=target.with_name('.copy-'+target.name); temp.write_bytes(b'corrupt')
+    expected={'size':7,'sha256':hashlib.sha256(b'payload').hexdigest()}
+    with pytest.raises(HoldJob,match='partial_copy_requires_reconciliation'):
+        copy_verified(source,target,expected,lambda:None)
+    assert temp.read_bytes() == b'corrupt' and not target.exists()
+
+
+def test_interrupted_copy_is_not_promoted_if_ownership_lost(tmp_path):
+    import hashlib
+    source=tmp_path/'source'; source.write_bytes(b'payload')
+    target=tmp_path/'result'; temp=tmp_path/'.copy-result'; temp.write_bytes(b'payload')
+    expected={'size':7,'sha256':hashlib.sha256(b'payload').hexdigest()}
+    def lost(): raise HoldJob('lease_lost')
+    with pytest.raises(HoldJob,match='lease_lost'):
+        copy_verified(source,target,expected,lost)
+    assert temp.exists() and not target.exists()
 
 
 def test_vtt_has_priority_over_tracks_and_mixed_audio():
