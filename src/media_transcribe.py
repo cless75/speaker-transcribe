@@ -3101,6 +3101,8 @@ def resolve_speaker_turns(audio_path: str, payload: dict, job_root: pathlib.Path
             }
             return turns, diarization_meta, zoom_meta
         except Exception as exc:
+            if payload.get('zoom_vtt_required'):
+                raise RuntimeError('required_zoom_vtt_parse_failed') from exc
             zoom_meta["status"] = "fallback"
             zoom_meta["reason"] = "zoom_vtt_parse_failed"
             zoom_meta["error"] = str(exc)

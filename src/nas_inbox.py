@@ -18,6 +18,7 @@ import pathlib
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -93,10 +94,28 @@ def select_input_plan(files):
         return {'mode': 'zoom_vtt', 'primary_name': primary, 'sidecars': vtts, 'tracks': []}
     if len(vtts) > 1:
         raise HoldJob('ambiguous_zoom_vtt')
-    # A single participant file is not a meeting-level multi-track export.
-    if len(tracks) >= 2:
+    # Even a single participant export must never silently choose mixed audio.
+    if tracks:
         return {'mode': 'participant_tracks', 'primary_name': primary, 'sidecars': [], 'tracks': sorted(tracks)}
     return {'mode': 'mixed_diarization', 'primary_name': primary, 'sidecars': [], 'tracks': []}
+
+
+def historical_jobs(paths):
+    """Read-only completion/claim history across prior consumers; fail closed."""
+    found = []
+    for name in paths:
+        path = no_links(pathlib.Path(name))
+        if not path.is_file():
+            raise HoldJob('history_queue_missing')
+        try:
+            db = sqlite3.connect(path.absolute().as_uri() + '?mode=ro', uri=True, timeout=5)
+            try:
+                found.extend(json.loads(r[0]) for r in db.execute('select payload from pipeline_jobs'))
+            finally:
+                db.close()
+        except (sqlite3.Error, ValueError) as exc:
+            raise HoldJob('history_queue_unavailable') from exc
+    return found
 
 
 def track_identity(path, identities):
@@ -195,6 +214,8 @@ class NasInboxPipeline(HubPipeline):
         return self.archive(job) / 'source' / data['primary_name']
 
     def check(self, job):
+        if getattr(self, 'stop_requested', None) is not None and self.stop_requested.is_set():
+            raise HoldJob('service_stop_requested')
         self.guard()
         data, _ = self.source(job)
         path = pathlib.Path(self.config['heavy_root']) / '_801-claims' / (hashlib.sha256(data['submission'].encode()).hexdigest() + '.json')
@@ -235,6 +256,7 @@ class NasInboxPipeline(HubPipeline):
             # The worker's Zoom branch uses imported turns and does not invoke
             # pyannote even though this mode enables speaker assignment.
             cfg['speaker_mode'] = 'diarize'
+            cfg['zoom_vtt_required'] = True
         path = directory / 'worker-snapshot.json'
         if path.exists() and json.loads(path.read_bytes()) != cfg:
             raise HoldJob('worker_snapshot_changed')
@@ -256,6 +278,9 @@ class NasInboxPipeline(HubPipeline):
         vp = metadata.get('voiceprint') or {}
         if vp.get('mode') != 'off' or vp.get('enabled') is not False or metadata.get('profile_updates'):
             raise HoldJob('unexpected_voiceprint_updates')
+        data, _ = self.source(job)
+        if data.get('input_mode') == 'zoom_vtt' and (metadata.get('speaker_turns') or {}).get('source') != 'zoom_vtt':
+            raise HoldJob('zoom_turns_not_used')
 
     def asr(self, job, directory, check):
         """Run per-track ASR and merge it; mixed/Zoom retain the inherited worker."""
@@ -319,6 +344,8 @@ class NasInboxPipeline(HubPipeline):
         root = self.source_root(data)
         if inventory(root) != data['files']:
             raise HoldJob('nas_input_changed')
+        if self.config.get('safe_continuous_intake') and data.get('input_mode') == 'participant_tracks':
+            raise HoldJob('participant_alignment_and_coverage_required')
         selected = [data['primary_name'], *data.get('sidecars', []), *data.get('tracks', [])]
         selected = list(dict.fromkeys(selected))
         chosen = [next(x for x in data['files'] if x['path'] == path) for path in selected]
@@ -396,6 +423,7 @@ class NasInboxPipeline(HubPipeline):
     def discover(self, queue):
         self.guard()
         report = {'candidates': 0, 'held': []}
+        history = historical_jobs(self.config.get('history_queues', []))
         inbox = no_links(pathlib.Path(self.config['inbox_root']))
         for project in sorted(inbox.iterdir()):
             if not project.is_dir() or not PID.fullmatch(project.name) or project.name == 'Gelya-Asr':
@@ -422,6 +450,28 @@ class NasInboxPipeline(HubPipeline):
                         if any(json.loads(x['payload'])['revision'] != revision for x in old):
                             raise HoldJob('previous_submission_changed')
                         continue
+                    for previous in history:
+                        if previous.get('submission') == submission or any(
+                                x.get('sha256') == checksum for x in previous.get('files', [])):
+                            raise HoldJob('historical_submission_requires_reconciliation')
+                        source = previous.get('source') or {}
+                        primary_size = next(x['size'] for x in files if x['path'] == primary)
+                        if source.get('md5') and source.get('size') == primary_size:
+                            with (folder / primary).open('rb') as stream:
+                                if hashlib.file_digest(stream, 'md5').hexdigest() == source['md5']:
+                                    raise HoldJob('historical_hub_source_requires_reconciliation')
+                    claim = pathlib.Path(self.config['heavy_root']) / '_801-claims' / (hashlib.sha256(submission.encode()).hexdigest() + '.json')
+                    if claim.exists():
+                        raise HoldJob('existing_source_claim_requires_reconciliation')
+                    if self.config.get('safe_continuous_intake'):
+                        if plan['mode'] == 'participant_tracks':
+                            raise HoldJob('participant_alignment_and_coverage_required')
+                        if plan['mode'] == 'zoom_vtt':
+                            from zoom_vtt_import import parse_zoom_vtt
+                            try:
+                                parse_zoom_vtt(folder / plan['sidecars'][0])
+                            except (ValueError, RuntimeError) as exc:
+                                raise HoldJob('invalid_zoom_vtt') from exc
                     for previous in queue.db.execute('select payload from pipeline_jobs'):
                         old_data = json.loads(previous['payload'])
                         old_primary = old_data.get('primary_name')
@@ -467,6 +517,7 @@ def run(config, *, scan_only=False):
         finally:
             queue.close()
         stop, errors = threading.Event(), []
+        pipeline.stop_requested = stop
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, lambda *args: stop.set())
         class Publisher:

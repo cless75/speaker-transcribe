@@ -8,6 +8,16 @@
 from __future__ import annotations
 
 import media_transcribe as mt
+import pytest
+
+
+def test_required_zoom_turns_never_fall_back_to_diarization(tmp_path, monkeypatch):
+    def invalid(*args): raise ValueError('invalid Zoom input')
+    def forbidden(*args): raise AssertionError('pyannote must not run')
+    monkeypatch.setattr(mt,'parse_zoom_vtt_turns',invalid)
+    monkeypatch.setattr(mt,'run_diarization',forbidden)
+    with pytest.raises(RuntimeError,match='required_zoom_vtt_parse_failed'):
+        mt.resolve_speaker_turns('audio.wav',{'zoom_vtt_path':'bad.vtt','zoom_vtt_required':True},tmp_path)
 
 
 PROMPT = "Обсуждение: альфа, бета, гамма, дельта."

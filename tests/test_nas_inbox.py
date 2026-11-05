@@ -18,7 +18,7 @@ def setup(tmp_path):
     (source / 'video.mp4').write_bytes(b'video')
     participants = source / 'Audio Record'
     participants.mkdir()
-    (participants / 'person.m4a').write_bytes(b'participant')
+    (participants / 'notes.txt').write_bytes(b'participant notes')
     cfg = {'heavy_root': str(heavy), 'inbox_root': str(heavy/'_inbox'),
            'mountpoint': str(tmp_path), 'test_local_filesystem': True,
            'maximum_job':20*1024**3, 'settle_seconds':0}
@@ -117,8 +117,67 @@ def test_multiple_participant_tracks_skip_mixed_diarization():
     assert plan['tracks'] == ['Audio Record/a.m4a', 'Audio Record/b.m4a']
 
 
+def test_single_participant_track_never_silently_uses_mixed():
+    assert select_input_plan([{'path':'audio.m4a'}, {'path':'Audio Record/a.m4a'}])['mode'] == 'participant_tracks'
+
+
+def test_safe_service_holds_unverified_participant_export_before_enqueue(tmp_path):
+    source,p,r,calls=setup(tmp_path)
+    (source/'Audio Record'/'person.m4a').write_bytes(b'participant')
+    p.config['safe_continuous_intake']=True
+    try:
+        report=p.discover(r.queue)
+        assert report['candidates']==0
+        assert report['held'][0]['reason']=='participant_alignment_and_coverage_required'
+        assert not calls
+    finally:r.close()
+
+
+def test_safe_service_rejects_invalid_vtt_before_enqueue(tmp_path):
+    source,p,r,calls=setup(tmp_path)
+    (source/'recording.vtt').write_text('not a named Zoom transcript')
+    p.config['safe_continuous_intake']=True
+    try:
+        report=p.discover(r.queue)
+        assert report['candidates']==0
+        assert report['held'][0]['reason']=='invalid_zoom_vtt'
+    finally:r.close()
+
+
+def test_historical_job_blocks_same_source_in_new_state(tmp_path):
+    source,p,r,calls=setup(tmp_path)
+    try:
+        p.discover(r.queue)
+        other=PipelineQueue(tmp_path/'fresh.db')
+        try:
+            p.config['history_queues']=[str(tmp_path/'queue.db')]
+            report=p.discover(other)
+            assert report['candidates']==0
+            assert report['held'][0]['reason']=='historical_submission_requires_reconciliation'
+        finally:other.close()
+    finally:r.close()
+
+
+def test_missing_history_queue_fails_closed(tmp_path):
+    source,p,r,calls=setup(tmp_path)
+    p.config['history_queues']=[str(tmp_path/'missing.db')]
+    try:
+        with pytest.raises(HoldJob,match='history_queue_missing'):p.discover(r.queue)
+    finally:r.close()
+
+
+def test_service_stop_fences_worker_checks(tmp_path):
+    import threading
+    source,p,r,calls=setup(tmp_path)
+    p.stop_requested=threading.Event();p.stop_requested.set()
+    try:
+        with pytest.raises(HoldJob,match='service_stop_requested'):p.check({})
+    finally:r.close()
+
+
 def test_tracks_need_explicit_identity_and_voiceprint_consent(tmp_path):
     source,p,r,_=setup(tmp_path)
+    (source/'Audio Record'/'person.m4a').write_bytes(b'participant one')
     (source/'Audio Record'/'person-two.m4a').write_bytes(b'participant two')
     try:
         p.discover(r.queue)
@@ -130,6 +189,7 @@ def test_tracks_need_explicit_identity_and_voiceprint_consent(tmp_path):
 
 def test_participant_tracks_are_transcribed_and_merged_without_diarization(tmp_path):
     source,p,r,calls=setup(tmp_path)
+    (source/'Audio Record'/'person.m4a').write_bytes(b'participant one')
     second = source/'Audio Record'/'person-two.m4a'
     second.write_bytes(b'participant two')
     p.config['track_identities'] = {
