@@ -18,7 +18,7 @@ class LockError(RuntimeError):
 def exclusive_lock(lock_path: pathlib.Path, *, nonblocking: bool = False) -> Iterator[None]:
     """Acquire exclusive lock with profile-appropriate implementation."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     if is_linux_current() or os.name == "posix":
         try:
             import fcntl
@@ -37,7 +37,7 @@ def exclusive_lock(lock_path: pathlib.Path, *, nonblocking: bool = False) -> Ite
             return
         except ImportError:
             pass
-    
+
     if is_windows_legacy() or os.name == "nt":
         try:
             import msvcrt

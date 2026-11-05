@@ -41,7 +41,7 @@ def get_service_status(unit: str) -> str:
     if os.name != "posix":
         return "not-applicable"
     try:
-        result = subprocess.run(["systemctl", "is-active", unit], 
+        result = subprocess.run(["systemctl", "is-active", unit],
                               capture_output=True, text=True, check=False)
         return result.stdout.strip() or "unknown"
     except (OSError, FileNotFoundError):
