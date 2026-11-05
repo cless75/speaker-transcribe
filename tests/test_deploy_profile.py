@@ -5,6 +5,14 @@ from deploy_profile.lock import LockError, exclusive_lock
 import hub_worker
 
 
+@pytest.fixture(autouse=True)
+def isolated_profile_cache():
+    previous = profile._cached_profile
+    profile._cached_profile = None
+    yield
+    profile._cached_profile = previous
+
+
 def reset_profile(monkeypatch):
     monkeypatch.setattr(profile, "_cached_profile", None)
 
