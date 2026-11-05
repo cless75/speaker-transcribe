@@ -151,6 +151,47 @@ def sec_to_vtt(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}"
 
 
+def merge_tracks(tracks: list[tuple[str, pathlib.Path]], out_dir: pathlib.Path, base: str,
+                 *, title: str | None = None, keep_hallucinations=False) -> dict:
+    """Create one attributed timeline from already transcribed participant tracks."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    merged, track_meta = [], []
+    for speaker_idx, (speaker, src) in enumerate(tracks, start=1):
+        segments = load_segments(src)
+        clean, stats = (segments, {"input": len(segments), "kept": len(segments)}) if keep_hallucinations else filter_track_segments(segments)
+        for seg in clean:
+            merged.append({"start": seg["start"], "end": seg["end"], "text": seg.get("text", "").strip(),
+                           "speaker": speaker, "speaker_id": f"Speaker {speaker_idx}",
+                           "speaker_name": speaker, "speaker_source": "track", "track_file": src.name})
+        track_meta.append({"speaker": speaker, "source": str(src), "stats": stats})
+    if not merged:
+        raise ValueError("no_segments_after_track_filter")
+    merged.sort(key=lambda s: (s["start"], s["end"]))
+    jsonl_path = out_dir / f"{base}-merged-segments.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as fh:
+        for seg in merged: fh.write(json.dumps(seg, ensure_ascii=False) + "\n")
+    md_lines = [f"# {title or base}", "", f"> Источник: multi-track ASR ({len(tracks)} трека, атрибуция по дорожкам — без диаризации).", "", "---"]
+    last_speaker = None
+    for seg in merged:
+        if seg["speaker"] != last_speaker:
+            md_lines.extend(["", f"### {sec_to_hms(seg['start'])} — {seg['speaker']}", ""])
+            last_speaker = seg["speaker"]
+        md_lines.append(seg["text"])
+    md_path = out_dir / f"{base}-transcript.md"
+    md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    vtt_path = out_dir / f"{base}-segments.vtt"
+    vtt = ["WEBVTT", ""]
+    for i, seg in enumerate(merged, start=1):
+        vtt.extend([str(i), f"{sec_to_vtt(seg['start'])} --> {sec_to_vtt(seg['end'])}", f"<v {seg['speaker']}>{seg['text']}</v>", ""])
+    vtt_path.write_text("\n".join(vtt), encoding="utf-8")
+    meta = {"schema": "merge-speaker-tracks-v1", "mode": "multi_track_merge", "tracks": track_meta,
+            "segments_total": len(merged), "hallucination_filter": not keep_hallucinations,
+            "outputs": {"merged_segments_jsonl": str(jsonl_path), "transcript_md": str(md_path), "segments_vtt": str(vtt_path)}}
+    meta_path = out_dir / f"{base}-run-meta.json"
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**meta, "run_meta": str(meta_path)}
+
+
 def main() -> int:
     configure_stdio_utf8()
     parser = argparse.ArgumentParser(
@@ -179,88 +220,12 @@ def main() -> int:
             parser.error(f"--track expects NAME=PATH, got: {spec!r}")
         tracks.append((name.strip(), pathlib.Path(raw_path.strip()).expanduser().resolve()))
 
-    merged: list[dict] = []
-    track_meta = []
-    for speaker_idx, (speaker, src) in enumerate(tracks, start=1):
-        segments = load_segments(src)
-        if args.keep_hallucinations:
-            clean, stats = segments, {"input": len(segments), "kept": len(segments)}
-        else:
-            clean, stats = filter_track_segments(segments)
-        for seg in clean:
-            merged.append({
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": seg.get("text", "").strip(),
-                "speaker": speaker,
-                "speaker_id": f"Speaker {speaker_idx}",
-                "speaker_name": speaker,
-                "speaker_source": "track",
-                "track_file": src.name,
-            })
-        track_meta.append({"speaker": speaker, "source": str(src), "stats": stats})
-        print(f"[merge-speaker-tracks] track '{speaker}': {stats}")
-
-    if not merged:
-        print("[merge-speaker-tracks] no segments after filtering", file=sys.stderr)
+    try:
+        run_meta = merge_tracks(tracks, out_dir, args.base_name, title=args.title,
+                                keep_hallucinations=args.keep_hallucinations)
+    except ValueError as exc:
+        print(f"[merge-speaker-tracks] {exc}", file=sys.stderr)
         return 2
-
-    merged.sort(key=lambda s: (s["start"], s["end"]))
-    base = args.base_name
-
-    jsonl_path = out_dir / f"{base}-merged-segments.jsonl"
-    with jsonl_path.open("w", encoding="utf-8") as fh:
-        for seg in merged:
-            fh.write(json.dumps(seg, ensure_ascii=False) + "\n")
-
-    title = args.title or base
-    duration_min = int(merged[-1]["end"] / 60)
-    speakers = ", ".join(name for name, _ in tracks)
-    md_lines = [
-        f"# {title}",
-        "",
-        f"> Источник: multi-track ASR ({len(tracks)} трека, атрибуция по дорожкам — без диаризации).",
-        f"> Длительность: ~{duration_min} мин. Сегментов: {len(merged)}. Спикеры: {speakers}.",
-        "",
-        "---",
-    ]
-    last_speaker = None
-    for seg in merged:
-        if seg["speaker"] != last_speaker:
-            md_lines.append("")
-            md_lines.append(f"### {sec_to_hms(seg['start'])} — {seg['speaker']}")
-            md_lines.append("")
-            last_speaker = seg["speaker"]
-        md_lines.append(seg["text"])
-    md_path = out_dir / f"{base}-transcript.md"
-    md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
-
-    vtt_lines = ["WEBVTT", ""]
-    for i, seg in enumerate(merged, start=1):
-        vtt_lines.append(str(i))
-        vtt_lines.append(f"{sec_to_vtt(seg['start'])} --> {sec_to_vtt(seg['end'])}")
-        vtt_lines.append(f"<v {seg['speaker']}>{seg['text']}</v>")
-        vtt_lines.append("")
-    vtt_path = out_dir / f"{base}-segments.vtt"
-    vtt_path.write_text("\n".join(vtt_lines), encoding="utf-8")
-
-    run_meta = {
-        "schema": "merge-speaker-tracks-v1",
-        "mode": "multi_track_merge",
-        "tracks": track_meta,
-        "segments_total": len(merged),
-        "hallucination_filter": not args.keep_hallucinations,
-        "outputs": {
-            "merged_segments_jsonl": str(jsonl_path),
-            "transcript_md": str(md_path),
-            "segments_vtt": str(vtt_path),
-        },
-    }
-    meta_path = out_dir / f"{base}-run-meta.json"
-    meta_path.write_text(
-        json.dumps(run_meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
     print(json.dumps(run_meta, ensure_ascii=False, indent=2))
     return 0
 

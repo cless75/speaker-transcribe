@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from nas_inbox import NasInboxPipeline, inventory, select_primary
+from nas_inbox import NasInboxPipeline, inventory, select_input_plan, select_primary
 from pipeline_queue import PipelineQueue
 from pipeline_runtime import HoldJob, StageRunner
 from pipeline_storage import ReceiptStore, required_destinations, EvidenceError
@@ -70,6 +70,57 @@ def test_prior_results_hold_whole_meeting(tmp_path):
 def test_no_multiple_audio_jobs(tmp_path):
     with pytest.raises(HoldJob,match='ambiguous'):
         select_primary([{'path':'a.m4a'},{'path':'b.m4a'}])
+
+
+def test_vtt_has_priority_over_tracks_and_mixed_audio():
+    files = [{'path':'audio.m4a'}, {'path':'Audio Record/a.m4a'}, {'path':'Audio Record/b.m4a'}, {'path':'recording.transcript.vtt'}]
+    plan = select_input_plan(files)
+    assert plan['mode'] == 'zoom_vtt' and plan['sidecars'] == ['recording.transcript.vtt']
+
+
+def test_multiple_participant_tracks_skip_mixed_diarization():
+    plan = select_input_plan([{'path':'audio.m4a'}, {'path':'Audio Record/a.m4a'}, {'path':'Audio Record/b.m4a'}])
+    assert plan['mode'] == 'participant_tracks'
+    assert plan['tracks'] == ['Audio Record/a.m4a', 'Audio Record/b.m4a']
+
+
+def test_tracks_need_explicit_identity_and_voiceprint_consent(tmp_path):
+    source,p,r,_=setup(tmp_path)
+    (source/'Audio Record'/'person-two.m4a').write_bytes(b'participant two')
+    try:
+        p.discover(r.queue)
+        assert r.tick('discovered') == 'finished'
+        assert r.tick('ready') == 'held'
+        assert r.queue.db.execute('select reason from pipeline_jobs').fetchone()[0] == 'participant_track_identity_required'
+    finally:r.close()
+
+
+def test_participant_tracks_are_transcribed_and_merged_without_diarization(tmp_path):
+    source,p,r,calls=setup(tmp_path)
+    second = source/'Audio Record'/'person-two.m4a'
+    second.write_bytes(b'participant two')
+    p.config['track_identities'] = {
+        'Audio Record/person.m4a': {'display_name':'Alice', 'voiceprint_consent':True},
+        'Audio Record/person-two.m4a': {'display_name':'Bob', 'voiceprint_consent':True},
+    }
+    def track_executor(audio, output, cfg, config_path, project):
+        calls.append((audio.name, cfg['speaker_mode'], cfg['voiceprint_mode'], cfg['voiceprint_enroll_name']))
+        output.mkdir(parents=True, exist_ok=True)
+        base=audio.stem
+        transcript=output/(base+'-transcript.md'); transcript.write_text('words')
+        (output/(base+'-segments.jsonl')).write_text(json.dumps({'start':0,'end':1,'text':audio.stem})+'\n')
+        return transcript, {'status':'ok','voiceprint':{'enabled':True,'mode':'enroll'}}
+    p.executor=track_executor
+    try:
+        p.discover(r.queue)
+        job=r.queue.get(r.queue.db.execute('select id from pipeline_jobs').fetchone()[0])
+        assert r.tick('discovered') == r.tick('ready') == 'finished'
+        assert sorted(calls) == [('person-two.m4a','off','enroll','Bob'), ('person.m4a','off','enroll','Alice')]
+        merged=(p.store.directory(job['id'])/'result/transcripts/session-transcript.md').read_text(encoding='utf8')
+        assert 'Alice' in merged and 'Bob' in merged and 'без диаризации' in merged
+        enrollment=json.loads((p.store.directory(job['id'])/'result/transcripts/Speakers/voiceprint-enrollment.json').read_text(encoding='utf8'))
+        assert sorted(x['display_name'] for x in enrollment['profiles']) == ['Alice','Bob']
+    finally:r.close()
 
 
 def test_input_change_never_stages(tmp_path):

@@ -8,6 +8,8 @@ evidence or ambiguous compositions are held for operator reconciliation.
 from __future__ import annotations
 
 import argparse
+import copy
+import contextlib
 import hashlib
 import json
 import math
@@ -26,8 +28,10 @@ from types import SimpleNamespace
 from hub_pipeline import implementation
 from nas_pilot import pilot_profile
 from pipeline_budget import DiskBudget
+import hub_worker as hub
+from merge_speaker_tracks import merge_tracks
 from pipeline_hub_adapter import HubPipeline, duration_seconds
-from pipeline_process import gpu_idle
+from pipeline_process import AsrProcess, gpu_idle
 from pipeline_queue import PipelineQueue
 from pipeline_runtime import HoldJob, StageRunner
 from pipeline_storage import (EvidenceError, ReceiptStore, atomic_json, canonical,
@@ -77,6 +81,32 @@ def select_primary(files):
     if not audio and len(video) == 1:
         return video[0]
     raise HoldJob('ambiguous_or_missing_primary')
+
+
+def select_input_plan(files):
+    """Prefer named Zoom turns, then participant tracks, then mixed audio."""
+    primary = select_primary(files)
+    vtts = [x['path'] for x in files if pathlib.PurePosixPath(x['path']).suffix.lower() == '.vtt']
+    tracks = [x['path'] for x in files if pathlib.PurePosixPath(x['path']).parts[:1] == ('Audio Record',)
+              and pathlib.PurePosixPath(x['path']).suffix.lower() in AUDIO]
+    if len(vtts) == 1:
+        return {'mode': 'zoom_vtt', 'primary_name': primary, 'sidecars': vtts, 'tracks': []}
+    if len(vtts) > 1:
+        raise HoldJob('ambiguous_zoom_vtt')
+    # A single participant file is not a meeting-level multi-track export.
+    if len(tracks) >= 2:
+        return {'mode': 'participant_tracks', 'primary_name': primary, 'sidecars': [], 'tracks': sorted(tracks)}
+    return {'mode': 'mixed_diarization', 'primary_name': primary, 'sidecars': [], 'tracks': []}
+
+
+def track_identity(path, identities):
+    """Explicit identity only: a filename is never proof of a person identity."""
+    value = (identities or {}).get(path)
+    if not isinstance(value, dict) or not isinstance(value.get('display_name'), str) or not value['display_name'].strip():
+        raise HoldJob('participant_track_identity_required')
+    if value.get('voiceprint_consent') is not True:
+        raise HoldJob('participant_voiceprint_consent_required')
+    return value
 
 
 def copy_verified(source, target, expected, check):
@@ -133,7 +163,7 @@ class NasInboxPipeline(HubPipeline):
         if json.loads(job['identity']) != expected:
             raise EvidenceError('nas_inbox_identity_changed')
         primary = data['primary_name']
-        if pathlib.PurePosixPath(primary).name != primary:
+        if pathlib.PurePosixPath(primary).is_absolute() or '..' in pathlib.PurePosixPath(primary).parts:
             raise EvidenceError('invalid_primary_name')
         item = next(x for x in data['files'] if x['path'] == primary)
         return data, SimpleNamespace(project=project, path=primary, size=item['size'])
@@ -188,9 +218,26 @@ class NasInboxPipeline(HubPipeline):
         cfg = dict(self.cfg)
         cfg['work_root'] = str(directory / 'work' / 'engine')
         cfg['session_artifact_dir'] = str(directory / 'work' / 'transcripts')
+        data, _ = self.source(job)
+        if data.get('input_mode') == 'zoom_vtt':
+            cfg['zoom_vtt_path'] = str(directory / 'input' / data['sidecars'][0])
+            # The worker's Zoom branch uses imported turns and does not invoke
+            # pyannote even though this mode enables speaker assignment.
+            cfg['speaker_mode'] = 'diarize'
         path = directory / 'worker-snapshot.json'
         if path.exists() and json.loads(path.read_bytes()) != cfg:
             raise HoldJob('worker_snapshot_changed')
+        atomic_json(path, cfg)
+        return cfg, path
+
+    def _track_config(self, job, directory, track, identity):
+        cfg, _ = self.worker_config(job, directory)
+        cfg = copy.deepcopy(cfg)
+        cfg.update(speaker_mode='off', voiceprint_mode='enroll',
+                   voiceprint_enroll_name=identity['display_name'],
+                   machine_local_voiceprint_store_path=str(directory / 'work' / 'Speakers' / 'voiceprints.json'),
+                   session_artifact_dir=str(directory / 'work' / 'transcripts' / 'tracks' / hashlib.sha256(track.encode()).hexdigest()[:16]))
+        path = directory / 'work' / 'track-configs' / (hashlib.sha256(track.encode()).hexdigest()[:16] + '.json')
         atomic_json(path, cfg)
         return cfg, path
 
@@ -199,17 +246,73 @@ class NasInboxPipeline(HubPipeline):
         if vp.get('mode') != 'off' or vp.get('enabled') is not False or metadata.get('profile_updates'):
             raise HoldJob('unexpected_voiceprint_updates')
 
+    def asr(self, job, directory, check):
+        """Run per-track ASR and merge it; mixed/Zoom retain the inherited worker."""
+        data, _ = self.source(job)
+        if data.get('input_mode') != 'participant_tracks':
+            return super().asr(job, directory, check)
+        self.check(job); check(); self.gpu_check()
+        completion = directory / 'engine-completion.json'
+        if completion.exists():
+            value = json.loads(completion.read_bytes())
+            if value.get('binding') != self.store.binding(job):
+                raise EvidenceError('engine_completion_changed')
+            return self.snapshot_result(job, directory, value, check)
+        output = no_links(directory / 'work' / 'transcripts')
+        output.mkdir(parents=True, exist_ok=True)
+        tracks, profiles = [], []
+        for track in data['tracks']:
+            check(); self.check(job)
+            identity = track_identity(track, self.config.get('track_identities'))
+            local = directory / 'input' / track
+            target = output / 'tracks' / hashlib.sha256(track.encode()).hexdigest()[:16]
+            target.mkdir(parents=True, exist_ok=True)
+            cfg, config_path = self._track_config(job, directory, track, identity)
+            if self.executor is None:
+                control = AsrProcess(directory, check=check, ownership_check=lambda: self.check(job))
+                with (directory / 'private-asr.log').open('a', encoding='utf8') as log, contextlib.redirect_stderr(log):
+                    ok, _, transcript, meta = hub.watcher.run_asr(local, cfg, data['project'], local.parent, target, config_path, process_control=control)
+                if not ok: raise HoldJob('track_asr_did_not_complete')
+            else:
+                transcript, meta = self.executor(local, target, cfg, config_path, data['project'])
+            if transcript is None or not transcript.is_file() or transcript.stat().st_size == 0:
+                raise HoldJob('incomplete_track_asr_result')
+            segments = next(iter(target.glob('*-segments.jsonl')), None)
+            if segments is None:
+                raise HoldJob('track_segments_missing')
+            tracks.append((identity['display_name'], segments))
+            profiles.append({'track': track, 'display_name': identity['display_name'], 'voiceprint': meta.get('voiceprint', {}) if isinstance(meta, dict) else {}})
+        merged = merge_tracks(tracks, output, 'session', title='Session transcript')
+        (output / 'Speakers').mkdir(exist_ok=True)
+        atomic_json(output / 'Speakers' / 'voiceprint-enrollment.json', {'mode': 'participant_tracks', 'profiles': profiles})
+        run_meta = pathlib.Path(merged['run_meta'])
+        # The common receipt path requires a result manifest; the merger is its own engine.
+        atomic_json(output / 'session-run-meta.json', {'status': 'ok', 'mode': 'participant_tracks',
+                    'diarization': {'enabled': False, 'reason': 'participant_tracks'}, 'voiceprint': {'enabled': True, 'mode': 'enroll'},
+                    'outputs': {'md': merged['outputs']['transcript_md'], 'vtt': merged['outputs']['segments_vtt'],
+                                'segments_jsonl': merged['outputs']['merged_segments_jsonl'], 'run_meta': str(run_meta)}})
+        inventory = self.store.inventory(job['id'], 'work/transcripts')
+        value = {'schema': 1, 'binding': self.store.binding(job), 'files': inventory,
+                 'metadata': {'quality': 'ok', 'review': 'needs_review', 'transcript_quality': {},
+                              'transcript': 'transcripts/' + pathlib.Path(merged['outputs']['transcript_md']).name, **self.route(job)}}
+        atomic_json(completion, value)
+        return self.snapshot_result(job, directory, value, check)
+
     def stage(self, job, directory, check):
         self.acquire(job)
         data, _ = self.source(job)
         root = self.source_root(data)
         if inventory(root) != data['files']:
             raise HoldJob('nas_input_changed')
-        primary = next(x for x in data['files'] if x['path'] == data['primary_name'])
-        local = directory / 'input' / data['primary_name']
-        copy_verified(root / data['primary_name'], local, primary, check)
-        duration = self.probe(local)
-        estimate = 2 * primary['size'] + math.ceil(duration * 256000) + math.ceil(duration / 60) * 8 * 1024**2 + 1024**3
+        selected = [data['primary_name'], *data.get('sidecars', []), *data.get('tracks', [])]
+        selected = list(dict.fromkeys(selected))
+        chosen = [next(x for x in data['files'] if x['path'] == path) for path in selected]
+        for item in chosen:
+            copy_verified(root / item['path'], directory / 'input' / item['path'], item, check)
+        durations = [self.probe(directory / 'input' / item['path']) for item in chosen
+                     if pathlib.PurePosixPath(item['path']).suffix.lower() in AUDIO | VIDEO]
+        duration = max(durations, default=0)
+        estimate = sum(2 * item['size'] for item in chosen) + math.ceil(duration * 256000) + math.ceil(duration / 60) * 8 * 1024**2 + 1024**3
         if estimate > self.maximum_job:
             raise HoldJob('media_expansion_exceeds_job_budget')
         if inventory(root) != data['files']:
@@ -293,7 +396,8 @@ class NasInboxPipeline(HubPipeline):
                     if not files or any(time.time() - p.stat().st_mtime < self.config.get('settle_seconds', 300)
                                         for p in folder.rglob('*') if p.is_file()):
                         raise HoldJob('input_not_stable')
-                    primary = select_primary(files)
+                    plan = select_input_plan(files)
+                    primary = plan['primary_name']
                     checksum = next(x['sha256'] for x in files if x['path'] == primary)
                     revision = hashlib.sha256(canonical(files)).hexdigest()
                     submission = 'nas-inbox:' + relative
@@ -309,7 +413,8 @@ class NasInboxPipeline(HubPipeline):
                         if any(x['path'] == old_primary and x['sha256'] == checksum for x in old_data.get('files', [])):
                             raise HoldJob('duplicate_primary_requires_reconciliation')
                     data = {'adapter': 'nas-inbox-v1', 'delivery_policy': 'nas-only', 'project': project.name,
-                            'relative': relative, 'primary_name': primary, 'files': files,
+                            'relative': relative, 'primary_name': primary, 'input_mode': plan['mode'],
+                            'sidecars': plan['sidecars'], 'tracks': plan['tracks'], 'files': files,
                             'submission': submission, 'revision': revision}
                     queue.enqueue(submission, revision, self.profile, self.engine, data)
                     report['candidates'] += 1
