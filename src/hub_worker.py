@@ -29,6 +29,9 @@ from hub_intake import (Drive, DriveError, DrivePermanent, DriveRateLimited,
                         DriveTransient, MediaFile, MEDIA, media_inventory,
                         partition_entries, projects, publish_page, safe_parts,
                         scannable, snapshot, stage)
+from deploy_profile.lock import exclusive_lock, LockError
+from deploy_profile.profile import is_linux_current, is_windows_legacy
+from deploy_profile.services import is_service_active
 from zoom_vtt_import import import_zoom_vtt
 
 ZOOM_TIMESTAMP = re.compile(r"(?:GMT)?(\d{8}[-_]\d{6})")
@@ -69,31 +72,43 @@ def worker_config(cfg: dict) -> dict:
 
 @contextlib.contextmanager
 def single_worker(root: pathlib.Path):
-    """No two local canaries can publish the same result concurrently (Linux)."""
-    if os.name != "posix":
-        raise RuntimeError("worker requires a POSIX host with flock")
-    import fcntl
-
+    """No two local canaries can publish the same result concurrently."""
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
-    with (root / ".worker.lock").open("w") as stream:
+    try:
+        os.chmod(root, 0o700)
+    except OSError:
+        pass
+
+    if is_windows_legacy():
+        # Best-effort locking for Windows legacy setup
         try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            with exclusive_lock(root / ".worker.lock", nonblocking=True):
+                yield
+            return
+        except LockError as exc:
             raise RuntimeError("another Hub worker is active on this node") from exc
+
+    if is_linux_current() or os.name == "posix":
         try:
-            yield
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+            with exclusive_lock(root / ".worker.lock", nonblocking=True):
+                yield
+            return
+        except LockError as exc:
+            raise RuntimeError("another Hub worker is active on this node") from exc
+
+    raise RuntimeError("worker requires file locking support")
 
 
 def legacy_inactive() -> None:
     """No project prefix bypasses this gate: the old watcher scans _test* too."""
-    if os.name != "posix":
+    if is_windows_legacy():
+        return
+    if not is_linux_current() and os.name != "posix":
         raise RuntimeError("cannot prove the old watcher is off on this host")
+    if not is_linux_current():
+        return
     for unit in ("speaker-transcribe-watch.timer", "speaker-transcribe-watch.service"):
-        result = subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False)
-        if result.returncode == 0:
+        if is_service_active(unit):
             raise RuntimeError(f"legacy consumer still active: {unit}")
 
 
