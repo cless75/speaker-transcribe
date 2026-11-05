@@ -284,6 +284,10 @@ class NasInboxPipeline(HubPipeline):
             profiles.append({'track': track, 'display_name': identity['display_name'], 'voiceprint': meta.get('voiceprint', {}) if isinstance(meta, dict) else {}})
         merged = merge_tracks(tracks, output, 'session', title='Session transcript')
         (output / 'Speakers').mkdir(exist_ok=True)
+        store = directory / 'work' / 'Speakers' / 'voiceprints.json'
+        if not store.is_file() or store.stat().st_size == 0:
+            raise HoldJob('voiceprint_enrollment_missing')
+        shutil.copyfile(store, output / 'Speakers' / 'voiceprints.json')
         atomic_json(output / 'Speakers' / 'voiceprint-enrollment.json', {'mode': 'participant_tracks', 'profiles': profiles})
         run_meta = pathlib.Path(merged['run_meta'])
         # The common receipt path requires a result manifest; the merger is its own engine.

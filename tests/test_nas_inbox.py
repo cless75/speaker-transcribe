@@ -1,4 +1,5 @@
 import json
+import pathlib
 
 import pytest
 
@@ -109,6 +110,8 @@ def test_participant_tracks_are_transcribed_and_merged_without_diarization(tmp_p
         base=audio.stem
         transcript=output/(base+'-transcript.md'); transcript.write_text('words')
         (output/(base+'-segments.jsonl')).write_text(json.dumps({'start':0,'end':1,'text':audio.stem})+'\n')
+        store=pathlib.Path(cfg['machine_local_voiceprint_store_path']); store.parent.mkdir(parents=True,exist_ok=True)
+        store.write_text(json.dumps({'persons':[cfg['voiceprint_enroll_name']]}))
         return transcript, {'status':'ok','voiceprint':{'enabled':True,'mode':'enroll'}}
     p.executor=track_executor
     try:
@@ -120,6 +123,7 @@ def test_participant_tracks_are_transcribed_and_merged_without_diarization(tmp_p
         assert 'Alice' in merged and 'Bob' in merged and 'без диаризации' in merged
         enrollment=json.loads((p.store.directory(job['id'])/'result/transcripts/Speakers/voiceprint-enrollment.json').read_text(encoding='utf8'))
         assert sorted(x['display_name'] for x in enrollment['profiles']) == ['Alice','Bob']
+        assert (p.store.directory(job['id'])/'result/transcripts/Speakers/voiceprints.json').is_file()
     finally:r.close()
 
 
